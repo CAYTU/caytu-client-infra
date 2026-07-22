@@ -152,6 +152,30 @@ patches:
       - op: remove
         path: /spec/rules/0/http/paths/2
 
+  # Pin stateful workloads to the on-demand node group. Stateless deployments
+  # have no selector and land on the SPOT pool (or spill to on-demand if SPOT
+  # is drained). Terraform labels the pools with caytu.io/workload=stateful|stateless.
+  - target: { kind: StatefulSet, name: mongodb }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: StatefulSet, name: redis }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: StatefulSet, name: minio }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: Deployment, name: gstreamer-recorder }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+
   # Force KVS + IoT on the services that talk to messaging
   - target: { kind: Deployment, name: backend }
     patch: |-

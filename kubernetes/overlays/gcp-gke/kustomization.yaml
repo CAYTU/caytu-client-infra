@@ -79,6 +79,37 @@ patches:
         path: /metadata/annotations/networking.gke.io~1v1beta1.FrontendConfig
         value: caytu-frontend-config
 
+  # Pin stateful workloads to the on-demand node pool. Stateless deployments
+  # land on the Spot VM pool by default. Terraform labels the pools with
+  # caytu.io/workload=stateful|stateless.
+  - target: { kind: StatefulSet, name: mongodb }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: StatefulSet, name: redis }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: StatefulSet, name: minio }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  - target: { kind: Deployment, name: gstreamer-recorder }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+  # coturn is stateful in effect (UDP session state) but doesn't have a PVC.
+  # Keep it on the on-demand pool so a reclamation doesn't drop active TURN sessions.
+  - target: { kind: Deployment, name: coturn }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { "caytu.io/workload": "stateful" }
+
   # coturn: switch Service to LoadBalancer so GCP creates a public UDP LB
   # for TURN (unlike bare-metal, GKE has native UDP LB support).
   - target: { kind: Service, name: coturn }

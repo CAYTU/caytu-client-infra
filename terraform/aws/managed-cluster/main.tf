@@ -69,15 +69,47 @@ module "eks" {
     }
   }
 
+  # Two node groups:
+  #
+  #   stateful   → on-demand. Holds MongoDB/Redis/MinIO/gstreamer-recorder —
+  #                anything with an EBS PVC. Sudden termination = data-plane
+  #                impact, so we pay a bit more for lifecycle stability.
+  #
+  #   stateless  → SPOT. Holds backend/frontend/signaling/mqtt-streamer. ~70%
+  #                cheaper than on-demand. On reclamation kubernetes reschedules
+  #                the pod within seconds (PDB + topology spread already in
+  #                place from the perf pass). AWS gives a 2-minute warning.
+  #
+  # Kustomize aws-eks overlay adds nodeSelector: caytu.io/workload=stateful
+  # to the stateful workloads. Stateless deployments have no selector and land
+  # on whichever pool has room (typically SPOT since it's the bigger pool).
   eks_managed_node_groups = {
-    primary = {
-      instance_types = var.node_instance_types
-      capacity_type  = var.node_capacity_type
-      min_size       = var.node_min_size
-      desired_size   = var.node_desired_size
-      max_size       = var.node_max_size
+    stateful = {
+      instance_types = var.stateful_instance_types
+      capacity_type  = "ON_DEMAND"
+      min_size       = var.stateful_min_size
+      desired_size   = var.stateful_desired_size
+      max_size       = var.stateful_max_size
 
-      # Ensure the CSI driver can attach volumes
+      labels = { "caytu.io/workload" = "stateful" }
+
+      iam_role_additional_policies = {
+        AmazonEBSCSIDriverPolicy = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+      }
+    }
+
+    stateless = {
+      # Multiple types diversifies SPOT: AWS substitutes if one type is
+      # unavailable in your AZ. Keep them same-size or the HPA behavior gets
+      # unpredictable.
+      instance_types = var.stateless_instance_types
+      capacity_type  = "SPOT"
+      min_size       = var.stateless_min_size
+      desired_size   = var.stateless_desired_size
+      max_size       = var.stateless_max_size
+
+      labels = { "caytu.io/workload" = "stateless" }
+
       iam_role_additional_policies = {
         AmazonEBSCSIDriverPolicy = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
       }

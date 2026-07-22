@@ -48,33 +48,53 @@ variable "private_subnet_cidrs" {
 }
 
 # -----------------------------------------------------------------------------
-# Node groups
+# Node groups — split into stateful (on-demand, EBS-anchored workloads) and
+# stateless (SPOT, ~70% cheaper). See main.tf for the reasoning.
 # -----------------------------------------------------------------------------
-variable "node_instance_types" {
-  description = "Instance types for the primary managed node group"
+
+# --- Stateful pool (on-demand) ----------------------------------------------
+variable "stateful_instance_types" {
+  description = "Instance type(s) for the on-demand pool that hosts MongoDB/Redis/MinIO/gstreamer"
   type        = list(string)
-  default     = ["t3.medium"]
+  default     = ["m6i.large"]
 }
 
-variable "node_desired_size" {
+variable "stateful_min_size" {
   type    = number
   default = 2
 }
 
-variable "node_min_size" {
+variable "stateful_desired_size" {
   type    = number
   default = 2
 }
 
-variable "node_max_size" {
-  type    = number
-  default = 5
+variable "stateful_max_size" {
+  description = "Cap on stateful pool; usually small — data pods scale vertically, not horizontally"
+  type        = number
+  default     = 3
 }
 
-variable "node_capacity_type" {
-  description = "ON_DEMAND or SPOT"
-  type        = string
-  default     = "ON_DEMAND"
+# --- Stateless pool (SPOT) ---------------------------------------------------
+variable "stateless_instance_types" {
+  description = "Diversified type list for SPOT. Keep them same-size so HPA scaling is predictable."
+  type        = list(string)
+  default     = ["m6i.large", "m5.large", "m5a.large", "m5n.large"]
+}
+
+variable "stateless_min_size" {
+  type    = number
+  default = 2
+}
+
+variable "stateless_desired_size" {
+  type    = number
+  default = 3
+}
+
+variable "stateless_max_size" {
+  type    = number
+  default = 10
 }
 
 variable "operator_admin_arns" {

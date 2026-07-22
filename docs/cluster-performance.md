@@ -67,6 +67,32 @@ kubectl -n caytu-client describe ingress caytu-client   # shows the actual LB ad
 kubectl -n caytu-client get pdb
 ```
 
+## SPOT / preemptible savings — where they apply
+
+Both `aws-cluster` and `gcp-cluster` provision **two node pools**:
+
+| Pool | Instance type | Runs |
+|---|---|---|
+| **stateful** | on-demand | mongodb, redis, minio, gstreamer-recorder, coturn (GCP) |
+| **stateless** | SPOT (AWS) / Spot VMs (GCP) | backend, frontend, signaling-server, mqtt-streamer |
+
+Kustomize overlays add `nodeSelector: caytu.io/workload=stateful` to workloads whose data would be stranded by sudden node reclamation. Everything else runs on SPOT and gets rescheduled elsewhere within seconds if AWS or GCP reclaims the node.
+
+**What this actually saves you:**
+
+- **AWS SPOT**: ~70% off on-demand for m6i/m5-class instances. On a 5-node stateless pool that's ~$180/mo → ~$54/mo.
+- **GCP Spot VMs**: ~60-91% off on-demand. Same pool ~$150/mo → ~$15-60/mo. (Unlike preemptible, Spot VMs have no 24 h lifetime cap.)
+
+**Why the perf pass has to come first:**
+
+SPOT reclamation gives you a 2-minute warning. Everything that makes graceful eviction work — PDB, topology spread, HPA replacement, `preStop` sleep, rolling `maxUnavailable: 0` — is already in place. Without those, SPOT would take down your service every time AWS reclaimed a node. With them, users see nothing.
+
+**When to override:**
+
+- **Prod pilot / risk-averse**: set `stateless_use_spot = false` (GCP) or change `capacity_type = "ON_DEMAND"` in the stateless node group definition. Costs more, removes the SPOT variable while you build confidence.
+- **Bursty batch workload** wants Fargate-shape scale-to-zero: keep the current split; only that specific service gets a Fargate Profile added later.
+- **Multi-region**: two clusters, each with the same split. Same reasoning.
+
 ## When you need more
 
 The defaults cover 90% of production workloads for a single-region cluster. Reach for these when you hit their specific triggers:

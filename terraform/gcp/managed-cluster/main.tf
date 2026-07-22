@@ -103,16 +103,30 @@ resource "google_container_cluster" "this" {
   depends_on = [google_project_service.required]
 }
 
-resource "google_container_node_pool" "primary" {
-  name       = "primary"
-  location   = google_container_cluster.this.location
-  cluster    = google_container_cluster.this.name
+# Two node pools:
+#
+#   stateful   → on-demand. Hosts MongoDB/Redis/MinIO/gstreamer-recorder —
+#                anything with a PD-backed PVC. Node reclamation would strand
+#                the data plane, so we don't SPOT this pool.
+#
+#   stateless  → GCP Spot VMs (~60-91% cheaper than on-demand, no lifetime
+#                cap unlike preemptible). Hosts backend/frontend/signaling/
+#                mqtt-streamer. On reclamation, kubernetes reschedules the pod
+#                — PDB + topology spread from the perf pass handle it.
+#
+# Kustomize gcp-gke overlay adds nodeSelector: caytu.io/workload=stateful to
+# the stateful workloads. Stateless has no selector; lands where there's room.
 
-  initial_node_count = var.node_count
+resource "google_container_node_pool" "stateful" {
+  name     = "stateful"
+  location = google_container_cluster.this.location
+  cluster  = google_container_cluster.this.name
+
+  initial_node_count = var.stateful_node_count
 
   autoscaling {
-    min_node_count = var.node_min_count
-    max_node_count = var.node_max_count
+    min_node_count = var.stateful_min_count
+    max_node_count = var.stateful_max_count
   }
 
   management {
@@ -121,20 +135,65 @@ resource "google_container_node_pool" "primary" {
   }
 
   node_config {
-    machine_type = var.node_machine_type
+    machine_type = var.stateful_machine_type
     disk_size_gb = 50
     disk_type    = "pd-balanced"
-    preemptible  = var.node_preemptible
+    # NEVER SPOT/preemptible — data-plane pods live here
+    preemptible = false
+    spot        = false
 
     service_account = google_service_account.node.email
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
 
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
+    workload_metadata_config { mode = "GKE_METADATA" }
 
-    labels = { environment = var.environment }
-    tags   = ["${var.name_prefix}-${var.environment}"]
+    labels = {
+      environment          = var.environment
+      "caytu.io/workload"  = "stateful"
+    }
+    tags = ["${var.name_prefix}-${var.environment}"]
+  }
+
+  lifecycle {
+    ignore_changes = [initial_node_count]
+  }
+}
+
+resource "google_container_node_pool" "stateless" {
+  name     = "stateless"
+  location = google_container_cluster.this.location
+  cluster  = google_container_cluster.this.name
+
+  initial_node_count = var.stateless_node_count
+
+  autoscaling {
+    min_node_count = var.stateless_min_count
+    max_node_count = var.stateless_max_count
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    machine_type = var.stateless_machine_type
+    disk_size_gb = 50
+    disk_type    = "pd-balanced"
+
+    # Spot VMs — no 24h lifetime limit, ~60-91% off. Prefer over preemptible.
+    spot = var.stateless_use_spot
+
+    service_account = google_service_account.node.email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    workload_metadata_config { mode = "GKE_METADATA" }
+
+    labels = {
+      environment          = var.environment
+      "caytu.io/workload"  = "stateless"
+    }
+    tags = ["${var.name_prefix}-${var.environment}"]
   }
 
   lifecycle {

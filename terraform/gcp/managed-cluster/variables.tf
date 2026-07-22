@@ -38,30 +38,59 @@ variable "zone" {
   default     = "us-central1-a"
 }
 
-variable "node_machine_type" {
+# -----------------------------------------------------------------------------
+# Node pools — split into stateful (on-demand) and stateless (Spot VMs).
+# See main.tf for the reasoning.
+# -----------------------------------------------------------------------------
+
+# --- Stateful pool (on-demand) ----------------------------------------------
+variable "stateful_machine_type" {
   type    = string
-  default = "e2-standard-2"
+  default = "e2-standard-4"    # bigger — MongoDB/MinIO benefit from headroom
 }
 
-variable "node_count" {
+variable "stateful_node_count" {
   description = "Nodes per zone (multiplied by zone count for regional clusters)"
+  type        = number
+  default     = 2
+}
+
+variable "stateful_min_count" {
+  type    = number
+  default = 2
+}
+
+variable "stateful_max_count" {
+  description = "Small cap — data pods scale vertically, not horizontally"
   type        = number
   default     = 3
 }
 
-variable "node_min_count" {
-  type    = number
-  default = 3
+# --- Stateless pool (Spot VMs) ----------------------------------------------
+variable "stateless_machine_type" {
+  type    = string
+  default = "e2-standard-2"
 }
 
-variable "node_max_count" {
+variable "stateless_node_count" {
+  type    = number
+  default = 2
+}
+
+variable "stateless_min_count" {
+  type    = number
+  default = 2
+}
+
+variable "stateless_max_count" {
   type    = number
   default = 10
 }
 
-variable "node_preemptible" {
-  type    = bool
-  default = false
+variable "stateless_use_spot" {
+  description = "Use Spot VMs for the stateless pool. Set false for prod pilots where you're not ready to trust SPOT eviction handling yet."
+  type        = bool
+  default     = true
 }
 
 # -----------------------------------------------------------------------------

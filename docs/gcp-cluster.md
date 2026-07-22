@@ -97,9 +97,10 @@ cd terraform/gcp/managed-cluster && terraform destroy
 ## Costs (us-central1, rough)
 
 - Zonal control plane: free; Regional: ~$73/mo
-- 3× e2-standard-2: ~$150/mo (on-demand), ~$50/mo (preemptible)
+- **stateful pool** (2× e2-standard-4 on-demand): ~$200/mo
+- **stateless pool** (2× e2-standard-2 Spot VMs): ~$20-40/mo (would be ~$100/mo on-demand)
 - Cloud NAT: ~$32/mo + traffic
 - HTTP(S) LB: ~$20/mo
 - Persistent Disks (~200 GB): ~$20/mo
 
-**Baseline: ~$225/mo** zonal with on-demand nodes; drop ~$100/mo with preemptible for non-prod.
+**Baseline: ~$300/mo staging zonal** with Spot on the stateless pool; ~$380/mo without Spot. See [cluster-performance.md](cluster-performance.md#spot--preemptible-savings--where-they-apply) for the two-pool architecture.

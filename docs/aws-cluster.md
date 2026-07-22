@@ -134,10 +134,11 @@ Order matters — `k8s delete` first so the ALB and EBS volumes get cleaned up b
 ## Costs (us-east-1, rough)
 
 - EKS control plane: $73/mo flat
-- 2× t3.medium worker nodes: ~$60/mo (on-demand) or ~$18/mo (SPOT)
-- NAT gateway: ~$32/mo + traffic
+- **stateful pool** (2× m6i.large on-demand): ~$140/mo
+- **stateless pool** (3× m6i.large SPOT): ~$60/mo (would be ~$210/mo on-demand)
+- NAT gateway (single): ~$32/mo + traffic
 - ALB: ~$18/mo + LCU
 - EBS gp3 (~200 GB total): ~$16/mo
 - ECR + IoT + KVS: per-use, usually a few dollars for staging
 
-**Baseline: ~$200-250/mo** for staging, ~$400+ for HA prod.
+**Baseline: ~$340/mo staging** with the SPOT split; would be ~$490/mo without SPOT. See [cluster-performance.md](cluster-performance.md#spot--preemptible-savings--where-they-apply) for how the two-pool architecture keeps SPOT reclamation invisible.
