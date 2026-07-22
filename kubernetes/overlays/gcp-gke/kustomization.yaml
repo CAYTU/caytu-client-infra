@@ -1,0 +1,104 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# GCP GKE overlay. Self-hosted defaults path:
+#   - signaling-server, coturn STAY (GCP has no managed KVS equivalent)
+#   - MongoDB StatefulSet is the default; swap for Atlas via a further overlay
+# See docs/cloud-defaults.md for the full story.
+
+namespace: caytu-client
+
+secretGenerator:
+  - name: caytu-secrets
+    envs: [secrets.env]
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+
+# Point images at Artifact Registry. Terraform outputs image_registry.
+images:
+  - name: caytu-client/backend
+    newName: <REGION>-docker.pkg.dev/<PROJECT>/caytu-client-backend/backend
+    newTag: latest
+  - name: caytu-client/frontend
+    newName: <REGION>-docker.pkg.dev/<PROJECT>/caytu-client-frontend/frontend
+    newTag: latest
+  - name: caytu-client/webrtc-signaling
+    newName: <REGION>-docker.pkg.dev/<PROJECT>/caytu-client-webrtc-signaling/webrtc-signaling
+    newTag: latest
+  - name: caytu-client/gstreamer-recorder
+    newName: <REGION>-docker.pkg.dev/<PROJECT>/caytu-client-gstreamer-recorder/gstreamer-recorder
+    newTag: latest
+  - name: caytu-client/mqtt-streamer
+    newName: <REGION>-docker.pkg.dev/<PROJECT>/caytu-client-mqtt-streamer/mqtt-streamer
+    newTag: latest
+
+patches:
+  # Storage: standard-rwo is GKE's default balanced PD class.
+  # Bump to premium-rwo (SSD PD) for latency-sensitive workloads.
+  - target: { kind: StatefulSet, name: mongodb }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: standard-rwo
+  - target: { kind: StatefulSet, name: redis }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: standard-rwo
+  - target: { kind: StatefulSet, name: minio }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: premium-rwo
+  - target: { kind: PersistentVolumeClaim, name: gstreamer-recordings }
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: standard-rwo
+
+  # Ingress: GCE ingress + Google-managed cert. Requires a global static IP
+  # (Terraform creates one) and a domain pointing at it.
+  - target: { kind: Ingress, name: caytu-client }
+    patch: |-
+      - op: replace
+        path: /spec/ingressClassName
+        value: gce
+      - op: replace
+        path: /spec/rules/0/host
+        value: caytu.example.com
+      - op: add
+        path: /metadata/annotations/kubernetes.io~1ingress.global-static-ip-name
+        value: caytu-client-ingress
+      - op: add
+        path: /metadata/annotations/networking.gke.io~1managed-certificates
+        value: caytu-cert
+      # Perf: SSL policy (modern ciphers only), CDN can be enabled per-service
+      # via BackendConfig, HTTP -> HTTPS redirect via FrontendConfig.
+      - op: add
+        path: /metadata/annotations/networking.gke.io~1v1beta1.FrontendConfig
+        value: caytu-frontend-config
+
+  # coturn: switch Service to LoadBalancer so GCP creates a public UDP LB
+  # for TURN (unlike bare-metal, GKE has native UDP LB support).
+  - target: { kind: Service, name: coturn }
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: LoadBalancer
+
+  # signaling-server: attach BackendConfig for sticky sessions via GCE LB.
+  - target: { kind: Service, name: signaling-server }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          cloud.google.com/backend-config: '{"default":"signaling-backend-config"}'
+
+# Extra GCP-specific resources: managed cert + frontend config + backend config
+# (session affinity for signaling-server).
+resources:
+  - ../../base
+  - managed-cert.yaml
+  - frontend-config.yaml
+  - backend-config-signaling.yaml

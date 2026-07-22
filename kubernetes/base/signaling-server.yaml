@@ -1,0 +1,115 @@
+# signaling-server runs in every overlay EXCEPT aws-eks (where KVS handles it).
+# aws-eks/kustomization.yaml uses patches: to delete this Deployment + Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: signaling-server
+  labels:
+    app: signaling-server
+spec:
+  selector:
+    app: signaling-server
+  # WebSocket / signaling sessions need to stick to one backend for the
+  # duration of a WebRTC negotiation. clientIP hashing is enough for most
+  # deployments; upgrade to a session-cookie-aware ingress annotation for
+  # multi-region.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800  # 3 hours — longer than any signaling session
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signaling-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: signaling-server
+  template:
+    metadata:
+      labels:
+        app: signaling-server
+    spec:
+      terminationGracePeriodSeconds: 60  # give WebSocket sessions time to drain
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: signaling-server } }
+      containers:
+        - name: signaling
+          image: caytu-client/webrtc-signaling:latest
+          ports:
+            - containerPort: 3001
+              name: http
+          envFrom:
+            - configMapRef: { name: caytu-shared }
+            - secretRef:    { name: caytu-secrets }
+          env:
+            - name: PORT
+              value: "3001"
+            - name: AUTH_DRIVER
+              value: "token"
+            - name: MONGODB_URI
+              value: "mongodb://mongodb:27017/caytu-signaling"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "1Gi"   }
+          startupProbe:
+            httpGet: { path: /health, port: 3001 }
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet: { path: /health, port: 3001 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 3001 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 30"]  # drain window for WS sessions
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: signaling-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: signaling-server
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: signaling-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: signaling-server
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 60 }  # scale earlier — WS is CPU-bursty
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600  # much longer — WS sessions are long-lived
+    scaleUp:
+      stabilizationWindowSeconds: 30

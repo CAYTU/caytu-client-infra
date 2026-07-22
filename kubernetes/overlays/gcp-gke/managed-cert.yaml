@@ -1,0 +1,9 @@
+# Google-managed certificate — GCE ingress provisions this via ACME once DNS
+# resolves. Edit the domain(s) to match your setup.
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: caytu-cert
+spec:
+  domains:
+    - caytu.example.com

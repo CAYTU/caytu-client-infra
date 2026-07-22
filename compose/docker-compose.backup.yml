@@ -1,0 +1,74 @@
+# =============================================================================
+# Backup overlay
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.<local|remote>.yml \
+#     -f docker-compose.backup.yml \
+#     --env-file .env.<target> \
+#     up -d backup
+#
+# Or, via the CLI: `caytu-client backup [enable|run|list|restore]`
+#
+# The backup container runs cron and produces daily local snapshots to
+# ./backups/, then uses restic to push encrypted offsite copies to S3/GCS/B2/SFTP.
+#
+# Schedule (UTC), configurable via env:
+#   02:00  mongodump --gzip --archive         → ./backups/mongo/
+#   02:30  minio mirror to a snapshot dir     → ./backups/minio/
+#   03:00  tar the two volumes named below    → ./backups/volumes/
+#   03:30  restic backup /backups             → offsite
+#
+# Restores are manual on purpose (see docs/backup-restore.md).
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  backup:
+    build:
+      context: ./backup
+    image: caytu-client/backup:latest
+    depends_on:
+      mongodb: { condition: service_healthy }
+      minio:   { condition: service_healthy }
+    environment:
+      # Local paths inside the container
+      - BACKUP_ROOT=/backups
+      - MONGO_HOST=mongodb
+      - MONGO_PORT=27017
+      - MONGO_DATABASE=${MONGO_DATABASE:-caytu}
+      - MONGO_USERNAME=${MONGO_BACKUP_USER:-}
+      - MONGO_PASSWORD=${MONGO_BACKUP_PASSWORD:-}
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BUCKETS=${BACKUP_MINIO_BUCKETS:-video-recordings knowledge-base profiles blocs dashboard-media kpi-media}
+      # Retention
+      - LOCAL_RETENTION_DAYS=${BACKUP_LOCAL_RETENTION_DAYS:-7}
+      # Restic offsite (leave RESTIC_REPOSITORY empty to skip offsite upload)
+      - RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-}
+      - RESTIC_PASSWORD=${RESTIC_PASSWORD:-}
+      - AWS_ACCESS_KEY_ID=${RESTIC_AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${RESTIC_AWS_SECRET_ACCESS_KEY:-}
+      - B2_ACCOUNT_ID=${RESTIC_B2_ACCOUNT_ID:-}
+      - B2_ACCOUNT_KEY=${RESTIC_B2_ACCOUNT_KEY:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=${RESTIC_GCS_KEYFILE:-}
+      - RESTIC_KEEP_DAILY=${RESTIC_KEEP_DAILY:-7}
+      - RESTIC_KEEP_WEEKLY=${RESTIC_KEEP_WEEKLY:-4}
+      - RESTIC_KEEP_MONTHLY=${RESTIC_KEEP_MONTHLY:-6}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./backups:/backups
+      - mongodb-data:/volumes/mongodb-data:ro
+      - minio-data:/volumes/minio-data:ro
+      - gstreamer-recordings:/volumes/gstreamer-recordings:ro
+      # If offsite is GCS with a JSON keyfile:
+      # - ./secrets/gcs-backup-key.json:/secrets/gcs-backup-key.json:ro
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [caytu]

@@ -1,0 +1,86 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Self-managed cluster: k3s, RKE2, kubeadm, Rancher, or any BYO kubeconfig.
+# Storage class + ingress class default to what k3s ships out of the box —
+# override in secrets.env / a patch for other distros.
+
+namespace: caytu-client
+
+resources:
+  - ../../base
+
+# Operator-provided secrets. Copy .env.example into secrets.env and fill in.
+# secrets.env is gitignored.
+secretGenerator:
+  - name: caytu-secrets
+    envs:
+      - secrets.env
+    behavior: create
+    options:
+      disableNameSuffixHash: true  # keep name stable so refs in base don't break
+
+# Point images at your registry. Change tag or full path as needed.
+images:
+  - name: caytu-client/backend
+    newName: caytu-client/backend   # e.g. myregistry.example.com/caytu-client/backend
+    newTag: latest
+  - name: caytu-client/frontend
+    newName: caytu-client/frontend
+    newTag: latest
+  - name: caytu-client/webrtc-signaling
+    newName: caytu-client/webrtc-signaling
+    newTag: latest
+  - name: caytu-client/gstreamer-recorder
+    newName: caytu-client/gstreamer-recorder
+    newTag: latest
+  - name: caytu-client/mqtt-streamer
+    newName: caytu-client/mqtt-streamer
+    newTag: latest
+
+patches:
+  # PVCs: default to local-path (k3s' default provisioner). For other distros
+  # set storageClassName explicitly here.
+  - target: { kind: StatefulSet, name: mongodb }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: local-path
+  - target: { kind: StatefulSet, name: redis }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: local-path
+  - target: { kind: StatefulSet, name: minio }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: local-path
+  - target: { kind: PersistentVolumeClaim, name: gstreamer-recordings }
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: local-path
+
+  # Ingress: k3s ships Traefik, but nginx-ingress is more portable. Point at
+  # whatever your cluster has. Change hostname to your reachable DNS/IP.
+  - target: { kind: Ingress, name: caytu-client }
+    patch: |-
+      - op: replace
+        path: /spec/ingressClassName
+        value: nginx
+      - op: replace
+        path: /spec/rules/0/host
+        value: caytu.example.com
+
+  # coturn: switch to hostNetwork so 49152-49252/udp is reachable without
+  # exposing that whole range via a LoadBalancer (which most bare-metal
+  # clusters don't have).
+  - target: { kind: Deployment, name: coturn }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/hostNetwork
+        value: true
+      - op: add
+        path: /spec/template/spec/dnsPolicy
+        value: ClusterFirstWithHostNet

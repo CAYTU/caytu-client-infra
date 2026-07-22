@@ -1,0 +1,26 @@
+# Shared non-secret env. Overlays add cloud-specific values via
+# configMapGenerator.behavior=merge.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: caytu-shared
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+
+  # Data plane URIs — every app service reads these
+  MONGO_URI: "mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true"
+  REDIS_URL: "redis://redis:6379"
+  MINIO_ENDPOINT: "minio"
+  MINIO_PORT: "9000"
+  MINIO_USE_SSL: "false"
+
+  # Inter-service
+  MQTT_STREAMER_ENDPOINT: "http://mqtt-streamer:8000"
+  GSTREAMER_SERVICE_URL: "http://gstreamer-recorder:8080"
+  SIGNALING_SERVER_INTERNAL_URL: "http://signaling-server:3001"
+
+  # Overridden per overlay
+  STREAMING_PROVIDER: "self-hosted"
+  STUN_URLS: "stun:coturn:3478"
+  TURN_URLS: "turn:coturn:3478"

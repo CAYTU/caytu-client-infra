@@ -1,0 +1,10 @@
+# GCE Ingress FrontendConfig — controls TLS policy and HTTP-to-HTTPS redirect.
+apiVersion: networking.gke.io/v1beta1
+kind: FrontendConfig
+metadata:
+  name: caytu-frontend-config
+spec:
+  redirectToHttps:
+    enabled: true
+    responseCodeName: MOVED_PERMANENTLY_DEFAULT
+  sslPolicy: gke-ingress-ssl-policy   # define this at the region level (or use a preset)

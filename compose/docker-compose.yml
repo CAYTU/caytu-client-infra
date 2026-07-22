@@ -1,0 +1,351 @@
+# =============================================================================
+# caytu-client — base stack
+#
+# Contains every service the platform needs, in the shape it takes at runtime.
+# Contains NO deployment-specific concerns: no bind mounts, no host port
+# publishing, no build contexts, no TLS. Overlays add those:
+#
+#   docker-compose.local.yml       dev builds, bind mounts, host ports
+#   docker-compose.remote.yml      registry images, nginx + certbot, no ports
+#   docker-compose.monitoring.yml  prometheus, grafana, cadvisor, dozzle
+#   docker-compose.backup.yml      cron-driven mongodump + minio + restic
+#
+# Image references pull from ${IMAGE_REGISTRY}/<service>:${IMAGE_TAG} unless
+# overridden per service (e.g. BACKEND_IMAGE_TAG). Set IMAGE_REGISTRY empty
+# to use locally-built images (e.g. caytu-client/backend:latest).
+#
+# Optional services live behind compose profiles. The CLI sets COMPOSE_PROFILES
+# automatically per target — you rarely need to pass --profile by hand:
+#
+#   self-hosted      signaling-server (WebRTC signaling)
+#                    → auto-on for local, onprem, ssh, gcp-*
+#                    → auto-OFF for aws-* (KVS WebRTC is used instead)
+#   turn             coturn TURN server (needed alongside self-hosted signaling
+#                    when clients sit behind restrictive NAT)
+#                    → auto-on for onprem, ssh, gcp-*
+#                    → auto-OFF for local (noisy port range on laptops) and aws-*
+#   mqtt-broker      local mosquitto broker
+#                    → always opt-in; AWS targets should use IoT Core instead
+#   search           mongot sidecar (vector search)
+#                    → always opt-in
+#   vault            HashiCorp Vault dev-mode
+#                    → always opt-in
+# =============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Data plane
+  # ---------------------------------------------------------------------------
+  mongodb:
+    image: mongo:${MONGO_VERSION:-8.2}
+    command: >
+      mongod --bind_ip_all --replSet rs0
+      ${MONGOT_ARGS:-}
+    volumes:
+      - mongodb-data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=${MONGO_DATABASE:-caytu}
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: |
+        echo "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb:27017'}]}).ok }" | mongosh localhost:27017/${MONGO_DATABASE:-caytu} --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    networks: [caytu]
+
+  # Community Search sidecar for $search and $vectorSearch aggregation stages.
+  # Requires SCRAM auth wiring on mongod; opt in with `--profile search` and
+  # set MONGOT_ARGS in .env to add mongot params to the mongod command.
+  mongot:
+    image: mongodb/mongodb-community-search:${MONGOT_VERSION:-latest}
+    profiles: [search]
+    depends_on:
+      mongodb: { condition: service_healthy }
+    environment:
+      - MONGOD_HOST_AND_PORT=mongodb:27017
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [caytu]
+
+  redis:
+    image: redis:${REDIS_VERSION:-7-alpine}
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+      --appendonly ${REDIS_APPENDONLY:-no}
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [caytu]
+
+  minio:
+    image: minio/minio:${MINIO_VERSION:-latest}
+    volumes:
+      - minio-data:/data
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MINIO_BROWSER_REDIRECT_URL=${MINIO_BROWSER_REDIRECT_URL:-}
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [caytu]
+
+  # One-shot bucket bootstrapper. Only branding/alert sounds get anonymous
+  # download; everything else is served via short-lived presigned URLs from
+  # the backend.
+  minio-setup:
+    image: minio/mc:${MC_VERSION:-latest}
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: >
+      /bin/sh -c "
+      sleep 10;
+      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      for b in profiles blocs devices readings audio-alerts logo kpi-media video-recordings knowledge-base dashboard-media; do
+        mc mb myminio/$$b --ignore-existing;
+      done;
+      mc anonymous set download myminio/logo;
+      mc anonymous set download myminio/audio-alerts;
+      for b in profiles blocs dashboard-media video-recordings kpi-media knowledge-base devices readings; do
+        mc anonymous set none myminio/$$b || true;
+      done;
+      echo 'MinIO setup done';
+      "
+    restart: "no"
+    logging: *default-logging
+    networks: [caytu]
+
+  # ---------------------------------------------------------------------------
+  # WebRTC / media
+  # ---------------------------------------------------------------------------
+  coturn:
+    image: coturn/coturn:${COTURN_VERSION:-latest}
+    profiles: [turn]
+    restart: unless-stopped
+    volumes:
+      - ./coturn.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    logging: *default-logging
+    networks: [caytu]
+
+  signaling-server:
+    image: ${IMAGE_REGISTRY:-caytu-client}/webrtc-signaling:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    profiles: [self-hosted]
+    env_file:
+      - path: ${ENV_SIGNALING_FILE:-./.env.signaling}
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3001
+      - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-token}
+      - MONGODB_URI=${SIGNALING_MONGODB_URI:-mongodb://mongodb:27017/caytu-signaling}
+      - REDIS_HOST=${SIGNALING_REDIS_HOST:-redis}
+      - REDIS_PORT=${SIGNALING_REDIS_PORT:-6379}
+    depends_on:
+      mongodb: { condition: service_healthy }
+      redis:   { condition: service_healthy }
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks: [caytu]
+
+  gstreamer-recorder:
+    image: ${IMAGE_REGISTRY:-caytu-client}/gstreamer-recorder:${GSTREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    volumes:
+      - gstreamer-recordings:/tmp/recordings
+    env_file:
+      - path: ${ENV_GSTREAMER_FILE:-./.env.gstreamer}
+        required: false
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_USE_SSL=false
+      - MINIO_BUCKET=video-recordings
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-http://localhost:9000}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_IOT_ENDPOINT=${AWS_IOT_ENDPOINT:-}
+      - AWS_IOT_ROLE_ALIAS=${AWS_IOT_ROLE_ALIAS:-}
+      - SIGNALING_MODE=${STREAMING_PROVIDER:-self-hosted}
+      - SIGNALING_SERVER_URL=${SIGNALING_SERVER_INTERNAL_URL:-http://signaling-server:3001}
+      - SIGNALING_AUTH_TOKEN=${SIGNALING_AUTH_TOKEN:-}
+      - STUN_URLS=${STUN_URLS:-stun:coturn:3478}
+      - TURN_URLS=${TURN_URLS:-turn:coturn:3478}
+      - TURN_SECRET=${TURN_SECRET:-}
+      - RECORDINGS_DIR=/tmp/recordings
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      minio:       { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [caytu]
+
+  # ---------------------------------------------------------------------------
+  # IoT ingest
+  # ---------------------------------------------------------------------------
+  mqtt-broker:
+    image: ${MQTT_BROKER_IMAGE:-eclipse-mosquitto:2}
+    profiles: [mqtt-broker]
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    environment:
+      - MQTT_USER=${MQTT_USER:-caytu}
+      - MQTT_PASS=${MQTT_PASS:-caytu}
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1883 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [caytu]
+
+  mqtt-streamer:
+    image: ${IMAGE_REGISTRY:-caytu-client}/mqtt-streamer:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    env_file:
+      - path: ${ENV_STREAMER_FILE:-./.env.streamer}
+        required: false
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${MQTT_STREAMER_PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks: [caytu]
+
+  # ---------------------------------------------------------------------------
+  # Secrets (optional)
+  # ---------------------------------------------------------------------------
+  vault:
+    image: hashicorp/vault:${VAULT_VERSION:-latest}
+    profiles: [vault]
+    restart: unless-stopped
+    environment:
+      VAULT_ADDR: "http://0.0.0.0:8200"
+      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_ROOT_TOKEN:-root}"
+    cap_add: [IPC_LOCK]
+    command: vault server -dev -dev-listen-address=0.0.0.0:8200
+    logging: *default-logging
+    networks: [caytu]
+
+  # ---------------------------------------------------------------------------
+  # Application
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ${IMAGE_REGISTRY:-caytu-client}/backend:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    env_file:
+      - path: ${ENV_BACKEND_FILE:-./.env.backend}
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=5000
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio}
+      - MINIO_PORT=${MINIO_PORT:-9000}
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MQTT_STREAMER_ENDPOINT=${MQTT_STREAMER_ENDPOINT:-http://mqtt-streamer:8000}
+      - GSTREAMER_SERVICE_URL=${GSTREAMER_SERVICE_URL:-http://gstreamer-recorder:8080}
+      - SIGNALING_SERVER_INTERNAL_URL=http://signaling-server:3001
+      - SIGNALING_SERVER_PUBLIC_URL=${SIGNALING_SERVER_PUBLIC_URL:-}
+      - SIGNALING_SERVER_PUBLIC_WS_URL=${SIGNALING_SERVER_PUBLIC_WS_URL:-}
+      - SIGNALING_AUTH_TOKEN=${SIGNALING_AUTH_TOKEN:-}
+      - STREAMING_PROVIDER=${STREAMING_PROVIDER:-self-hosted}
+      - STUN_URLS=${STUN_URLS:-stun:coturn:3478}
+      - TURN_URLS=${TURN_URLS:-turn:coturn:3478}
+      - TURN_SECRET=${TURN_SECRET:-}
+    depends_on:
+      mongodb:            { condition: service_healthy }
+      redis:              { condition: service_healthy }
+      minio:              { condition: service_healthy }
+      minio-setup:        { condition: service_completed_successfully }
+      gstreamer-recorder: { condition: service_healthy }
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks: [caytu]
+
+  frontend:
+    image: ${IMAGE_REGISTRY:-caytu-client}/frontend:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    env_file:
+      - path: ${ENV_FRONTEND_FILE:-./.env.frontend}
+        required: false
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      backend: { condition: service_healthy }
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    dns: [8.8.8.8, 8.8.4.4]
+    networks: [caytu]
+
+volumes:
+  mongodb-data:
+  redis-data:
+  minio-data:
+  gstreamer-recordings:
+  mosquitto-data:
+  mosquitto-log:
+
+networks:
+  caytu:
+    driver: bridge

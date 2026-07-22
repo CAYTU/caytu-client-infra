@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: caytu-client
+
+commonLabels:
+  app.kubernetes.io/part-of: caytu-client
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - mongodb.yaml
+  - redis.yaml
+  - minio.yaml
+  - backend.yaml
+  - frontend.yaml
+  - signaling-server.yaml
+  - gstreamer-recorder.yaml
+  - mqtt-streamer.yaml
+  - coturn.yaml
+  - ingress.yaml
+
+# Overlays supply the secrets via secretGenerator (envs: [secrets.env]).
+# The base intentionally has none — trying to apply the base alone will fail
+# with "Secret caytu-secrets not found", which is the correct behavior.
+
+# Overlays swap images with kustomize images: — placeholder tags here.

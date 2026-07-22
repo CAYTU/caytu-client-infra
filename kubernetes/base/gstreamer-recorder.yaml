@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gstreamer-recordings
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gstreamer-recorder
+  labels:
+    app: gstreamer-recorder
+spec:
+  selector:
+    app: gstreamer-recorder
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gstreamer-recorder
+spec:
+  # PVC-owner constraint means only ever 1 replica; PDB just guards against
+  # eviction during voluntary disruptions (rolling upgrades, node drain).
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: gstreamer-recorder
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gstreamer-recorder
+spec:
+  # Recorder holds per-camera state — scale carefully. Overlays can override.
+  replicas: 1
+  strategy:
+    type: Recreate  # only one pod can own the PVC
+  selector:
+    matchLabels:
+      app: gstreamer-recorder
+  template:
+    metadata:
+      labels:
+        app: gstreamer-recorder
+    spec:
+      containers:
+        - name: recorder
+          image: caytu-client/gstreamer-recorder:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef: { name: caytu-shared }
+            - secretRef:    { name: caytu-secrets }
+          env:
+            - name: MINIO_BUCKET
+              value: video-recordings
+            - name: RECORDINGS_DIR
+              value: /tmp/recordings
+            - name: SIGNALING_MODE
+              # Overlays set this to "kvs" for aws-eks
+              value: "self-hosted"
+          volumeMounts:
+            - name: recordings
+              mountPath: /tmp/recordings
+          resources:
+            requests: { cpu: "500m", memory: "1Gi" }
+            limits:   { cpu: "2",    memory: "4Gi" }
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: recordings
+          persistentVolumeClaim:
+            claimName: gstreamer-recordings

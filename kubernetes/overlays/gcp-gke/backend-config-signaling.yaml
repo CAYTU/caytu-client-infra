@@ -1,0 +1,21 @@
+# GCE Ingress BackendConfig — session affinity for signaling-server (WebSocket).
+# Reference by adding the annotation to the Service:
+#   cloud.google.com/backend-config: '{"default":"signaling-backend-config"}'
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: signaling-backend-config
+spec:
+  sessionAffinity:
+    affinityType: GENERATED_COOKIE
+    affinityCookieTtlSec: 10800
+  timeoutSec: 3600
+  connectionDraining:
+    drainingTimeoutSec: 60
+  healthCheck:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+    type: HTTP
+    requestPath: /health

@@ -1,0 +1,6 @@
+# m h dom mon dow  command
+0  2 * * *  /opt/backup/scripts/backup-mongo.sh   >> /var/log/backup.log 2>&1
+30 2 * * *  /opt/backup/scripts/backup-minio.sh   >> /var/log/backup.log 2>&1
+0  3 * * *  /opt/backup/scripts/backup-volumes.sh >> /var/log/backup.log 2>&1
+30 3 * * *  /opt/backup/scripts/backup-offsite.sh >> /var/log/backup.log 2>&1
+0  4 * * *  /opt/backup/scripts/prune-local.sh    >> /var/log/backup.log 2>&1

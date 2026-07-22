@@ -1,0 +1,122 @@
+# =============================================================================
+# Local development overlay
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.local.yml \
+#     --env-file .env.local \
+#     up -d --build
+#
+# Or, via the CLI: `caytu-client local up --build`
+#
+# Differences vs base:
+#   * services build from source in ${CAYTU_CLIENT_REPO} (default: ../caytu-client)
+#   * host ports are published for direct access from your workstation
+#   * source dirs are bind-mounted for hot reload (backend, frontend, gstreamer)
+#   * dev-friendly env: watch mode, CORS relaxed, INITIAL_ADMIN_EMAIL, etc.
+# =============================================================================
+
+services:
+  mongodb:
+    ports:
+      - "${MONGO_HOST_PORT:-27017}:27017"
+
+  redis:
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+
+  minio:
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+
+  coturn:
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "5349:5349"
+      - "5349:5349/udp"
+      - "49152-49252:49152-49252/udp"
+
+  vault:
+    ports:
+      - "${VAULT_HOST_PORT:-8200}:8200"
+
+  signaling-server:
+    profiles: [self-hosted]
+    build:
+      context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/webrtc-signaling
+      dockerfile: Dockerfile
+      target: builder
+    image: caytu-client/webrtc-signaling:local
+    volumes:
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/webrtc-signaling/src:/app/src
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/webrtc-signaling/package.json:/app/package.json
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/webrtc-signaling/tsconfig.json:/app/tsconfig.json
+    ports:
+      - "${SIGNALING_HOST_PORT:-3001}:3001"
+    environment:
+      - NODE_ENV=development
+      - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-allow-all}
+    command: npm run dev
+
+  gstreamer-recorder:
+    build:
+      context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/gstreamer-service
+      dockerfile: Dockerfile
+    image: caytu-client/gstreamer-recorder:local
+    volumes:
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/gstreamer-service/src:/app/src
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/gstreamer-service/requirements.txt:/app/requirements.txt
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend/certs:/app/certs:ro
+    ports:
+      - "${GSTREAMER_HOST_PORT:-8080}:8080"
+
+  mqtt-streamer:
+    build:
+      context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/mqtt-streamer
+      dockerfile: Dockerfile
+    image: caytu-client/mqtt-streamer:local
+    ports:
+      - "${MQTT_STREAMER_HOST_PORT:-8100}:8100"
+    environment:
+      - MQTT_STREAMER_PORT=8100
+
+  backend:
+    build:
+      context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend
+      dockerfile: Dockerfile
+      target: development
+    image: caytu-client/backend:local
+    volumes:
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend:/app
+      - /app/node_modules
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend/certs:/app/certs:ro
+    ports:
+      - "${BACKEND_HOST_PORT:-5000}:5000"
+    environment:
+      - NODE_ENV=development
+      - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-admin@caytu.local}
+      - CLIENT_URL=${CLIENT_URL:-http://localhost:3000}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000}
+      # Point at host bridge for locally-run mqtt-streamer if not using the container
+      - MQTT_STREAMER_ENDPOINT=${MQTT_STREAMER_ENDPOINT:-http://mqtt-streamer:8100}
+
+  frontend:
+    build:
+      context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/client
+      dockerfile: Dockerfile
+      target: development
+    image: caytu-client/frontend:local
+    volumes:
+      - ${CAYTU_CLIENT_REPO:-../../caytu-client}/client:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "${FRONTEND_HOST_PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=development
+      - API_URL=http://backend:5000
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:5000}
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true

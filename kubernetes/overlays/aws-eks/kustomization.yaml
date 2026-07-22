@@ -1,0 +1,169 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# AWS EKS overlay. Managed-defaults path:
+#   - signaling-server: NOT deployed (KVS WebRTC signaling handles it)
+#   - coturn:           NOT deployed (KVS provides its own ICE servers)
+#   - mqtt-streamer publishes to AWS IoT Core (not a local broker)
+# See docs/cloud-defaults.md for the full story.
+
+namespace: caytu-client
+
+resources:
+  - ../../base
+
+secretGenerator:
+  - name: caytu-secrets
+    envs: [secrets.env]
+    behavior: create
+    options:
+      disableNameSuffixHash: true
+
+# Point images at ECR. terraform apply outputs ecr_registry — paste it here.
+# newTag is what you push from CI.
+images:
+  - name: caytu-client/backend
+    newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-backend
+    newTag: latest
+  - name: caytu-client/frontend
+    newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-frontend
+    newTag: latest
+  - name: caytu-client/gstreamer-recorder
+    newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-gstreamer-recorder
+    newTag: latest
+  - name: caytu-client/mqtt-streamer
+    newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-mqtt-streamer
+    newTag: latest
+
+# Delete services that KVS + IoT Core replace.
+patches:
+  - target: { kind: Deployment, name: signaling-server }
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: signaling-server }
+  - target: { kind: Service, name: signaling-server }
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: signaling-server }
+  - target: { kind: HorizontalPodAutoscaler, name: signaling-server }
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata: { name: signaling-server }
+  - target: { kind: PodDisruptionBudget, name: signaling-server }
+    patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata: { name: signaling-server }
+  - target: { kind: Deployment, name: coturn }
+    patch: |-
+      $patch: delete
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: coturn }
+  - target: { kind: Service, name: coturn }
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Service
+      metadata: { name: coturn }
+  - target: { kind: ConfigMap, name: coturn-config }
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: ConfigMap
+      metadata: { name: coturn-config }
+
+  # PVCs: gp3 via the AWS EBS CSI driver (installed as an EKS addon).
+  - target: { kind: StatefulSet, name: mongodb }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: gp3
+  - target: { kind: StatefulSet, name: redis }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: gp3
+  - target: { kind: StatefulSet, name: minio }
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/spec/storageClassName
+        value: gp3
+  - target: { kind: PersistentVolumeClaim, name: gstreamer-recordings }
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: gp3
+
+  # Ingress: AWS Load Balancer Controller creates an ALB. Requires the
+  # controller to be installed cluster-wide (see terraform outputs.helm_commands).
+  - target: { kind: Ingress, name: caytu-client }
+    patch: |-
+      - op: replace
+        path: /spec/ingressClassName
+        value: alb
+      - op: replace
+        path: /spec/rules/0/host
+        value: caytu.example.com
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1scheme
+        value: internet-facing
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1target-type
+        value: ip
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1listen-ports
+        value: '[{"HTTP":80},{"HTTPS":443}]'
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1ssl-redirect
+        value: "443"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1certificate-arn
+        value: arn:aws:acm:REGION:ACCOUNT:certificate/UUID  # replace with your ACM cert
+      # Perf: HTTP/2, deregistration draining, sticky sessions for WS,
+      # health-check config to fail fast, and access logs to S3 (optional).
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1backend-protocol-version
+        value: HTTP2
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1target-group-attributes
+        value: "deregistration_delay.timeout_seconds=30,stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=3600"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1healthcheck-path
+        value: "/health"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1healthcheck-interval-seconds
+        value: "15"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1healthcheck-timeout-seconds
+        value: "5"
+      - op: add
+        path: /metadata/annotations/alb.ingress.kubernetes.io~1load-balancer-attributes
+        value: "idle_timeout.timeout_seconds=3600,routing.http2.enabled=true,access_logs.s3.enabled=false"
+      # Drop the /signaling path — signaling-server doesn't exist here (KVS handles it).
+      # Index 2 in the base's paths array (0=/api, 1=/socket.io, 2=/signaling, ...).
+      - op: remove
+        path: /spec/rules/0/http/paths/2
+
+  # Force KVS + IoT on the services that talk to messaging
+  - target: { kind: Deployment, name: backend }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: { name: STREAMING_PROVIDER, value: "kvs" }
+  - target: { kind: Deployment, name: gstreamer-recorder }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/env/2/value
+        value: "kvs"
+
+# IRSA: bind pods to AWS IAM roles for scoped access to KVS + IoT + S3 backups.
+# Terraform creates the roles and outputs their ARNs; drop them into the SAs here.
+patchesStrategicMerge: []

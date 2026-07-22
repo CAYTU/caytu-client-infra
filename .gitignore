@@ -1,0 +1,33 @@
+# Deployment state (per-operator)
+.caytu-client-state.json
+
+# Secrets — every .env* except the committed template
+compose/.env
+compose/.env.*
+!compose/.env.example
+
+# Runtime data on operator laptops
+compose/backups/
+compose/certbot/conf/
+compose/certbot/www/
+compose/secrets/*
+!compose/secrets/.gitkeep
+
+# Terraform (added in phases 2-5)
+**/.terraform/
+**/.terraform.lock.hcl
+**/terraform.tfstate
+**/terraform.tfstate.backup
+**/*.tfvars
+!**/example.tfvars
+
+# Kubernetes state / kubeconfigs
+**/kubeconfig
+**/*.kubeconfig
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# =============================================================================
+# caytu-client — deployment CLI
+#
+# Wraps docker compose (locally or over SSH) with a consistent verb-per-verb
+# UX across deployment targets. Reads .env.<target> and layers the appropriate
+# compose overlays.
+#
+# Usage:
+#   caytu-client [--target|-t <target>] <verb> [args]
+#
+# Targets:
+#   local          laptop dev with hot reload + bind mounts (default)
+#   onprem         production stack on THIS host (nginx + TLS, no SSH)
+#   ssh            production stack on a REMOTE host reachable over SSH
+#   aws-single         AWS EC2 single-instance             ✓ shipped
+#   gcp-single         GCP GCE single-instance             ✓ shipped
+#   aws-cluster        AWS EKS + ALB + IRSA + IoT/KVS      ✓ shipped
+#   gcp-cluster        GCP GKE + GCE Ingress + WI          ✓ shipped
+#   self-managed-k8s   k3s or any operator-supplied k8s    ✓ shipped
+#
+# Verbs (phase 1):
+#   init                      write .env.<target> from template
+#   doctor                    check host prerequisites
+#   up [--build]              start the stack
+#   down [--volumes]          stop and remove containers
+#   start / stop / restart    lifecycle
+#   ps / status               list services
+#   logs [service]            tail logs
+#   pull                      docker compose pull
+#   deploy [service ...]      pull + up -d (rolls updated services)
+#   exec <service> <cmd...>   run inside a service
+#   ssh                       open a shell on the remote host
+#   env push                  rsync .env.<target> and .env.* to remote
+#   monitor <up|down|tunnel>  monitoring overlay
+#   backup <enable|run|list|restore>  backup overlay
+#   ssl bootstrap <domain> <email>    issue initial Let's Encrypt cert (ssh/cloud)
+#   ssl self-signed <host-or-ip>      generate a self-signed cert (onprem)
+#   ssl bring-your-own <cert> <key>   install a cert you already have
+#   ssl http-only                     switch nginx to HTTP-only (no TLS)
+#   ssl renew                         force-renew Let's Encrypt cert
+#
+# Cloud-provider verbs (aws-single):
+#   aws provision                     terraform apply + write outputs to state/env
+#   aws destroy                       terraform destroy
+#   aws instance <start|stop|info|resize <type>>
+#   aws ecr-login                     refresh docker login (also on the remote)
+#   aws allow-me                      add THIS laptop's IP to the SSH security-group rule
+#   aws doctor                        verify aws-cli auth + Terraform + jq
+#
+# Cloud-provider verbs (gcp-single):
+#   gcp provision                     terraform apply + write outputs to state/env
+#   gcp destroy                       terraform destroy
+#   gcp instance <start|stop|info|resize <type>>
+#   gcp registry-login                docker login to Artifact Registry (workstation only)
+#   gcp allow-me                      add THIS laptop's IP to a per-instance firewall rule
+#   gcp doctor                        verify gcloud auth + Terraform + jq
+#
+# Kubernetes verbs (aws-cluster / gcp-cluster / self-managed-k8s):
+#   k8s doctor                         check kubectl reach + overlay + secrets.env
+#   k8s secrets-bootstrap              copy secrets.env.example → secrets.env
+#   k8s diff                           kubectl diff -k <overlay>
+#   k8s apply                          kubectl apply -k <overlay>
+#   k8s delete                         kubectl delete -k <overlay>
+#   k8s status                         pods / deploys / services / ingress
+#   k8s logs [service]                 tail logs across pods for a service
+#   k8s scale <service> <n>            change replica count
+#   k8s rollout <status|restart|undo|history> [service]
+#   k8s exec <service> [cmd...]        drop into a pod
+#   k8s port-forward <service> local:remote
+#   install                   symlink into ~/.local/bin/caytu-client
+# =============================================================================
+
+set -Eeuo pipefail
+
+# --- constants ---------------------------------------------------------------
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+COMPOSE_DIR="$REPO_ROOT/compose"
+STATE_FILE="$REPO_ROOT/.caytu-client-state.json"
+
+# --- source libs -------------------------------------------------------------
+# shellcheck source=lib/common.sh
+source "$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=lib/ssh.sh
+source "$SCRIPT_DIR/lib/ssh.sh"
+# shellcheck source=lib/aws.sh
+source "$SCRIPT_DIR/lib/aws.sh"
+# shellcheck source=lib/gcp.sh
+source "$SCRIPT_DIR/lib/gcp.sh"
+# shellcheck source=lib/k8s.sh
+source "$SCRIPT_DIR/lib/k8s.sh"
+
+# --- target + env resolution -------------------------------------------------
+TARGET="${CAYTU_TARGET:-}"
+
+env_file_for() {
+  local t=${1:-$TARGET}
+  printf '%s/.env.%s' "$COMPOSE_DIR" "$t"
+}
+
+# Compose overlay set. Monitoring + backup are appended when their toggles are on.
+compose_files_for() {
+  local t=${1:-$TARGET}
+  local -a args=(-f "$COMPOSE_DIR/docker-compose.yml")
+
+  case "$t" in
+    local)
+      args+=(-f "$COMPOSE_DIR/docker-compose.local.yml") ;;
+    onprem|ssh|aws-single|gcp-single)
+      args+=(-f "$COMPOSE_DIR/docker-compose.remote.yml") ;;
+    aws-cluster|gcp-cluster|self-managed-k8s)
+      die "target '$t' uses Kubernetes; use 'kubectl'/'helm' or 'caytu-client k8s ...' (phase 4)"
+      ;;
+    "")
+      die "target not set — pass --target or set CAYTU_TARGET" ;;
+    *)
+      die "unknown target: $t" ;;
+  esac
+
+  # Optional overlays (opt-in via state flags set by `monitor up` / `backup enable`)
+  [[ "$(state_get "monitoring_${t}")" == "on" ]] && args+=(-f "$COMPOSE_DIR/docker-compose.monitoring.yml")
+  [[ "$(state_get "backup_${t}")"     == "on" ]] && args+=(-f "$COMPOSE_DIR/docker-compose.backup.yml")
+
+  printf '%s\n' "${args[@]}"
+}
+
+# Which compose profiles are active by default for this target?
+# Operator's COMPOSE_PROFILES in .env.<target> overrides this — we only fall
+# back to the default when the env file doesn't set it explicitly.
+#
+#   self-hosted  → signaling-server (WebRTC signaling in-cluster)
+#   turn         → coturn TURN server
+#   (empty)      → AWS: use IoT Core + KVS instead of self-hosted equivalents
+#
+# Note: for k8s targets (aws-cluster, gcp-cluster, self-managed-k8s) these
+# compose profiles are informational — the actual enable/disable happens in
+# the kustomize overlay (kubernetes/overlays/<target>). They're set here to
+# keep the intent consistent across compose- and kubectl-driven verbs.
+default_profiles_for() {
+  local t=${1:-$TARGET}
+  case "$t" in
+    local)                            echo "self-hosted" ;;      # dev; turn off (noisy ports)
+    onprem|ssh)                       echo "self-hosted,turn" ;;
+    aws-single|aws-cluster)           echo "" ;;                 # KVS + IoT Core
+    gcp-single|gcp-cluster)           echo "self-hosted,turn" ;; # no managed GCP path
+    self-managed-k8s)                 echo "self-hosted,turn" ;; # operator's infra, no cloud managed svcs
+    *)                                echo "self-hosted,turn" ;;
+  esac
+}
+
+# Compose wrapper. Local target runs against the working tree; remote targets
+# ssh in and run compose in the deploy dir.
+compose() {
+  local -a files
+  mapfile -t files < <(compose_files_for)
+  local env_file
+  env_file="$(env_file_for)"
+  [[ -f "$env_file" ]] || die "missing $env_file — run: caytu-client init"
+
+  # Respect COMPOSE_PROFILES in .env.<target> if set, else target default.
+  if [[ -z "${COMPOSE_PROFILES:-}" ]]; then
+    local from_env
+    from_env="$(env_get "$env_file" COMPOSE_PROFILES || true)"
+    if [[ -n "$from_env" ]]; then
+      export COMPOSE_PROFILES="$from_env"
+    else
+      export COMPOSE_PROFILES="$(default_profiles_for)"
+    fi
+  fi
+
+  case "$TARGET" in
+    local|onprem)
+      (cd "$COMPOSE_DIR" && docker_compose --env-file "$env_file" "${files[@]}" "$@") ;;
+    ssh|aws-single|gcp-single)
+      local rdir; rdir="$(ssh_remote_dir)"
+      local -a rfiles=()
+      for f in "${files[@]}"; do
+        [[ "$f" == "-f" ]] && { rfiles+=("-f"); continue; }
+        rfiles+=("$rdir/compose/$(basename "$f")")
+      done
+      # shellcheck disable=SC2029
+      # shellcheck disable=SC2029
+      ssh_run "cd $rdir/compose && COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose --env-file $rdir/compose/$(basename "$env_file") ${rfiles[*]} $*" ;;
+  esac
+}
+
+# --- commands ----------------------------------------------------------------
+cmd_help() {
+  sed -n '3,50p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
+}
+
+cmd_install() {
+  local dest="${HOME}/.local/bin/caytu-client"
+  mkdir -p "$(dirname "$dest")"
+  ln -sf "$SCRIPT_PATH" "$dest"
+  ok "linked $dest -> $SCRIPT_PATH"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) warn "add \$HOME/.local/bin to your PATH" ;;
+  esac
+}
+
+cmd_init() {
+  [[ -n "$TARGET" ]] || die "pass --target <local|ssh|...>"
+  local env_file
+  env_file="$(env_file_for)"
+  if [[ -f "$env_file" ]]; then
+    warn "$env_file already exists; not overwriting"
+    return 0
+  fi
+  cp "$COMPOSE_DIR/.env.example" "$env_file"
+  ok "created $env_file"
+  info "Edit it to set CAYTU_ENV, IMAGE_REGISTRY, IMAGE_TAG, MINIO_ROOT_*, etc."
+
+  case "$TARGET" in
+    ssh|aws-single|gcp-single)
+      info "Also set SSH_HOST, SSH_USER, SSH_KEY_PATH — or persist via:"
+      info "  caytu-client state set ssh_host <ip>"
+      info "  caytu-client state set ssh_user ubuntu"
+      info "  caytu-client state set ssh_key_path ~/.ssh/id_ed25519" ;;
+  esac
+}
+
+cmd_doctor() {
+  info "target: ${TARGET:-<unset>}"
+  info "checking local tools…"
+  for c in docker rsync ssh jq; do
+    if command -v "$c" >/dev/null 2>&1; then ok "$c"; else warn "$c missing"; fi
+  done
+  docker compose version >/dev/null 2>&1 && ok "docker compose plugin" || warn "docker compose plugin missing"
+
+  [[ -n "$TARGET" ]] || { warn "no target set; done"; return 0; }
+  local env_file; env_file="$(env_file_for)"
+  [[ -f "$env_file" ]] && ok "env file $env_file" || warn "env file $env_file missing (run: caytu-client init)"
+
+  case "$TARGET" in
+    ssh|aws-single|gcp-single)
+      info "checking SSH…"
+      if ssh_run true 2>/dev/null; then ok "ssh $(ssh_target)"; else warn "ssh to $(ssh_target) failed"; fi ;;
+    onprem)
+      command -v openssl >/dev/null 2>&1 && ok "openssl (needed for self-signed certs)" || warn "openssl missing — install for 'ssl self-signed'"
+      info "CAYTU_DOMAIN=$(env_get "$env_file" CAYTU_DOMAIN) (may be an IP for on-prem)" ;;
+  esac
+}
+
+cmd_up()      { local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
+cmd_down()    { local vols=""; [[ "${1:-}" == "--volumes" ]] && vols="--volumes"; compose down $vols; }
+cmd_start()   { compose start "$@"; }
+cmd_stop()    { compose stop "$@"; }
+cmd_restart() { compose restart "$@"; }
+cmd_ps()      { compose ps "$@"; }
+cmd_status()  { compose ps "$@"; }
+cmd_logs()    { compose logs -f --tail=200 "$@"; }
+cmd_pull()    { compose pull "$@"; }
+cmd_exec()    { compose exec "$@"; }
+
+cmd_deploy() {
+  info "pulling images…"
+  compose pull "$@"
+  info "recreating services…"
+  compose up -d "$@"
+}
+
+cmd_ssh() {
+  case "$TARGET" in
+    local|onprem) die "target is $TARGET — this host, just open a shell" ;;
+    ssh|aws-single|gcp-single) ssh_run ;;
+  esac
+}
+
+cmd_env_push() {
+  case "$TARGET" in
+    local|onprem) warn "env push is a no-op for $TARGET (files already local)"; return 0 ;;
+  esac
+  local rdir; rdir="$(ssh_remote_dir)"
+  info "ensuring $rdir on remote…"
+  ssh_run "sudo mkdir -p $rdir/compose && sudo chown -R \$USER:\$USER $rdir"
+  info "rsyncing compose tree…"
+  ssh_rsync "$COMPOSE_DIR/" "compose/"
+  info "rsyncing env files…"
+  # Push .env.<target> and any per-service .env.* that exist alongside it.
+  local env_file; env_file="$(env_file_for)"
+  ssh_rsync "$env_file" "compose/$(basename "$env_file")"
+  for f in .env.backend .env.frontend .env.signaling .env.gstreamer .env.streamer; do
+    [[ -f "$COMPOSE_DIR/$f" ]] && ssh_rsync "$COMPOSE_DIR/$f" "compose/$f" || true
+  done
+  ok "env push complete"
+}
+
+cmd_monitor() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    up)   state_set "monitoring_${TARGET}" "on";  compose up -d prometheus grafana cadvisor node-exporter dozzle ;;
+    down) compose stop prometheus grafana cadvisor node-exporter dozzle; state_set "monitoring_${TARGET}" "off" ;;
+    tunnel)
+      case "$TARGET" in
+        ssh|aws-single|gcp-single)
+          local svc=${1:-grafana}
+          local port=3005
+          [[ "$svc" == "dozzle" ]] && port=8005
+          [[ "$svc" == "prometheus" ]] && port=9095
+          info "SSH tunnel: http://localhost:$port -> $(ssh_target):$port"
+          local -a opts; mapfile -t opts < <(ssh_opts)
+          ssh "${opts[@]}" -N -L "$port:127.0.0.1:$port" "$(ssh_target)" ;;
+        local|onprem) info "no tunnel needed for $TARGET — services on localhost" ;;
+        *) die "tunnel only applies to remote targets" ;;
+      esac ;;
+    *) die "usage: caytu-client monitor <up|down|tunnel [grafana|dozzle|prometheus]>" ;;
+  esac
+}
+
+cmd_backup() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    enable) state_set "backup_${TARGET}" "on"; compose up -d --build backup ;;
+    disable) compose stop backup; state_set "backup_${TARGET}" "off" ;;
+    run)
+      local script=${1:-backup-mongo.sh}
+      compose run --rm backup run "$script" "${@:2}" ;;
+    list)
+      case "$TARGET" in
+        local) ls -lh "$COMPOSE_DIR/backups"/*/*.gz "$COMPOSE_DIR/backups"/*/*.tar.gz 2>/dev/null || warn "no local backups yet" ;;
+        *) ssh_run "ls -lh $(ssh_remote_dir)/compose/backups/*/*.gz $(ssh_remote_dir)/compose/backups/*/*.tar.gz 2>/dev/null" ;;
+      esac ;;
+    restore)
+      local kind=${1:-}; shift || true
+      case "$kind" in
+        mongo) compose run --rm -e RESTORE_CONFIRM=yes backup run restore-mongo.sh "$@" ;;
+        minio) compose run --rm -e RESTORE_CONFIRM=yes backup run restore-minio.sh "$@" ;;
+        *) die "usage: caytu-client backup restore <mongo|minio> <archive-path>" ;;
+      esac ;;
+    *) die "usage: caytu-client backup <enable|disable|run|list|restore>" ;;
+  esac
+}
+
+# Directory where nginx expects certs: certbot/conf/live/<host>/{fullchain,privkey}.pem
+# Same layout for Let's Encrypt, self-signed, and bring-your-own — nginx doesn't care
+# where the files came from, only that they exist at those paths.
+_ssl_cert_dir_local() { printf '%s/certbot/conf/live/%s' "$COMPOSE_DIR" "$1"; }
+_ssl_cert_dir_remote() { printf '%s/compose/certbot/conf/live/%s' "$(ssh_remote_dir)" "$1"; }
+
+# Rewrite nginx/conf.d/default.conf so server_name and cert paths reference $host.
+_ssl_pin_nginx_local() {
+  local host=$1
+  sed -i.bak \
+    -e "s|server_name yourdomain.com;|server_name $host;|" \
+    -e "s|/etc/letsencrypt/live/yourdomain.com/|/etc/letsencrypt/live/$host/|g" \
+    "$COMPOSE_DIR/nginx/conf.d/default.conf"
+  rm -f "$COMPOSE_DIR/nginx/conf.d/default.conf.bak"
+}
+_ssl_pin_nginx_remote() {
+  local host=$1 rdir; rdir="$(ssh_remote_dir)"
+  # shellcheck disable=SC2029
+  ssh_run "sed -i.bak \
+    -e 's|server_name yourdomain.com;|server_name $host;|' \
+    -e 's|/etc/letsencrypt/live/yourdomain.com/|/etc/letsencrypt/live/$host/|g' \
+    $rdir/compose/nginx/conf.d/default.conf && \
+    rm -f $rdir/compose/nginx/conf.d/default.conf.bak"
+}
+
+cmd_ssl() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    # ---- Let's Encrypt (public DNS required) --------------------------------
+    bootstrap)
+      local domain=${1:-}; local email=${2:-}
+      [[ -n "$domain" && -n "$email" ]] || die "usage: caytu-client ssl bootstrap <domain> <email>"
+      case "$TARGET" in
+        ssh|aws-single|gcp-single) : ;;
+        onprem) die "onprem hosts usually lack public DNS — use 'ssl self-signed <host>' or 'ssl http-only'" ;;
+        local)  die "ssl only applies to onprem/remote targets" ;;
+        *) die "unsupported target for ssl: $TARGET" ;;
+      esac
+      local rdir; rdir="$(ssh_remote_dir)"
+      info "issuing Let's Encrypt cert for $domain…"
+      # shellcheck disable=SC2029
+      ssh_run "cd $rdir/compose && mkdir -p certbot/conf certbot/www && \
+        docker run --rm \
+          -v $rdir/compose/certbot/conf:/etc/letsencrypt \
+          -v $rdir/compose/certbot/www:/var/www/certbot \
+          -p 80:80 certbot/certbot certonly --standalone -n \
+          --agree-tos --email $email -d $domain"
+      _ssl_pin_nginx_remote "$domain"
+      # shellcheck disable=SC2029
+      ssh_run "cd $rdir/compose && docker compose restart nginx"
+      ok "Let's Encrypt cert issued for $domain, nginx reloaded" ;;
+
+    # ---- Self-signed (no DNS required, works with a bare IP) -----------------
+    self-signed)
+      local host=${1:-}
+      [[ -n "$host" ]] || die "usage: caytu-client ssl self-signed <ip-or-hostname>"
+      require_cmd openssl
+      case "$TARGET" in
+        local) die "ssl only applies to onprem/remote targets" ;;
+      esac
+
+      # Include the given host as both IP and DNS SAN — openssl sorts out which
+      # to use based on syntax, but we cover both for cross-browser safety.
+      local san
+      if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        san="IP:${host},DNS:${host}"
+      else
+        san="DNS:${host}"
+      fi
+      info "generating self-signed cert (10y) for $host with SAN: $san"
+
+      local tmp; tmp="$(mktemp -d)"
+      trap 'rm -rf "$tmp"' RETURN
+      openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout "$tmp/privkey.pem" \
+        -out    "$tmp/fullchain.pem" \
+        -days 3650 \
+        -subj "/CN=${host}" \
+        -addext "subjectAltName=${san}" \
+        -addext "keyUsage=digitalSignature,keyEncipherment" \
+        -addext "extendedKeyUsage=serverAuth" \
+        2>/dev/null
+
+      case "$TARGET" in
+        onprem)
+          local dst; dst="$(_ssl_cert_dir_local "$host")"
+          mkdir -p "$dst" && cp "$tmp"/*.pem "$dst/" && chmod 600 "$dst/privkey.pem"
+          _ssl_pin_nginx_local "$host"
+          compose restart nginx || compose up -d nginx ;;
+        ssh|aws-single|gcp-single)
+          local rdir; rdir="$(ssh_remote_dir)"
+          ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
+          scp $(ssh_opts | tr '\n' ' ') "$tmp/fullchain.pem" "$tmp/privkey.pem" \
+            "$(ssh_target):$rdir/compose/certbot/conf/live/$host/"
+          _ssl_pin_nginx_remote "$host"
+          # shellcheck disable=SC2029
+          ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
+      esac
+      ok "self-signed cert installed for $host, nginx reloaded"
+      warn "browsers will show a security warning. Import certbot/conf/live/$host/fullchain.pem into client trust stores to silence it." ;;
+
+    # ---- Operator-provided cert (from internal CA, etc.) ---------------------
+    bring-your-own)
+      local host=${1:-}; local cert=${2:-}; local key=${3:-}
+      [[ -n "$host" && -f "$cert" && -f "$key" ]] || \
+        die "usage: caytu-client ssl bring-your-own <host> <fullchain.pem> <privkey.pem>"
+      case "$TARGET" in
+        onprem)
+          local dst; dst="$(_ssl_cert_dir_local "$host")"
+          mkdir -p "$dst"
+          cp "$cert" "$dst/fullchain.pem"
+          cp "$key"  "$dst/privkey.pem"
+          chmod 600 "$dst/privkey.pem"
+          _ssl_pin_nginx_local "$host"
+          compose restart nginx || compose up -d nginx ;;
+        ssh|aws-single|gcp-single)
+          local rdir; rdir="$(ssh_remote_dir)"
+          ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
+          scp $(ssh_opts | tr '\n' ' ') "$cert" "$(ssh_target):$rdir/compose/certbot/conf/live/$host/fullchain.pem"
+          scp $(ssh_opts | tr '\n' ' ') "$key"  "$(ssh_target):$rdir/compose/certbot/conf/live/$host/privkey.pem"
+          _ssl_pin_nginx_remote "$host"
+          # shellcheck disable=SC2029
+          ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
+        *) die "ssl only applies to onprem/remote targets" ;;
+      esac
+      ok "cert installed for $host, nginx reloaded" ;;
+
+    # ---- HTTP-only (LAN deployments that don't care about TLS) ---------------
+    http-only)
+      case "$TARGET" in
+        local) die "ssl only applies to onprem/remote targets" ;;
+      esac
+      confirm "This will serve traffic on port 80 with no TLS. Proceed?" || exit 0
+
+      local src="$COMPOSE_DIR/nginx/conf.d/onprem-http.conf.template"
+      [[ -f "$src" ]] || die "missing $src"
+
+      case "$TARGET" in
+        onprem)
+          mv "$COMPOSE_DIR/nginx/conf.d/default.conf" "$COMPOSE_DIR/nginx/conf.d/default.conf.disabled" 2>/dev/null || true
+          cp "$src" "$COMPOSE_DIR/nginx/conf.d/default.conf"
+          compose restart nginx || compose up -d nginx ;;
+        ssh|aws-single|gcp-single)
+          local rdir; rdir="$(ssh_remote_dir)"
+          scp $(ssh_opts | tr '\n' ' ') "$src" "$(ssh_target):$rdir/compose/nginx/conf.d/default.conf"
+          # shellcheck disable=SC2029
+          ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
+      esac
+      ok "nginx switched to HTTP-only mode" ;;
+
+    renew)
+      case "$TARGET" in
+        ssh|aws-single|gcp-single) compose exec certbot certbot renew ;;
+        onprem) die "renew is for Let's Encrypt; regenerate self-signed via 'ssl self-signed <host>'" ;;
+        *) die "renew only applies to remote targets" ;;
+      esac ;;
+
+    *) die "usage: caytu-client ssl <bootstrap|self-signed|bring-your-own|http-only|renew>" ;;
+  esac
+}
+
+cmd_state() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    get) state_get "$1" ;;
+    set) state_set "$1" "$2"; ok "state[$1] = $2" ;;
+    show) [[ -f "$STATE_FILE" ]] && cat "$STATE_FILE" || echo '{}' ;;
+    *) die "usage: caytu-client state <get|set|show> [key] [value]" ;;
+  esac
+}
+
+cmd_aws() {
+  case "$TARGET" in
+    aws-single) : ;;
+    aws-cluster) die "aws verbs are for aws-single; aws-cluster uses 'k8s' verbs (phase 4)" ;;
+    *) die "aws verbs only apply when --target aws-single (current: $TARGET)" ;;
+  esac
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    doctor)    aws_doctor ;;
+    provision) aws_provision "$@" ;;
+    destroy)   aws_destroy "$@" ;;
+    instance)  aws_instance "$@" ;;
+    ecr-login) aws_ecr_login ;;
+    allow-me)  aws_allow_me ;;
+    *) die "usage: caytu-client aws <doctor|provision|destroy|instance|ecr-login|allow-me>" ;;
+  esac
+}
+
+cmd_gcp() {
+  case "$TARGET" in
+    gcp-single) : ;;
+    gcp-cluster) die "gcp verbs are for gcp-single; gcp-cluster uses 'k8s' verbs (phase 4)" ;;
+    *) die "gcp verbs only apply when --target gcp-single (current: $TARGET)" ;;
+  esac
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    doctor)         gcp_doctor ;;
+    provision)      gcp_provision "$@" ;;
+    destroy)        gcp_destroy "$@" ;;
+    instance)       gcp_instance "$@" ;;
+    registry-login) gcp_registry_login ;;
+    allow-me)       gcp_allow_me ;;
+    *) die "usage: caytu-client gcp <doctor|provision|destroy|instance|registry-login|allow-me>" ;;
+  esac
+}
+
+cmd_k8s() {
+  case "$TARGET" in
+    aws-cluster|gcp-cluster|self-managed-k8s) : ;;
+    *) die "k8s verbs only apply to cluster targets (current: $TARGET)" ;;
+  esac
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    doctor)            k8s_doctor ;;
+    secrets-bootstrap) k8s_secrets_bootstrap ;;
+    diff)              k8s_diff "$@" ;;
+    apply)             k8s_apply "$@" ;;
+    delete)            k8s_delete "$@" ;;
+    status|ps)         k8s_status ;;
+    logs)              k8s_logs "$@" ;;
+    scale)             k8s_scale "$@" ;;
+    rollout)           k8s_rollout "$@" ;;
+    exec)              k8s_exec "$@" ;;
+    port-forward|pf)   k8s_port_forward "$@" ;;
+    *) die "usage: caytu-client k8s <doctor|secrets-bootstrap|diff|apply|delete|status|logs|scale|rollout|exec|port-forward>" ;;
+  esac
+}
+
+# --- dispatch ----------------------------------------------------------------
+main() {
+  local -a pos=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target|-t) TARGET=$2; shift 2 ;;
+      --help|-h) cmd_help; exit 0 ;;
+      --) shift; pos+=("$@"); break ;;
+      *) pos+=("$1"); shift ;;
+    esac
+  done
+  set -- "${pos[@]:-}"
+
+  [[ $# -eq 0 ]] && { cmd_help; exit 0; }
+
+  # Default target: local
+  TARGET="${TARGET:-local}"
+
+  local verb=$1; shift || true
+  case "$verb" in
+    help|-h|--help) cmd_help ;;
+    install)        cmd_install ;;
+    init)           cmd_init "$@" ;;
+    doctor)         cmd_doctor "$@" ;;
+    up)             cmd_up "$@" ;;
+    down)           cmd_down "$@" ;;
+    start)          cmd_start "$@" ;;
+    stop)           cmd_stop "$@" ;;
+    restart)        cmd_restart "$@" ;;
+    ps|status)      cmd_status "$@" ;;
+    logs)           cmd_logs "$@" ;;
+    pull)           cmd_pull "$@" ;;
+    deploy)         cmd_deploy "$@" ;;
+    exec)           cmd_exec "$@" ;;
+    ssh)            cmd_ssh "$@" ;;
+    env)
+      case "${1:-}" in
+        push) shift; cmd_env_push "$@" ;;
+        *) die "usage: caytu-client env push" ;;
+      esac ;;
+    monitor)        cmd_monitor "$@" ;;
+    backup)         cmd_backup "$@" ;;
+    ssl)            cmd_ssl "$@" ;;
+    state)          cmd_state "$@" ;;
+    aws)            cmd_aws "$@" ;;
+    gcp)            cmd_gcp "$@" ;;
+    k8s)            cmd_k8s "$@" ;;
+    *) err "unknown verb: $verb"; cmd_help; exit 1 ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,45 @@
+# Ingress routes are the same across all overlays; overlays swap ingressClassName
+# and TLS annotations for their platform (nginx / alb / gce).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: caytu-client
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx  # overridden per overlay (alb on aws, gce on gcp)
+  rules:
+    - host: caytu.example.com  # overridden per overlay
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service: { name: backend,       port: { number: 5000 } }
+          - path: /socket.io
+            pathType: Prefix
+            backend:
+              service: { name: backend,       port: { number: 5000 } }
+          - path: /signaling
+            pathType: Prefix
+            backend:
+              service: { name: signaling-server, port: { number: 3001 } }
+          - path: /mqtt-api
+            pathType: Prefix
+            backend:
+              service: { name: mqtt-streamer, port: { number: 8000 } }
+          - path: /minio-api
+            pathType: Prefix
+            backend:
+              service: { name: minio,         port: { number: 9000 } }
+          - path: /minio-console
+            pathType: Prefix
+            backend:
+              service: { name: minio,         port: { number: 9001 } }
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: frontend,      port: { number: 3000 } }
