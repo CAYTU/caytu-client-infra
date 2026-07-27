@@ -84,3 +84,30 @@ output "iot_device_policy" {
   description = "IoT policy name to attach to device certificates"
   value       = var.enable_iot ? aws_iot_policy.device[0].name : ""
 }
+
+# --- DNS ---------------------------------------------------------------------
+
+output "domain_name" {
+  description = "FQDN pointed at the instance (empty when Route 53 is disabled)"
+  value       = local.route53_enabled ? var.domain_name : ""
+}
+
+output "letsencrypt_email" {
+  description = "Contact address the CLI uses when bootstrapping TLS"
+  value       = var.letsencrypt_email
+}
+
+output "route53_zone_id" {
+  description = "Hosted zone holding the A record (empty when Route 53 is disabled)"
+  value       = local.route53_zone_id
+}
+
+output "route53_nameservers" {
+  description = "Nameservers to set at your registrar. Only populated when Terraform created the zone."
+  value       = local.route53_enabled && var.create_route53_zone ? aws_route53_zone.this[0].name_servers : []
+}
+
+output "dns_record_created" {
+  description = "True when Terraform manages the A record — the CLI uses this to decide whether to bootstrap TLS automatically"
+  value       = local.route53_enabled
+}

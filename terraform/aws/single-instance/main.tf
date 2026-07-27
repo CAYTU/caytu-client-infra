@@ -274,7 +274,7 @@ resource "aws_instance" "this" {
   tags = {
     Name = "${var.name_prefix}-${var.environment}"
   }
-
+  
   lifecycle {
     ignore_changes = [
       ami,          # don't churn the box when Canonical publishes a new AMI

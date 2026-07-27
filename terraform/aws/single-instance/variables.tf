@@ -99,6 +99,59 @@ variable "enable_turn_ports" {
 }
 
 # -----------------------------------------------------------------------------
+# DNS (Route 53)
+# -----------------------------------------------------------------------------
+# All off by default — leaving enable_route53 = false creates zero DNS resources
+# and the deployment behaves exactly as it did before this was added.
+variable "enable_route53" {
+  description = "Create a Route 53 A record pointing domain_name at the instance's Elastic IP"
+  type        = bool
+  default     = false
+
+  validation {
+    # Catch the misconfiguration at plan time rather than halfway through apply.
+    condition     = !var.enable_route53 || (var.route53_zone_name != "" && var.domain_name != "")
+    error_message = "enable_route53 = true requires both route53_zone_name (e.g. \"caytu.link\") and domain_name (e.g. \"client.caytu.link\")."
+  }
+}
+
+variable "create_route53_zone" {
+  description = "false = attach to an existing hosted zone (looked up by route53_zone_name); true = create the zone, after which you must point your registrar at the emitted nameservers"
+  type        = bool
+  default     = false
+}
+
+variable "route53_zone_name" {
+  description = "Apex hosted zone, e.g. \"caytu.link\""
+  type        = string
+  default     = ""
+}
+
+variable "domain_name" {
+  description = "FQDN the instance answers on, e.g. \"client.caytu.link\". Must sit inside route53_zone_name."
+  type        = string
+  default     = ""
+}
+
+variable "route53_record_ttl" {
+  description = "TTL for the A record. Kept low so the record follows the EIP quickly if it ever changes."
+  type        = number
+  default     = 60
+}
+
+variable "route53_allow_overwrite" {
+  description = "Adopt an existing record with the same name/type instead of failing the apply"
+  type        = bool
+  default     = false
+}
+
+variable "letsencrypt_email" {
+  description = "Contact address for Let's Encrypt. Required for the CLI to bootstrap TLS automatically after provisioning."
+  type        = string
+  default     = ""
+}
+
+# -----------------------------------------------------------------------------
 # ECR
 # -----------------------------------------------------------------------------
 variable "ecr_repositories" {

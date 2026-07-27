@@ -50,6 +50,13 @@ services:
       - nginx-logs:/var/log/nginx
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
+    # nginx loads certificates once at startup, so a certbot renewal is invisible
+    # to it until something reloads. Rather than signal across containers, nginx
+    # reloads itself every 6h — a no-op when nothing changed, and it guarantees a
+    # renewed cert is served within 6h. Certs renew at 30 days remaining, so
+    # there is an enormous margin.
+    command: >
+      /bin/sh -c "while :; do sleep 6h; nginx -s reload; done & nginx -g 'daemon off;'"
     depends_on:
       backend:       { condition: service_healthy }
       frontend:      { condition: service_healthy }

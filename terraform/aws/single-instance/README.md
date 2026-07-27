@@ -8,6 +8,7 @@ What this creates in one `terraform apply`:
 - **Registry:** ECR repositories for `backend`, `frontend`, `webrtc-signaling`, `gstreamer-recorder`, `mqtt-streamer` — with lifecycle policy (30 tagged, 7d untagged)
 - **Backups:** S3 bucket with versioning + SSE + public access block + optional lifecycle to Glacier
 - **IoT device auth:** IoT policy for device certs + IAM role + IoT role alias for KVS credential vending
+- **DNS (opt-in):** set `enable_route53 = true` to create an A record pointing your domain at the Elastic IP — the CLI then issues the Let's Encrypt cert automatically at the end of provisioning
 
 You normally don't run terraform by hand — [`caytu-client aws provision`](../../../scripts/caytu-client) drives this whole flow and writes the outputs into `.caytu-client-state.json` + `compose/.env.aws-single`.
 
@@ -35,6 +36,31 @@ Outputs consumed downstream:
 | `restic_repository` | `.env.aws-single` → `RESTIC_REPOSITORY` |
 | `iot_data_endpoint` | `.env.aws-single` → `AWS_IOT_ENDPOINT` |
 | `iot_role_alias` | `.env.aws-single` → `AWS_IOT_ROLE_ALIAS` |
+| `domain_name` | `.env.aws-single` → `CAYTU_DOMAIN` |
+| `letsencrypt_email` | `.env.aws-single` → `CAYTU_LETSENCRYPT_EMAIL` |
+| `dns_record_created` | whether the CLI auto-runs `ssl bootstrap` |
+
+## DNS + automatic TLS
+
+```hcl
+# terraform.tfvars
+enable_route53    = true
+route53_zone_name = "caytu.link"          # hosted zone you already own
+domain_name       = "client.caytu.link"
+letsencrypt_email = "ops@caytu.com"
+```
+
+`caytu-client -t aws-single aws provision` then creates the A record, waits for
+it to resolve to the EIP, and issues the certificate — no manual DNS step and no
+separate `ssl bootstrap` call. `SKIP_AUTO_SSL=1` opts out of the TLS half.
+
+If the record already exists, set `route53_allow_overwrite = true` to adopt it
+rather than failing the apply. For a domain with no hosted zone yet, set
+`create_route53_zone = true` and point your registrar at the
+`route53_nameservers` output — TLS is skipped on that first run since DNS can't
+resolve until you do.
+
+Check DNS at any time with `caytu-client -t aws-single aws dns`.
 
 ## Remote state (recommended for prod)
 

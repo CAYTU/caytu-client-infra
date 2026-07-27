@@ -35,15 +35,18 @@
 #   monitor <up|down|tunnel>  monitoring overlay
 #   backup <enable|run|list|restore>  backup overlay
 #   ssl bootstrap <domain> <email>    issue initial Let's Encrypt cert (ssh/cloud)
+#                                     skips issuance if the cert has >30d left
 #   ssl self-signed <host-or-ip>      generate a self-signed cert (onprem)
 #   ssl bring-your-own <cert> <key>   install a cert you already have
 #   ssl http-only                     switch nginx to HTTP-only (no TLS)
-#   ssl renew                         force-renew Let's Encrypt cert
+#   ssl renew                         renew Let's Encrypt cert + reload nginx
+#   ssl status [domain]               show issuer and days until expiry
 #
 # Cloud-provider verbs (aws-single):
 #   aws provision                     terraform apply + write outputs to state/env
 #   aws destroy                       terraform destroy
 #   aws instance <start|stop|info|resize <type>>
+#   aws dns                           show the domain, the EIP, and what DNS resolves to
 #   aws ecr-login                     refresh docker login (also on the remote)
 #   aws allow-me                      add THIS laptop's IP to the SSH security-group rule
 #   aws doctor                        verify aws-cli auth + Terraform + jq
@@ -187,8 +190,15 @@ compose() {
 }
 
 # --- commands ----------------------------------------------------------------
+# Print the banner comment at the top of this file, from the line after the
+# opening '# ====' rule to the line before the closing one. Derived rather than
+# hardcoded so adding verbs to the banner never silently truncates the help.
 cmd_help() {
-  sed -n '3,50p' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'
+  awk '
+    /^# ={10,}/ { rule++; next }
+    rule == 1   { sub(/^# ?/, ""); print }
+    rule >= 2   { exit }
+  ' "$SCRIPT_PATH"
 }
 
 cmd_install() {
@@ -360,13 +370,34 @@ _ssl_pin_nginx_remote() {
     rm -f $rdir/compose/nginx/conf.d/default.conf.bak"
 }
 
+# Days until the remote cert for $1 expires. Prints nothing when there is no
+# cert (so callers can distinguish "missing" from "expiring").
+_ssl_days_left_remote() {
+  local host=$1 rdir end exp now
+  rdir="$(ssh_remote_dir)"
+  local pem="$rdir/compose/certbot/conf/live/$host/fullchain.pem"
+
+  # No cert yet is the normal first-run case, not an error — the `|| true` keeps
+  # `set -e` + `pipefail` from killing the caller when `test -f` fails.
+  # shellcheck disable=SC2029
+  end="$(ssh_run "test -f $pem && openssl x509 -enddate -noout -in $pem" 2>/dev/null | cut -d= -f2 || true)"
+  [[ -n "$end" ]] || return 0
+
+  exp="$(date -d "$end" +%s 2>/dev/null || true)"
+  [[ -n "$exp" ]] || return 0
+  now="$(date +%s)"
+  echo $(( (exp - now) / 86400 ))
+}
+
 cmd_ssl() {
   local sub=${1:-}; shift || true
   case "$sub" in
     # ---- Let's Encrypt (public DNS required) --------------------------------
     bootstrap)
       local domain=${1:-}; local email=${2:-}
-      [[ -n "$domain" && -n "$email" ]] || die "usage: caytu-client ssl bootstrap <domain> <email>"
+      [[ -n "$domain" && -n "$email" ]] || die "usage: caytu-client ssl bootstrap <domain> <email> [--force]"
+      local force="${FORCE:-}"
+      [[ "${3:-}" == "--force" ]] && force=1
       case "$TARGET" in
         ssh|aws-single|gcp-single) : ;;
         onprem) die "onprem hosts usually lack public DNS — use 'ssl self-signed <host>' or 'ssl http-only'" ;;
@@ -374,17 +405,47 @@ cmd_ssl() {
         *) die "unsupported target for ssl: $TARGET" ;;
       esac
       local rdir; rdir="$(ssh_remote_dir)"
+
+      # The deploy dir may not exist yet if we're running right after provision
+      # while bootstrap.sh is still installing docker.
+      # shellcheck disable=SC2029
+      ssh_run "mkdir -p $rdir/compose/certbot/conf $rdir/compose/certbot/www"
+
+      # Don't spend a Let's Encrypt issuance if the existing cert is healthy —
+      # they rate-limit per domain, and re-running bootstrap should be cheap.
+      local days; days="$(_ssl_days_left_remote "$domain")"
+      local certbot_extra=""
+      if [[ -n "$days" && "$force" != "1" ]]; then
+        if (( days > 30 )); then
+          info "existing cert for $domain is valid for $days more days — skipping issuance"
+          info "(re-run with --force to reissue anyway)"
+          _ssl_pin_nginx_remote "$domain"
+          # shellcheck disable=SC2029
+          ssh_run "cd $rdir/compose && docker compose restart nginx" || \
+            warn "nginx not running yet — it will pick up the cert on 'caytu-client up'"
+          ok "nginx pinned to $domain using the existing certificate"
+          return 0
+        fi
+        if (( days < 0 )); then
+          info "existing cert for $domain expired $(( -days )) days ago — reissuing"
+        else
+          info "existing cert for $domain expires in $days days — renewing"
+        fi
+        certbot_extra="--force-renewal"
+      fi
+
       info "issuing Let's Encrypt cert for $domain…"
       # shellcheck disable=SC2029
-      ssh_run "cd $rdir/compose && mkdir -p certbot/conf certbot/www && \
+      ssh_run "cd $rdir/compose && \
         docker run --rm \
           -v $rdir/compose/certbot/conf:/etc/letsencrypt \
           -v $rdir/compose/certbot/www:/var/www/certbot \
           -p 80:80 certbot/certbot certonly --standalone -n \
-          --agree-tos --email $email -d $domain"
+          --agree-tos --no-eff-email --email $email $certbot_extra -d $domain"
       _ssl_pin_nginx_remote "$domain"
       # shellcheck disable=SC2029
-      ssh_run "cd $rdir/compose && docker compose restart nginx"
+      ssh_run "cd $rdir/compose && docker compose restart nginx" || \
+        warn "nginx not running yet — it will pick up the cert on 'caytu-client up'"
       ok "Let's Encrypt cert issued for $domain, nginx reloaded" ;;
 
     # ---- Self-signed (no DNS required, works with a bare IP) -----------------
@@ -487,12 +548,50 @@ cmd_ssl() {
 
     renew)
       case "$TARGET" in
-        ssh|aws-single|gcp-single) compose exec certbot certbot renew ;;
+        ssh|aws-single|gcp-single) : ;;
         onprem) die "renew is for Let's Encrypt; regenerate self-signed via 'ssl self-signed <host>'" ;;
         *) die "renew only applies to remote targets" ;;
+      esac
+      compose exec certbot certbot renew "$@"
+      # certbot writes new files but nginx keeps serving the cert it loaded at
+      # startup — without this reload the renewal is invisible until a restart.
+      info "reloading nginx to pick up the renewed certificate…"
+      compose exec nginx nginx -s reload || \
+        warn "could not reload nginx (not running?) — run 'caytu-client restart nginx'"
+      ok "renewed and reloaded" ;;
+
+    # ---- Inspect what's actually being served --------------------------------
+    status)
+      local host=${1:-}
+      if [[ -z "$host" ]]; then
+        host="$(state_get domain)"
+        [[ -n "$host" ]] || host="$(env_get "$(env_file_for)" CAYTU_DOMAIN || true)"
+      fi
+      [[ -n "$host" ]] || die "usage: caytu-client ssl status <domain>  (or set CAYTU_DOMAIN)"
+
+      case "$TARGET" in
+        onprem|local)
+          local pem; pem="$(_ssl_cert_dir_local "$host")/fullchain.pem"
+          [[ -f "$pem" ]] || die "no certificate at $pem"
+          openssl x509 -in "$pem" -noout -subject -issuer -dates ;;
+        ssh|aws-single|gcp-single)
+          local rdir; rdir="$(ssh_remote_dir)"
+          local pem="$rdir/compose/certbot/conf/live/$host/fullchain.pem"
+          # shellcheck disable=SC2029
+          ssh_run "test -f $pem" 2>/dev/null || die "no certificate for $host on the remote host"
+          # shellcheck disable=SC2029
+          ssh_run "openssl x509 -in $pem -noout -subject -issuer -dates"
+
+          local days; days="$(_ssl_days_left_remote "$host")"
+          if [[ -n "$days" ]]; then
+            if   (( days < 0  )); then err  "EXPIRED $(( -days )) days ago"
+            elif (( days < 30 )); then warn "expires in $days days — will auto-renew within 12h"
+            else                       ok   "valid for $days more days"
+            fi
+          fi ;;
       esac ;;
 
-    *) die "usage: caytu-client ssl <bootstrap|self-signed|bring-your-own|http-only|renew>" ;;
+    *) die "usage: caytu-client ssl <bootstrap|self-signed|bring-your-own|http-only|renew|status>" ;;
   esac
 }
 
@@ -518,9 +617,10 @@ cmd_aws() {
     provision) aws_provision "$@" ;;
     destroy)   aws_destroy "$@" ;;
     instance)  aws_instance "$@" ;;
+    dns)       aws_dns ;;
     ecr-login) aws_ecr_login ;;
     allow-me)  aws_allow_me ;;
-    *) die "usage: caytu-client aws <doctor|provision|destroy|instance|ecr-login|allow-me>" ;;
+    *) die "usage: caytu-client aws <doctor|provision|destroy|instance|dns|ecr-login|allow-me>" ;;
   esac
 }
 

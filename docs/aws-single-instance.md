@@ -24,6 +24,13 @@ caytu-client -t aws-single init        # writes compose/.env.aws-single from the
 
 # Provision the AWS side. Terraform copies example.tfvars → terraform.tfvars
 # and opens $EDITOR — set operator_ssh_cidrs, environment name, instance type.
+#
+# Optionally set the DNS block to have Terraform create the A record and the
+# CLI issue the TLS cert for you:
+#   enable_route53    = true
+#   route53_zone_name = "caytu.link"
+#   domain_name       = "client.caytu.link"
+#   letsencrypt_email = "ops@caytu.com"
 caytu-client -t aws-single aws provision
 
 # The CLI now knows:
@@ -50,8 +57,34 @@ caytu-client -t aws-single env push
 caytu-client -t aws-single up
 caytu-client -t aws-single logs backend
 
-# Wire TLS — you'll typically have a domain pointing at the EIP:
+# Wire TLS. Skip this if you set the DNS block above — provision already did it.
+# Otherwise point your domain at the EIP first, then:
 caytu-client -t aws-single ssl bootstrap client.example.com ops@example.com
+```
+
+## DNS and TLS
+
+`aws provision` prints the public IP, instance id, and domain when it finishes.
+You can re-check the DNS side any time:
+
+```bash
+caytu-client -t aws-single aws dns       # domain vs. EIP vs. what actually resolves
+caytu-client -t aws-single ssl status    # issuer + days until expiry
+```
+
+With `enable_route53 = true` and `letsencrypt_email` set, provision creates the
+A record, waits for it to resolve to the EIP, then issues the certificate
+automatically. Set `SKIP_AUTO_SSL=1` to skip just the TLS step.
+
+`ssl bootstrap` is safe to re-run — it skips issuance when the existing
+certificate has more than 30 days left (so you don't burn Let's Encrypt rate
+limits), renews when under 30, and takes `--force` to reissue regardless.
+
+Renewal is automatic: the `certbot` sidecar checks every 12h, and nginx reloads
+itself every 6h so a renewed certificate is actually served. To force it:
+
+```bash
+caytu-client -t aws-single ssl renew     # renews and reloads nginx
 ```
 
 ## Everyday verbs

@@ -22,6 +22,21 @@ public_http_cidrs    = ["0.0.0.0/0"]
 # defaults). Leave false for the standard AWS + KVS path.
 enable_turn_ports    = false
 
+# --- DNS ----------------------------------------------------------------------
+# Off by default. Turn on to have Terraform create an A record pointing your
+# domain at the instance's Elastic IP — the CLI then bootstraps Let's Encrypt
+# automatically at the end of `caytu-client aws provision`.
+enable_route53 = false
+# route53_zone_name = "caytu.link"          # hosted zone you already own
+# domain_name       = "client.caytu.link"   # FQDN for this instance
+# letsencrypt_email = "ops@caytu.com"       # required for automatic TLS
+
+# Set true only for a brand-new domain with no hosted zone yet. You must then
+# point your registrar at the `route53_nameservers` output before TLS can work.
+# create_route53_zone     = false
+# route53_record_ttl      = 60
+# route53_allow_overwrite = false           # true to adopt an existing record
+
 # --- Registry -----------------------------------------------------------------
 ecr_repositories = ["backend", "frontend", "webrtc-signaling", "gstreamer-recorder", "mqtt-streamer"]
 
