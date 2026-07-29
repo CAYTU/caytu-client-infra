@@ -45,10 +45,10 @@ When `aws-*` is selected:
 - **`signaling-server` container** does not start (profile `self-hosted` is off).
 - **`coturn` container** does not start.
 - **`mqtt-broker` (mosquitto)** does not start (was already opt-in via profile `mqtt-broker`).
-- **backend + gstreamer-recorder** need `STREAMING_PROVIDER=kvs` set in `.env.aws-<single|cluster>` and the AWS IoT credentials populated. The remote overlay already bind-mounts `${BACKEND_CERTS_DIR:-/opt/caytu/backend-certs}` read-only to `/app/certs` on both services — drop your certs there.
-- **`mqtt-streamer`** points at `AWS_IOT_ENDPOINT` instead of a local broker (configured via `.env.streamer`).
+- **backend + gstreamer-recorder** need `STREAMING_PROVIDER=kvs` set in `.env.aws-<single|cluster>`. The IoT **device certificate, private key and CA are not files** — they live in the encrypted `caytu_secrets` store in Mongo, loaded with `caytu-client secrets seed` (see [secrets.md](secrets.md)). Nothing is bind-mounted.
+- **`mqtt-streamer`** points at `AWS_IOT_ENDPOINT` instead of a local broker.
 
-The app expects these env vars for the KVS path (set them in `.env.aws-single` when phase 2 lands, or in `.env.backend`):
+The app expects these env vars for the KVS path (set them in `.env.aws-single`):
 
 ```bash
 STREAMING_PROVIDER=kvs
@@ -56,11 +56,12 @@ SIGNALING_MODE=kvs
 AWS_REGION=us-east-1
 AWS_IOT_ENDPOINT=<account>.iot.us-east-1.amazonaws.com
 AWS_IOT_ROLE_ALIAS=<alias>
-AWS_IOT_CERT_PATH=/app/certs/device-cert.pem
-AWS_IOT_KEY_PATH=/app/certs/device-private.key
-AWS_IOT_CA_PATH=/app/certs/AmazonRootCA1.pem
 KVS_SIGNALING_CHANNEL_ARN=arn:aws:kinesisvideo:...:channel/...
 ```
+
+Endpoints and the role alias are configuration, not secrets, so they belong in
+the env file — `caytu-client aws provision` fills them in from the Terraform
+outputs. The certificate material is what goes in the vault.
 
 ## Manually overriding
 

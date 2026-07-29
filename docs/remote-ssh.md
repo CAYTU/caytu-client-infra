@@ -12,7 +12,7 @@ For any Linux host you can SSH into: bare-metal on-prem, a Hetzner/DO/Linode VPS
 └── ... docker named volumes live under /var/lib/docker/volumes/
 ```
 
-Application secrets (`compose/.env.remote` and any `.env.backend` / `.env.frontend` / etc.) also live under `/opt/caytu-client/compose/`, mode 600, gitignored on your workstation.
+The single env file (`compose/.env.ssh`) also lives under `/opt/caytu-client/compose/`, mode 600, gitignored on your workstation. Application secrets go in the encrypted Mongo store — see [secrets.md](secrets.md).
 
 ## One-time host bootstrap
 
@@ -44,8 +44,9 @@ $EDITOR compose/.env.ssh
 #   MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
 #   TURN_SECRET
 #   CAYTU_DOMAIN + CAYTU_LETSENCRYPT_EMAIL
-# Also drop app-specific env files alongside it (kept out of git):
-#   compose/.env.backend, .env.frontend, .env.signaling, .env.gstreamer, .env.streamer
+# That one file configures every service. Application secrets (JWT keys, API
+# keys, IoT device certs) go in the encrypted Mongo store instead:
+#   caytu-client -t ssh secrets seed --in vault.json
 
 # 4. registry login on your side, if you're pulling from a private registry
 aws ecr get-login-password --region us-east-1 | \

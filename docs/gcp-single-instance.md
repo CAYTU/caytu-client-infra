@@ -41,10 +41,10 @@ docker push <region>-docker.pkg.dev/<project>/caytu-client-backend:<tag>
 # ... etc for the other 4 services
 ```
 
-Fill in per-service env, ship it, start:
+Fill in the env file, ship it, start:
 
 ```bash
-$EDITOR compose/.env.backend compose/.env.frontend compose/.env.streamer compose/.env.signaling compose/.env.gstreamer
+$EDITOR compose/.env.gcp-single
 caytu-client -t gcp-single env push
 caytu-client -t gcp-single up
 caytu-client -t gcp-single logs backend

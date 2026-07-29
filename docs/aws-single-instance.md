@@ -49,8 +49,11 @@ caytu-client -t aws-single aws ecr-login    # local docker login (also propagate
 docker push <account>.dkr.ecr.<region>.amazonaws.com/caytu-client-backend:<tag>
 # ... etc for frontend, webrtc-signaling, gstreamer-recorder, mqtt-streamer
 
-# Fill in application secrets (backend, frontend, streamer, etc.)
-$EDITOR compose/.env.backend compose/.env.frontend compose/.env.streamer
+# Fill in application config — one file for the whole deployment
+$EDITOR compose/.env.aws-single
+
+# Load the encrypted secret store (JWT keys, IoT device certs, etc.)
+caytu-client -t aws-single secrets seed --in vault.json
 
 # Ship compose stack + env files to the host and start
 caytu-client -t aws-single env push
@@ -147,7 +150,7 @@ KVS signaling channels are also per-device / per-camera — the app creates them
 | On your workstation | On the EC2 host |
 |---|---|
 | `terraform/aws/single-instance/` — Terraform config + state | `/opt/caytu-client/compose/` — rsynced compose tree + env files |
-| `terraform/aws/single-instance/ssh_key.pem` — private key | `/opt/caytu/backend-certs/` — AWS IoT device certs (bind-mounted) |
+| `terraform/aws/single-instance/ssh_key.pem` — private key | `/opt/caytu-client/compose/.env` — symlink to `.env.aws-single` |
 | `.caytu-client-state.json` — ssh_host, instance_id, sg_id | `/opt/caytu-client/backups/` — local snapshots before S3 upload |
 | `compose/.env.aws-single` — deployment config | Docker named volumes for mongo, minio, redis |
 

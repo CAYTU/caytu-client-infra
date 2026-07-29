@@ -14,7 +14,7 @@
 #   * NO host ports on internal services — all traffic passes through nginx
 #   * nginx terminates TLS on 80/443 and reverse-proxies to internal services
 #   * certbot handles Let's Encrypt renewal
-#   * license state + machine-id bind mount for the backend (matches prod)
+#   * AWS IoT device certs bind-mounted into the backend (matches prod)
 # =============================================================================
 
 x-logging: &default-logging
@@ -24,20 +24,11 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
-  backend:
-    volumes:
-      - ${BACKEND_CERTS_DIR:-/opt/caytu/backend-certs}:/app/certs:ro
-      - /etc/machine-id:/etc/machine-id:ro
-      - caytu-license-state:/var/lib/caytu/license
-
+  # backend and mqtt-streamer mount nothing: AWS IoT device certs now come from
+  # the encrypted caytu_secrets store in Mongo, not from disk.
   gstreamer-recorder:
     volumes:
-      - ${BACKEND_CERTS_DIR:-/opt/caytu/backend-certs}:/app/certs:ro
       - gstreamer-recordings:/tmp/recordings
-
-  mqtt-streamer:
-    volumes:
-      - ${MQTT_CERTS_DIR:-/opt/caytu/mqtt-certs}:/app/certs:ro
 
   nginx:
     image: nginx:${NGINX_VERSION:-alpine}
@@ -88,4 +79,3 @@ services:
 
 volumes:
   nginx-logs:
-  caytu-license-state:

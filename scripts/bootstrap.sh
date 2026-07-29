@@ -76,10 +76,6 @@ log "preparing deploy dir $DEPLOY_DIR"
 mkdir -p "$DEPLOY_DIR/compose" "$DEPLOY_DIR/backups"
 chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
 
-# Optional: certs dirs bind-mounted read-only by services in the remote overlay.
-mkdir -p /opt/caytu/backend-certs /opt/caytu/mqtt-certs
-chown -R "$DEPLOY_USER:$DEPLOY_USER" /opt/caytu
-
 # -----------------------------------------------------------------------------
 # Optional: k3s single-node or join
 # -----------------------------------------------------------------------------

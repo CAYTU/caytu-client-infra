@@ -156,7 +156,7 @@ services:
     image: ${IMAGE_REGISTRY:-caytu-client}/webrtc-signaling:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     profiles: [self-hosted]
     env_file:
-      - path: ${ENV_SIGNALING_FILE:-./.env.signaling}
+      - path: ./.env
         required: false
     environment:
       - NODE_ENV=${NODE_ENV:-production}
@@ -185,7 +185,7 @@ services:
     volumes:
       - gstreamer-recordings:/tmp/recordings
     env_file:
-      - path: ${ENV_GSTREAMER_FILE:-./.env.gstreamer}
+      - path: ./.env
         required: false
     environment:
       - MINIO_ENDPOINT=minio:9000
@@ -244,7 +244,7 @@ services:
   mqtt-streamer:
     image: ${IMAGE_REGISTRY:-caytu-client}/mqtt-streamer:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
-      - path: ${ENV_STREAMER_FILE:-./.env.streamer}
+      - path: ./.env
         required: false
     restart: unless-stopped
     logging: *default-logging
@@ -277,7 +277,7 @@ services:
   backend:
     image: ${IMAGE_REGISTRY:-caytu-client}/backend:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
-      - path: ${ENV_BACKEND_FILE:-./.env.backend}
+      - path: ./.env
         required: false
     environment:
       - NODE_ENV=${NODE_ENV:-production}
@@ -319,7 +319,7 @@ services:
   frontend:
     image: ${IMAGE_REGISTRY:-caytu-client}/frontend:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
-      - path: ${ENV_FRONTEND_FILE:-./.env.frontend}
+      - path: ./.env
         required: false
     environment:
       - NODE_ENV=${NODE_ENV:-production}

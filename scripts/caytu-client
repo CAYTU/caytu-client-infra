@@ -41,6 +41,8 @@
 #   ssl http-only                     switch nginx to HTTP-only (no TLS)
 #   ssl renew                         renew Let's Encrypt cert + reload nginx
 #   ssl status [domain]               show issuer and days until expiry
+#   secrets seed [--in FILE] [-y]     upsert the encrypted secret store into MongoDB
+#                                     (reads stdin when --in is omitted)
 #
 # Cloud-provider verbs (aws-single):
 #   aws provision                     terraform apply + write outputs to state/env
@@ -94,6 +96,8 @@ source "$SCRIPT_DIR/lib/aws.sh"
 source "$SCRIPT_DIR/lib/gcp.sh"
 # shellcheck source=lib/k8s.sh
 source "$SCRIPT_DIR/lib/k8s.sh"
+# shellcheck source=lib/secrets.sh
+source "$SCRIPT_DIR/lib/secrets.sh"
 
 # --- target + env resolution -------------------------------------------------
 TARGET="${CAYTU_TARGET:-}"
@@ -173,8 +177,15 @@ compose() {
     fi
   fi
 
+  # Services declare `env_file: ./.env` (matching prod), but the repo keeps one
+  # file per target so several targets can be configured side by side. Point
+  # .env at the active target's file right before invoking compose. A symlink,
+  # not a copy — editing .env.<target> can never leave a stale .env behind.
+  local env_link; env_link=".env.$TARGET"
+
   case "$TARGET" in
     local|onprem)
+      ln -sfn "$env_link" "$COMPOSE_DIR/.env"
       (cd "$COMPOSE_DIR" && docker_compose --env-file "$env_file" "${files[@]}" "$@") ;;
     ssh|aws-single|gcp-single)
       local rdir; rdir="$(ssh_remote_dir)"
@@ -184,8 +195,7 @@ compose() {
         rfiles+=("$rdir/compose/$(basename "$f")")
       done
       # shellcheck disable=SC2029
-      # shellcheck disable=SC2029
-      ssh_run "cd $rdir/compose && COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose --env-file $rdir/compose/$(basename "$env_file") ${rfiles[*]} $*" ;;
+      ssh_run "cd $rdir/compose && ln -sfn $env_link .env && COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose --env-file $rdir/compose/$(basename "$env_file") ${rfiles[*]} $*" ;;
   esac
 }
 
@@ -289,13 +299,11 @@ cmd_env_push() {
   ssh_run "sudo mkdir -p $rdir/compose && sudo chown -R \$USER:\$USER $rdir"
   info "rsyncing compose tree…"
   ssh_rsync "$COMPOSE_DIR/" "compose/"
-  info "rsyncing env files…"
-  # Push .env.<target> and any per-service .env.* that exist alongside it.
+  info "rsyncing env file…"
+  # One file per deployment — every service reads it via `env_file: ./.env`,
+  # which compose() symlinks to this file on the remote.
   local env_file; env_file="$(env_file_for)"
   ssh_rsync "$env_file" "compose/$(basename "$env_file")"
-  for f in .env.backend .env.frontend .env.signaling .env.gstreamer .env.streamer; do
-    [[ -f "$COMPOSE_DIR/$f" ]] && ssh_rsync "$COMPOSE_DIR/$f" "compose/$f" || true
-  done
   ok "env push complete"
 }
 
@@ -595,6 +603,14 @@ cmd_ssl() {
   esac
 }
 
+cmd_secrets() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    seed) secrets_seed "$@" ;;
+    *) die "usage: caytu-client secrets seed [--in FILE] [-y]" ;;
+  esac
+}
+
 cmd_state() {
   local sub=${1:-}; shift || true
   case "$sub" in
@@ -707,6 +723,7 @@ main() {
     monitor)        cmd_monitor "$@" ;;
     backup)         cmd_backup "$@" ;;
     ssl)            cmd_ssl "$@" ;;
+    secrets)        cmd_secrets "$@" ;;
     state)          cmd_state "$@" ;;
     aws)            cmd_aws "$@" ;;
     gcp)            cmd_gcp "$@" ;;

@@ -38,15 +38,10 @@ CAYTU_DOMAIN=10.0.1.42             # bare IP is fine; also accepts LAN hostnames
 GRAFANA_ADMIN_PASSWORD=<strong pw>
 ```
 
-Drop the per-service env files next to it (kept out of git — copy from the caytu-client repo):
-
-```
-compose/.env.backend
-compose/.env.frontend
-compose/.env.signaling
-compose/.env.gstreamer
-compose/.env.streamer
-```
+That single file is the whole configuration — every service reads it. Application
+secrets (JWT keys, API keys, device certs) go in the encrypted Mongo store
+instead, via `caytu-client -t onprem secrets seed --in vault.json`. See
+[secrets.md](secrets.md).
 
 Log into your registry, then start:
 
