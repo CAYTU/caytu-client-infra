@@ -111,6 +111,10 @@ services:
       # and neither reads it from a .env. On its own it opens nothing; it lets
       # LICENSE_DEV_BYPASS=true be honoured. See license/dev-bypass.ts.
       - CAYTU_LOCAL_PROFILE=1
+      # Restored here because the base file blanks it. Interpolated on purpose:
+      # this file only ever runs on a developer's machine, which is the whole
+      # population the bypass is for.
+      - LICENSE_DEV_BYPASS=${LICENSE_DEV_BYPASS:-}
       # Left empty on purpose. The administrator is named on the platform's
       # instance record and written here by `instance provision`.
       - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-}
