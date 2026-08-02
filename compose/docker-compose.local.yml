@@ -106,6 +106,11 @@ services:
       - "${BACKEND_HOST_PORT:-5000}:5000"
     environment:
       - NODE_ENV=development
+      # The one thing that tells a laptop apart from a customer's on-prem box.
+      # Literal on both sides: this file sets it, docker-compose.yml blanks it,
+      # and neither reads it from a .env. On its own it opens nothing; it lets
+      # LICENSE_DEV_BYPASS=true be honoured. See license/dev-bypass.ts.
+      - CAYTU_LOCAL_PROFILE=1
       # Left empty on purpose. The administrator is named on the platform's
       # instance record and written here by `instance provision`.
       - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-}

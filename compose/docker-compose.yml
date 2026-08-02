@@ -159,7 +159,7 @@ services:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      - NODE_ENV=production
       - PORT=3001
       - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-token}
       - MONGODB_URI=${SIGNALING_MONGODB_URI:-mongodb://mongodb:27017/caytu-signaling}
@@ -280,7 +280,14 @@ services:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      # Literal, not interpolated. These three lines are what makes the licence
+      # bypass local-only: `environment` wins over `env_file`, so a .env on the
+      # host cannot set them back. This file is the one a customer runs, and
+      # running unlicensed is meant for a laptop building from source, not for
+      # every self-hosted site. See license/dev-bypass.ts in caytu-client.
+      - NODE_ENV=production
+      - CAYTU_LOCAL_PROFILE=
+      - LICENSE_DEV_BYPASS=
       - PORT=5000
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true}
       # The backend builds its own URL from host and port, so REDIS_URL on its
@@ -326,7 +333,7 @@ services:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      - NODE_ENV=production
       - PORT=3000
       - HOSTNAME=0.0.0.0
     depends_on:
