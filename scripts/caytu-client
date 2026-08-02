@@ -1265,6 +1265,27 @@ command_execute() {
         printf 'a fresh claim link was sent to %s' "$email" > "$work/result"
       fi
       ;;
+    install-license)
+      # The credential itself never travels through here. The host writes down
+      # which licence the console chose and brings the backend back on it; the
+      # deployment fetches and verifies its own token, exactly as it does on
+      # boot. That keeps a signed licence off the command channel, out of this
+      # script and out of the result the platform stores.
+      local lic
+      lic="$(printf '%s' "$params" | jq -r '.licenseId // empty')"
+      if [[ -z "$lic" ]]; then
+        status="failed"; error="no licence was named"
+      elif ! env_upsert "$env_file" CAYTU_LICENSE_ID "$lic"; then
+        status="failed"; error="the licence could not be written to this host's configuration"
+      # --force-recreate because the value arrives through the env file: a plain
+      # restart reuses the container it is already baked into, so nothing changes
+      # and the command reports success having done nothing.
+      elif ! compose up -d --no-deps --force-recreate backend >/dev/null 2>&1; then
+        status="failed"; error="the backend did not come back, so the licence is configured but not in use"
+      else
+        printf 'licence %s configured; the deployment installs it as it comes back up' "$lic" > "$work/result"
+      fi
+      ;;
     teardown)
       # Containers, not data. A billing decision is not consent to destroy a
       # customer's database, and `down --volumes` has no undo.
