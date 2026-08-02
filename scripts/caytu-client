@@ -843,6 +843,14 @@ enroll_host() {
   env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
   env_upsert "$env_file" PLATFORM_HOST_URL "$platform"
 
+  # Host credentials expire now, and the host is what renews them. Recorded so
+  # the agent knows when to, without asking the platform on every tick.
+  local expires host_id
+  expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  host_id="$(printf '%s' "$body" | jq -r '.hostId // empty')"
+  [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
+  [[ -n "$host_id" ]] && env_upsert "$env_file" CAYTU_HOST_ID "$host_id"
+
   # What the CLI reaches the platform on is not always what the containers do:
   # in local development these are docker service names, and overwriting them
   # with a host address sends the running stack to a port it cannot see. Filled
@@ -1438,6 +1446,62 @@ commands_poll() {
   done
 }
 
+# Replace this host's credential before it lapses.
+#
+# Host tokens expire after a year. An expiry with no renewal is just a slower
+# outage: every deployment would go dark a year after install, all of them
+# silently, and the only fix would be walking a new enrollment code to the box.
+# So the machine renews itself, the same way it renews its licence.
+#
+# Authenticated by the token being replaced, which is the only thing a host has
+# to prove itself with. Prints nothing and changes nothing outside the window.
+host_renew_token() {
+  local env_file=$1 token=$2
+  local expires; expires="$(env_get "$env_file" CAYTU_TOKEN_EXPIRES_AT || true)"
+
+  # Nothing recorded means a host enrolled before expiries existed. Its token
+  # still works, and the platform migration is what gives it a date.
+  [[ -n "$expires" ]] || return 0
+
+  local expires_epoch now_epoch
+  expires_epoch="$(date -d "$expires" +%s 2>/dev/null)" || return 0
+  now_epoch="$(date +%s)"
+
+  # Thirty days, matching HOST_TOKEN_RENEW_WINDOW_MS on the platform. Wide
+  # enough that a host switched off for a few weeks still catches it.
+  local window=$(( 30 * 24 * 60 * 60 ))
+  (( expires_epoch - now_epoch < window )) || return 0
+
+  info "this host's credential expires $expires; renewing"
+
+  local body
+  if ! body="$(curl -fsS -X POST "$(instance_platform_url "$env_file")/api/auth/enroll/rotate" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"; then
+    warn "could not renew this host's credential; will try again"
+    return 0
+  fi
+
+  local new_token new_expires
+  new_token="$(printf '%s' "$body" | jq -r '.token // empty')"
+  new_expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  [[ -n "$new_token" ]] || { warn "the platform returned no new credential"; return 0; }
+
+  # Written before anything uses it. A crash between these two lines would
+  # otherwise leave the file holding a token the platform has already retired.
+  env_upsert "$env_file" CAYTU_METERING_TOKEN "$new_token"
+  [[ -n "$new_expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$new_expires"
+
+  # The running backend holds the old one in its environment, and the old one no
+  # longer works, so it has to come back on the new one.
+  compose up -d --no-deps --force-recreate backend >/dev/null 2>&1 \
+    || warn "credential renewed, but the backend did not restart onto it"
+
+  ok "credential renewed, valid until $new_expires"
+  # Tells the caller to keep using the new one for the rest of this run.
+  printf '%s' "$new_token"
+}
+
 instance_agent() {
   require_cmd curl jq
   local env_file; env_file="$(env_file_for)"
@@ -1482,6 +1546,12 @@ instance_agent() {
 
     if [[ "$since_sweep" -ge "$interval" ]]; then
       since_sweep=0
+
+      # On the slow clock: a credential with a year on it does not need checking
+      # every three seconds, and the check is free when it is not due.
+      local renewed; renewed="$(host_renew_token "$env_file" "$token")"
+      [[ -n "$renewed" ]] && token="$renewed"
+
       local body
       if body="$(curl -fsS "$(instance_platform_url "$env_file")/api/billings/instances" \
         -H "Authorization: Bearer $token" 2>/dev/null)"; then
