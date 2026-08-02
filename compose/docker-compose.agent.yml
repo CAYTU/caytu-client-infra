@@ -1,0 +1,41 @@
+# Run the provisioner as a service instead of a person.
+#
+# `caytu-client instance agent` polls the platform and provisions whatever is
+# assigned to this host. Run interactively it is a terminal a human has to keep
+# open; run here it is infrastructure.
+#
+# For Caytu-hosted instances this is the whole answer: the agent lives on our
+# side, so creating an instance in the UI provisions it with nobody involved.
+# For a customer site it is the same container, started once by whoever builds
+# the server.
+#
+#   caytu-client -t <target> agent up
+#
+# It drives docker on the host, so it gets the socket. That is real privilege:
+# a container that can start containers can do most things. Give it its own
+# token scoped to the organization it serves, not a platform-wide one.
+services:
+  provisioner-agent:
+    image: docker:${DOCKER_CLI_VERSION:-27-cli}
+    restart: unless-stopped
+    working_dir: /repo
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache bash curl jq openssl rsync >/dev/null
+        exec bash scripts/caytu-client -t "$${CAYTU_TARGET:-onprem}" instance agent \
+          --interval "$${AGENT_INTERVAL:-30}" \
+          --command-interval "$${AGENT_COMMAND_INTERVAL:-3}"
+    environment:
+      - CAYTU_TARGET=${CAYTU_TARGET:-onprem}
+      - AGENT_INTERVAL=${AGENT_INTERVAL:-30}
+      # Someone is watching a spinner when this one matters, so it ticks faster.
+      - AGENT_COMMAND_INTERVAL=${AGENT_COMMAND_INTERVAL:-3}
+    volumes:
+      # The repo, because the agent runs compose from it.
+      - ${CAYTU_INFRA_REPO:-..}:/repo
+      # The host's docker, because that is what it provisions onto.
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
