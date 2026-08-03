@@ -1310,11 +1310,22 @@ command_execute() {
       fi
       ;;
     purge)
-      # The deliberate opposite of teardown: volumes and images go too. Scoped
-      # to this compose project by --rmi local, never a host-wide prune, because
-      # the machine may well be running other things.
-      if compose down --volumes --rmi local >/dev/null 2>&1; then
-        printf 'containers, volumes and locally built images were removed' > "$work/result"
+      # The deliberate opposite of teardown: volumes and images go too. Still
+      # scoped to this compose project's own services, never a host-wide prune,
+      # because the machine may well be running other things.
+      #
+      # `--rmi all`, not `--rmi local`: "local" means only the images this
+      # project BUILT, and a customer's deployment builds nothing. Every service
+      # in docker-compose.yml pulls a published image, so on the very hosts where
+      # purge matters "local" matched nothing and removed nothing, while the
+      # console said the images were gone. The local profile was the only place
+      # it ever worked, because that overlay is the only one with build: stanzas.
+      #
+      # Safe against a neighbouring project sharing a base image: Docker keeps
+      # the image alive for whatever is still using it and only drops this
+      # project's tag, and compose still exits 0.
+      if compose down --volumes --rmi all >/dev/null 2>&1; then
+        printf 'containers, volumes and this deployment'"'"'s images were removed' > "$work/result"
         env_upsert "$env_file" CAYTU_INSTANCE_ID ""
         AGENT_STOP_REASON="purge"
       else
