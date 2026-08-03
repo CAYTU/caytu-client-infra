@@ -1301,7 +1301,12 @@ command_execute() {
     teardown)
       # Containers, not data. A billing decision is not consent to destroy a
       # customer's database, and `down --volumes` has no undo.
-      if compose down >/dev/null 2>&1; then
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        # Already gone from here, so this is done rather than failed: the
+        # platform asked for that deployment to stop and it is not running.
+        printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+      elif compose down >/dev/null 2>&1; then
         printf 'the stack was stopped; data volumes were kept' > "$work/result"
         # Stop answering as an instance that no longer exists, or the next
         # heartbeat re-reports a terminated record and the agent keeps claiming
@@ -1328,7 +1333,12 @@ command_execute() {
       # Safe against a neighbouring project sharing a base image: Docker keeps
       # the image alive for whatever is still using it and only drops this
       # project's tag, and compose still exits 0.
-      if compose down --volumes --rmi all >/dev/null 2>&1; then
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        # The dangerous one. Without this guard a purge queued for a retired
+        # instance wipes the volumes and images of whatever is running now.
+        printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+      elif compose down --volumes --rmi all >/dev/null 2>&1; then
         printf 'containers, volumes and this deployment'"'"'s images were removed' > "$work/result"
         env_upsert "$env_file" CAYTU_INSTANCE_ID ""
         AGENT_STOP_REASON="purge"
@@ -1405,6 +1415,24 @@ forget_instance() {
     [[ "$candidate" == "$id" ]] || kept+=("$candidate")
   done
   env_upsert "$env_file" CAYTU_KNOWN_INSTANCE_IDS "${kept[*]:-}"
+}
+
+# Whether a command is about the deployment this host is actually running.
+#
+# A host polls for every instance it has ever run, not just the current one, so
+# a teardown or purge queued for a retired instance can be claimed long after
+# something else has taken its place. But the compose project holds exactly one
+# deployment at a time and the handlers act on the whole project, so obeying a
+# command meant for a previous occupant destroys the current one.
+#
+# That is not hypothetical: four stale commands claimed on the first tick after
+# an agent started tore down and then purged a deployment that had been
+# provisioned two minutes earlier, and stopped the agent afterwards for good
+# measure.
+command_targets_current_stack() {
+  local env_file=$1 instance_id=$2
+  local current; current="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  [[ -n "$current" && "$current" == "$instance_id" ]]
 }
 
 # Claims and runs whatever is waiting, one per instance per pass. Silent when
