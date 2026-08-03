@@ -1114,6 +1114,10 @@ instance_provision() {
 
   instance_report "$env_file" "$id" '{"status":"provisioning","provisioningPercent":25}'
 
+  # Only when this host builds. One that pulls published images never touches
+  # CodeArtifact and should not be asked for AWS credentials it does not have.
+  [[ -n "$build" ]] && codeartifact_ensure_fresh "$env_file"
+
   info "starting the stack…"
   if cmd_up $build; then
     # Deliberately not claiming adminProvisioned here. A stack that starts is
@@ -1805,6 +1809,58 @@ cmd_license() {
 CODEARTIFACT_DOMAIN="${CODEARTIFACT_DOMAIN:-caytu}"
 CODEARTIFACT_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-688544396352}"
 CODEARTIFACT_AWS_REGION="${CODEARTIFACT_AWS_REGION:-us-east-1}"
+
+# Whether the token in this env file is missing or past its expiry.
+#
+# A CodeArtifact token carries its own expiry in the clear: the first segment of
+# the JWE is base64url JSON with an "exp" claim. So this needs no network call
+# and no AWS credentials, which matters because it runs on the path where the
+# answer decides whether to bother building at all.
+#
+# Returns 0 when a refresh is needed.
+codeartifact_token_stale() {
+  local env_file=$1
+  local token; token="$(env_get "$env_file" CODEARTIFACT_AUTH_TOKEN || true)"
+  [[ -n "$token" ]] || return 0
+
+  local header exp
+  header="${token%%.*}"
+  # base64url, and the segment is usually unpadded.
+  exp="$(printf '%s' "$header" | tr '_-' '/+' \
+    | awk '{ while (length($0) % 4) $0 = $0 "="; print }' \
+    | base64 -d 2>/dev/null \
+    | sed -n 's/.*"exp":\([0-9]*\).*/\1/p')"
+
+  # Unreadable is not the same as expired. Say nothing and let the build decide,
+  # rather than refusing to work because the token format changed.
+  [[ -n "$exp" ]] || return 1
+
+  # A minute of slack: a token expiring during the build is as broken as one
+  # that already has.
+  (( exp - 60 <= $(date +%s) ))
+}
+
+# Refresh the token before a build needs it, if we can.
+#
+# The failure this prevents is a bad one to debug: the token lasts 12 hours, so
+# the first build of the day dies several minutes in, inside a yarn install, on
+# a 401 that surfaces as "the stack did not come up on the host". Nothing in
+# that sentence points at a credential.
+codeartifact_ensure_fresh() {
+  local env_file=$1
+  codeartifact_token_stale "$env_file" || return 0
+
+  if ! command -v aws >/dev/null 2>&1; then
+    warn "the CodeArtifact token has expired and the aws CLI is not here to renew it."
+    warn "the backend build will fail on @caytu/metering until it is refreshed."
+    return 0
+  fi
+
+  info "the CodeArtifact token has expired; renewing before the build"
+  # Best effort: a host that pulls prebuilt images does not need this at all, so
+  # a failure here must not stop provisioning.
+  cmd_codeartifact_login || warn "could not renew it; the build may fail on @caytu/metering"
+}
 
 cmd_codeartifact_login() {
   require_cmd aws
