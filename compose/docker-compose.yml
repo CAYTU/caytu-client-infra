@@ -321,6 +321,12 @@ services:
       # signing the token, so the site looks provisioned and nobody can get in.
       # `instance provision` generates one if the env file has none.
       - JWT_SECRET=${JWT_SECRET:-}
+      # Derives the key for the encrypted secret store, which holds the licence
+      # blob and the anti-rollback ratchet. A distributed image bakes its own
+      # shard at build time and ignores this; a local build has none, so without
+      # it the store cannot be read and the deployment can never hold a licence.
+      # Must be the same value passed to ./encrypt-secrets.sh when seeding.
+      - CAYTU_SECRET_STORE_KEY=${CAYTU_SECRET_STORE_KEY:-}
       - CAYTU_METERING_TOKEN=${CAYTU_METERING_TOKEN:-}
       - CAYTU_ORGANIZATION_ID=${CAYTU_ORGANIZATION_ID:-}
       - CAYTU_INSTANCE_ID=${CAYTU_INSTANCE_ID:-}
