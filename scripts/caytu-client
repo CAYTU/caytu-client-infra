@@ -1254,6 +1254,9 @@ command_execute() {
   local work; work="$(mktemp -d)"
 
   local status="done" error="" claim_url=""
+  # Reported as done, but nothing was touched. Kept apart from a real one so
+  # the log does not read identically whether a stack was destroyed or spared.
+  local skipped=0
   : > "$work/result"
 
   case "$type" in
@@ -1306,6 +1309,7 @@ command_execute() {
         # platform asked for that deployment to stop and it is not running.
         printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
         forget_instance "$env_file" "$instance_id"
+        skipped=1
       elif compose down >/dev/null 2>&1; then
         printf 'the stack was stopped; data volumes were kept' > "$work/result"
         # Stop answering as an instance that no longer exists, or the next
@@ -1338,6 +1342,7 @@ command_execute() {
         # instance wipes the volumes and images of whatever is running now.
         printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
         forget_instance "$env_file" "$instance_id"
+        skipped=1
       elif compose down --volumes --rmi all >/dev/null 2>&1; then
         printf 'containers, volumes and this deployment'"'"'s images were removed' > "$work/result"
         env_upsert "$env_file" CAYTU_INSTANCE_ID ""
@@ -1372,7 +1377,13 @@ command_execute() {
   rm -rf "$work"
 
   if [[ "$delivered" -eq 1 ]]; then
-    [[ "$status" == "done" ]] && ok "$type finished" || warn "$type failed: $error"
+    if [[ "$status" != "done" ]]; then
+      warn "$type failed: $error"
+    elif [[ "$skipped" -eq 1 ]]; then
+      info "$type skipped: it was queued for a deployment this host no longer runs"
+    else
+      ok "$type finished"
+    fi
   else
     # The work happened; the console will never hear about it. Saying "finished"
     # here is how a command sits at "waiting for the host" forever.
