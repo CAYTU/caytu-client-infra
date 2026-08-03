@@ -316,6 +316,11 @@ services:
       # platform looks exactly like one nobody is using. The backend now names
       # that state at boot rather than leaving it to be discovered from a bill.
       # See config/platform-wiring.ts in caytu-client.
+      # Signs this deployment's sessions. Required and fail-closed: without it
+      # a claim link sets a password and the sign-in that follows dies while
+      # signing the token, so the site looks provisioned and nobody can get in.
+      # `instance provision` generates one if the env file has none.
+      - JWT_SECRET=${JWT_SECRET:-}
       - CAYTU_METERING_TOKEN=${CAYTU_METERING_TOKEN:-}
       - CAYTU_ORGANIZATION_ID=${CAYTU_ORGANIZATION_ID:-}
       - CAYTU_INSTANCE_ID=${CAYTU_INSTANCE_ID:-}

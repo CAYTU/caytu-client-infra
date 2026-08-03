@@ -1114,6 +1114,10 @@ instance_provision() {
 
   instance_report "$env_file" "$id" '{"status":"provisioning","provisioningPercent":25}'
 
+  # Before the stack starts, because the client reads this at boot and refuses
+  # to sign anybody in without it.
+  ensure_deployment_secrets "$env_file"
+
   # Only when this host builds. One that pulls published images never touches
   # CodeArtifact and should not be asked for AWS credentials it does not have.
   [[ -n "$build" ]] && codeartifact_ensure_fresh "$env_file"
@@ -1848,6 +1852,31 @@ cmd_license() {
 CODEARTIFACT_DOMAIN="${CODEARTIFACT_DOMAIN:-caytu}"
 CODEARTIFACT_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-688544396352}"
 CODEARTIFACT_AWS_REGION="${CODEARTIFACT_AWS_REGION:-us-east-1}"
+
+# Secrets a deployment must have and that nobody should have to invent.
+#
+# JWT_SECRET is fail-closed in the client: without it every login dies while
+# signing the session token. That is a uniquely misleading failure, because the
+# claim link works and the new password is accepted and stored, and only then
+# does the sign-in collapse with "An error occurred". The deployment looks
+# provisioned and nobody can get into it.
+#
+# It lived in backend/.env.example and in neither compose file, so it reached a
+# real deployment only if somebody had read that example and copied it across by
+# hand. Provisioning is automatic, so nobody ever did.
+#
+# Generated once and never rotated here: changing it signs out every existing
+# session on the site and invalidates every refresh token.
+ensure_deployment_secrets() {
+  local env_file=$1
+  local key
+  for key in JWT_SECRET; do
+    [[ -n "$(env_get "$env_file" "$key" || true)" ]] && continue
+    require_cmd openssl
+    env_upsert "$env_file" "$key" "$(openssl rand -hex 32)"
+    ok "generated $key for this deployment"
+  done
+}
 
 # Whether the token in this env file is missing or past its expiry.
 #
