@@ -1,3 +1,11 @@
+# caytu-client-infra deployment stack. This is what a customer runs.
+#
+# Pulls published images by tag and never builds. Driven by the `caytu-client`
+# CLI, which layers an overlay per target (local, onprem, ssh, aws, gcp).
+#
+# The application repository has its own docker-compose.yml for developing the
+# application. It is not this file and is never run on a customer host.
+
 # =============================================================================
 # caytu-client — base stack
 #

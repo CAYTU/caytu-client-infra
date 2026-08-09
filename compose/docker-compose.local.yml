@@ -1,3 +1,12 @@
+# caytu-client-infra development overlay, for the `local` target.
+#
+# Builds the DEVELOPMENT target from a caytu-client checkout and mounts the
+# source, so edits hot-reload. This is the one exception to the rule that a
+# deployment file never builds.
+#
+# Not the same as caytu-client/docker-compose.local.yml, which builds the
+# hardened production image. Same filename, opposite meaning.
+
 # =============================================================================
 # Local development overlay
 #
