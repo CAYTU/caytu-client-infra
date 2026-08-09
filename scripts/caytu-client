@@ -290,7 +290,33 @@ cmd_doctor() {
   esac
 }
 
-cmd_up()      { preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
+# Refuse to start a real deployment on an unpinned image.
+#
+# The shipped compose falls back to :latest when no tag is set, which is whatever
+# was pushed most recently. That is fine on a laptop that builds its own images
+# and wrong everywhere else: a customer cannot be on a known-good version, a
+# rollback has nothing to roll back to, and two hosts provisioned a week apart
+# silently run different code.
+#
+# Checked here rather than in compose, because `${IMAGE_TAG:?}` in the base file
+# is interpolated before the local overlay can override the image, so requiring
+# it there breaks local development too.
+require_pinned_version() {
+  local env_file=$1
+
+  # The local target builds from the working tree, so there is no version to pin.
+  [[ "$TARGET" == "local" ]] && return 0
+
+  local tag; tag="$(env_get "$env_file" IMAGE_TAG || true)"
+  [[ -n "$tag" && "$tag" != "latest" ]] && return 0
+
+  err "this deployment has no version pinned (IMAGE_TAG is ${tag:-unset})."
+  err "running :latest means the host follows whatever was published most"
+  err "recently, so it cannot be rolled back and two hosts drift apart."
+  die "set a released version, e.g. IMAGE_TAG=v1.4.2, in $(basename "$env_file")"
+}
+
+cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
 cmd_down()    { local vols=""; [[ "${1:-}" == "--volumes" ]] && vols="--volumes"; compose down $vols; }
 cmd_start()   { compose start "$@"; }
 cmd_stop()    { compose stop "$@"; }
