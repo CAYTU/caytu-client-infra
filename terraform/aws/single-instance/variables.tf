@@ -5,7 +5,7 @@ variable "region" {
 }
 
 variable "aws_profile" {
-  description = "AWS CLI profile to use"
+  description = "AWS CLI profile to use. Set it empty to use the environment's credentials, which is what CI does."
   type        = string
   default     = "default"
 }
