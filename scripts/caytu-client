@@ -1687,6 +1687,81 @@ instance_agent() {
 }
 
 # Run the provisioner as a service rather than a terminal someone keeps open.
+
+# Enrol this machine using the identity AWS already gives it.
+#
+# A Caytu-hosted deployment comes up with nobody watching, so it cannot be handed
+# an enrolment code. Putting one in user_data would work and is what most people
+# do, but instance metadata is readable by anything on the box, so the code
+# becomes a secret in a place we do not control and proves nothing about which
+# machine presented it.
+#
+# The instance identity document is the alternative: AWS signs it for every
+# instance, it is public, and it is useless to anyone who is not that machine.
+# Two fetches and a POST, which is the whole reason this lives in bash rather
+# than being a presigned SigV4 call.
+#
+# Needs only CAYTU_INSTANCE_ID and the platform URL, neither of them secret.
+enroll_self() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+
+  local record="${CAYTU_INSTANCE_ID:-$(env_get "$env_file" CAYTU_INSTANCE_ID || true)}"
+  local platform="${CAYTU_PLATFORM_URL:-$(env_get "$env_file" CAYTU_PLATFORM_URL || true)}"
+  [[ -n "$record" ]]   || die "CAYTU_INSTANCE_ID is not set, so this machine does not know which deployment it is for"
+  [[ -n "$platform" ]] || die "CAYTU_PLATFORM_URL is not set, so this machine does not know where the platform is"
+
+  # Already enrolled: cloud-init can run more than once and re-enrolling would
+  # be refused anyway, so stop before asking.
+  if [[ -n "$(env_get "$env_file" CAYTU_METERING_TOKEN || true)" ]]; then
+    ok "this machine already holds a credential"
+    return 0
+  fi
+
+  # Overridable only so this path can be exercised without an EC2 instance.
+  # Anyone able to set it already controls the machine, so it grants nothing.
+  local imds="${CAYTU_IMDS_URL:-http://169.254.169.254}"
+  # IMDSv2 first: newer instances refuse the unauthenticated read. Falling back
+  # keeps this working on an instance configured the older way.
+  local imds_token
+  imds_token="$(curl -fsS -m 5 -X PUT "$imds/latest/api/token" \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+  local -a hdr=()
+  [[ -n "$imds_token" ]] && hdr=(-H "X-aws-ec2-metadata-token: $imds_token")
+
+  local doc sig
+  doc="$(curl -fsS -m 5 "${hdr[@]}" "$imds/latest/dynamic/instance-identity/document" 2>/dev/null)" \
+    || die "no instance identity document here, so this is not an EC2 instance"
+  # rsa2048, not the older `signature`, which is SHA-1 over DSA.
+  sig="$(curl -fsS -m 5 "${hdr[@]}" "$imds/latest/dynamic/instance-identity/rsa2048" 2>/dev/null)" \
+    || die "could not read this instance's identity signature"
+
+  info "enrolling with ${platform%/} as deployment $record…"
+  local body
+  body="$(jq -n --arg d "$doc" --arg s "$sig" --arg i "$record" \
+            '{document:$d, signature:$s, instanceId:$i}' \
+          | curl -fsS -X POST "${platform%/}/api/auth/enroll/instance" \
+              -H 'Content-Type: application/json' --data-binary @- 2>/dev/null)" \
+    || die "the platform refused this machine's identity"
+
+  local token org
+  token="$(printf '%s' "$body" | jq -r '.token // empty')"
+  org="$(printf '%s' "$body" | jq -r '.organizationId // empty')"
+  [[ -n "$token" && -n "$org" ]] || die "unexpected response from the platform"
+
+  env_upsert "$env_file" CAYTU_METERING_TOKEN "$token"
+  env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
+  env_upsert "$env_file" CAYTU_INSTANCE_ID "$record"
+  env_upsert "$env_file" CAYTU_PLATFORM_URL "$platform"
+  local expires; expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
+  for var in CAYTU_BILLINGS_URL; do
+    [[ -z "$(env_get "$env_file" "$var" || true)" ]] && env_upsert "$env_file" "$var" "$platform"
+  done
+
+  ok "enrolled for organization $org"
+}
+
 cmd_agent() {
   local sub=${1:-}; shift || true
   local -a files=(-f "$COMPOSE_DIR/docker-compose.agent.yml")
@@ -2118,6 +2193,7 @@ main() {
     instance)       cmd_instance "$@" ;;
     agent)          cmd_agent "$@" ;;
     enroll)         enroll_host "$@" ;;
+    enroll-self)    enroll_self "$@" ;;
     host)           cmd_host "$@" ;;
     admin)          cmd_admin "$@" ;;
     state)          cmd_state "$@" ;;
