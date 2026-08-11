@@ -106,10 +106,14 @@ jobs:
           set -euo pipefail
           # aws_profile empty on purpose: a runner has environment credentials
           # and no ~/.aws/credentials for a named profile to live in.
-          # An optional -var is built here rather than with a ${{ }} conditional:
-          # an expression that renders to nothing inside a line continuation is
-          # the kind of thing that works until it does not, and this is a plan
-          # that creates real infrastructure.
+          # The optional -var is built in shell rather than with a GitHub
+          # expression: one that renders to nothing inside a line continuation
+          # works until it does not, and this plan creates real infrastructure.
+          #
+          # Note the shape of that sentence. GitHub expands its expression
+          # syntax anywhere in a run block, comments included, so writing the
+          # empty form here to illustrate it is what made this whole file
+          # unloadable: every push reported a startup failure and no job.
           extra=()
           if [ -n "${INSTANCE_TYPE}" ]; then
             extra+=(-var "instance_type=${INSTANCE_TYPE}")
