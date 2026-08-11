@@ -201,3 +201,21 @@ variable "iot_role_alias_ttl_seconds" {
   type        = number
   default     = 3600
 }
+
+# ── Caytu hosted ─────────────────────────────────────────────────────────────
+# Set when this machine is being created for a specific deployment. With both of
+# these the instance enrols itself on first boot and provisions without anyone
+# logging in. Neither is a secret: the credential is issued against the identity
+# document AWS signs for the instance, not against anything carried here.
+
+variable "caytu_instance_id" {
+  description = "The platform's deployment record this machine is created for. Empty means an unattached machine that an operator will enrol by hand."
+  type        = string
+  default     = ""
+}
+
+variable "caytu_platform_url" {
+  description = "Where the platform lives, e.g. https://caytu.link"
+  type        = string
+  default     = ""
+}
