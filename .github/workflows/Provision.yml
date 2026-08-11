@@ -47,15 +47,20 @@ permissions:
 
 env:
   TF_DIR: terraform/aws/single-instance
-  # Must already exist. Terraform cannot create the bucket holding its own state.
-  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
-  TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
 
 jobs:
   provision:
     name: Provision ${{ github.event.inputs.subdomain }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Here rather than at workflow level: `env` up there can only read the
+    # github, vars and inputs contexts, so naming `secrets` made the whole file
+    # invalid and GitHub refused it before creating a single job. A job's env
+    # can read secrets.
+    env:
+      # Must already exist. Terraform cannot create the bucket holding its own state.
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
     steps:
       - uses: actions/checkout@v4
 
