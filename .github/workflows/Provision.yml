@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 🔑 Configure AWS Credentials
+      - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -70,7 +70,7 @@ jobs:
         with:
           terraform_wrapper: false
 
-      - name: 🧭 Init, with this deployment's own state
+      - name: Init, with this deployment's own state
         working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
@@ -85,7 +85,7 @@ jobs:
             ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
             -backend-config="encrypt=true"
 
-      - name: 📐 Plan
+      - name: Plan
         working-directory: ${{ env.TF_DIR }}
         # Through the environment, not interpolated into the script: a value that
         # lands inside the shell text is a value that can end the command and
@@ -121,11 +121,11 @@ jobs:
             -var "caytu_platform_url=${PLATFORM_URL}" \
             -var 'operator_ssh_cidrs=[]'
 
-      - name: 🚀 Apply
+      - name: Apply
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false -auto-approve tfplan
 
-      - name: 📋 What was created
+      - name: What was created
         working-directory: ${{ env.TF_DIR }}
         run: |
           {
