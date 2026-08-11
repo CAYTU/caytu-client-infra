@@ -1,3 +1,11 @@
+# caytu-client-infra deployment stack. This is what a customer runs.
+#
+# Pulls published images by tag and never builds. Driven by the `caytu-client`
+# CLI, which layers an overlay per target (local, onprem, ssh, aws, gcp).
+#
+# The application repository has its own docker-compose.yml for developing the
+# application. It is not this file and is never run on a customer host.
+
 # =============================================================================
 # caytu-client — base stack
 #
@@ -153,13 +161,13 @@ services:
     networks: [caytu]
 
   signaling-server:
-    image: ${IMAGE_REGISTRY:-caytu-client}/webrtc-signaling:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${SIGNALING_IMAGE_NAME:-webrtc-signaling}:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     profiles: [self-hosted]
     env_file:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      - NODE_ENV=production
       - PORT=3001
       - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-token}
       - MONGODB_URI=${SIGNALING_MONGODB_URI:-mongodb://mongodb:27017/caytu-signaling}
@@ -179,7 +187,7 @@ services:
     networks: [caytu]
 
   gstreamer-recorder:
-    image: ${IMAGE_REGISTRY:-caytu-client}/gstreamer-recorder:${GSTREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${GSTREAMER_IMAGE_NAME:-gstreamer-recorder}:${GSTREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     ulimits:
       nofile: { soft: 65536, hard: 65536 }
     volumes:
@@ -242,7 +250,7 @@ services:
     networks: [caytu]
 
   mqtt-streamer:
-    image: ${IMAGE_REGISTRY:-caytu-client}/mqtt-streamer:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${MQTT_STREAMER_IMAGE_NAME:-mqtt-streamer}:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
@@ -275,15 +283,26 @@ services:
   # Application
   # ---------------------------------------------------------------------------
   backend:
-    image: ${IMAGE_REGISTRY:-caytu-client}/backend:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${BACKEND_IMAGE_NAME:-backend}:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      # Literal, not interpolated. These three lines are what makes the licence
+      # bypass local-only: `environment` wins over `env_file`, so a .env on the
+      # host cannot set them back. This file is the one a customer runs, and
+      # running unlicensed is meant for a laptop building from source, not for
+      # every self-hosted site. See license/dev-bypass.ts in caytu-client.
+      - NODE_ENV=production
+      - CAYTU_LOCAL_PROFILE=
+      - LICENSE_DEV_BYPASS=
       - PORT=5000
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true}
+      # The backend builds its own URL from host and port, so REDIS_URL on its
+      # own never reached it. Both are set now.
       - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio}
       - MINIO_PORT=${MINIO_PORT:-9000}
       - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
@@ -295,6 +314,38 @@ services:
       - SIGNALING_SERVER_PUBLIC_WS_URL=${SIGNALING_SERVER_PUBLIC_WS_URL:-}
       - SIGNALING_AUTH_TOKEN=${SIGNALING_AUTH_TOKEN:-}
       - STREAMING_PROVIDER=${STREAMING_PROVIDER:-self-hosted}
+      # How this deployment reaches the platform. `instance provision` writes
+      # all of these into .env, and env_file alone would have carried them in,
+      # so they were invisible here: nothing in this file said that metering,
+      # licensing and instance reporting existed, let alone what turned them off.
+      #
+      # Each one is silent when empty. An empty CAYTU_METERING_TOKEN is not an
+      # error, it is a deployment that reports no usage at all, which on the
+      # platform looks exactly like one nobody is using. The backend now names
+      # that state at boot rather than leaving it to be discovered from a bill.
+      # See config/platform-wiring.ts in caytu-client.
+      # Signs this deployment's sessions. Required and fail-closed: without it
+      # a claim link sets a password and the sign-in that follows dies while
+      # signing the token, so the site looks provisioned and nobody can get in.
+      # `instance provision` generates one if the env file has none.
+      - JWT_SECRET=${JWT_SECRET:-}
+      # Derives the key for the encrypted secret store, which holds the licence
+      # blob and the anti-rollback ratchet. A distributed image bakes its own
+      # shard at build time and ignores this; a local build has none, so without
+      # it the store cannot be read and the deployment can never hold a licence.
+      # Must be the same value passed to ./encrypt-secrets.sh when seeding.
+      - CAYTU_SECRET_STORE_KEY=${CAYTU_SECRET_STORE_KEY:-}
+      - CAYTU_METERING_TOKEN=${CAYTU_METERING_TOKEN:-}
+      - CAYTU_ORGANIZATION_ID=${CAYTU_ORGANIZATION_ID:-}
+      - CAYTU_INSTANCE_ID=${CAYTU_INSTANCE_ID:-}
+      - CAYTU_PLATFORM_URL=${CAYTU_PLATFORM_URL:-}
+      - CAYTU_BILLINGS_URL=${CAYTU_BILLINGS_URL:-}
+      - CAYTU_DEPLOYMENT_URL=${CAYTU_DEPLOYMENT_URL:-}
+      - CAYTU_DOMAIN=${CAYTU_DOMAIN:-}
+      # Which licence this deployment runs on, when the console picked one.
+      # Written by the host agent on an install-license command; empty means
+      # "whatever the platform issues this organization".
+      - CAYTU_LICENSE_ID=${CAYTU_LICENSE_ID:-}
       - STUN_URLS=${STUN_URLS:-stun:coturn:3478}
       - TURN_URLS=${TURN_URLS:-turn:coturn:3478}
       - TURN_SECRET=${TURN_SECRET:-}
@@ -317,12 +368,12 @@ services:
     networks: [caytu]
 
   frontend:
-    image: ${IMAGE_REGISTRY:-caytu-client}/frontend:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${FRONTEND_IMAGE_NAME:-frontend}:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      - NODE_ENV=production
       - PORT=3000
       - HOSTNAME=0.0.0.0
     depends_on:

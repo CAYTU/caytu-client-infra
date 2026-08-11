@@ -35,6 +35,22 @@ env_get() {
   grep -E "^${key}=" "$file" | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'
 }
 
+# Set KEY=VALUE, replacing an existing line or appending one. Values go through
+# the environment rather than into the awk program, so a value containing
+# slashes or ampersands cannot corrupt the file. Writes via a temp file so a
+# failure mid-write cannot truncate the original.
+env_upsert() {
+  local file=$1 key=$2 value=$3
+  [[ -f "$file" ]] || die "no such env file: $file"
+  local tmp; tmp="$(mktemp)"
+  KEY="$key" VALUE="$value" awk '
+    BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0 }
+    index($0, k "=") == 1 { print k "=" v; done = 1; next }
+    { print }
+    END { if (!done) print k "=" v }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # State: a tiny JSON blob next to the script. We use jq if available, otherwise
 # a naive line-based fallback (state keys are always simple strings).
 state_get() {

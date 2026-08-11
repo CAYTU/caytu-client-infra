@@ -123,6 +123,35 @@ if [[ "$INSTALL_K3S" == "1" ]]; then
   log "  # deploy the app"
   log "  cd kubernetes/overlays/self-managed && cp secrets.env.example secrets.env && \$EDITOR secrets.env"
   log "  kubectl apply -k ."
+elif [[ -n "${CAYTU_INSTANCE_ID:-}" ]]; then
+  # A machine we provisioned. It finishes on its own from here: nobody is
+  # watching, and the point of Caytu hosted is that the customer never touches
+  # the box.
+  #
+  # No credential arrives with it. It proves what it is with the identity
+  # document AWS signs for every instance, which is why user_data carries only
+  # these two values, neither of them secret.
+  log "Caytu-hosted instance for deployment $CAYTU_INSTANCE_ID"
+
+  run_as() { sudo -u "$DEPLOY_USER" env \
+    CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
+    CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
+
+  if run_as caytu-client --target onprem init >/dev/null 2>&1 \
+     && run_as caytu-client --target onprem enroll-self; then
+    log "enrolled; starting the provisioner"
+    # From here it is the path a customer's own host already follows: the agent
+    # claims the deployment it was created for and provisions it.
+    run_as caytu-client --target onprem agent up \
+      || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
+  else
+    # Loud, and deliberately not fatal. The machine is up and an operator can
+    # finish by hand, which beats an instance that tears itself down.
+    log "WARNING: this machine could not enrol itself."
+    log "  Check the platform is reachable and that AWS_ACCOUNT_ID and"
+    log "  AWS_IDENTITY_CERT_PEM are set there, then run:"
+    log "    caytu-client -t onprem enroll-self && caytu-client -t onprem agent up"
+  fi
 else
   log "done. remaining steps (from your workstation):"
   log "  caytu-client --target ssh state set ssh_host $(hostname -I | awk '{print $1}')"

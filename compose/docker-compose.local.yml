@@ -1,3 +1,12 @@
+# caytu-client-infra development overlay, for the `local` target.
+#
+# Builds the DEVELOPMENT target from a caytu-client checkout and mounts the
+# source, so edits hot-reload. This is the one exception to the rule that a
+# deployment file never builds.
+#
+# Not the same as caytu-client/docker-compose.local.yml, which builds the
+# hardened production image. Same filename, opposite meaning.
+
 # =============================================================================
 # Local development overlay
 #
@@ -13,7 +22,8 @@
 #   * services build from source in ${CAYTU_CLIENT_REPO} (default: ../caytu-client)
 #   * host ports are published for direct access from your workstation
 #   * source dirs are bind-mounted for hot reload (backend, frontend, gstreamer)
-#   * dev-friendly env: watch mode, CORS relaxed, INITIAL_ADMIN_EMAIL, etc.
+#   * every address is derived from the published ports below, so nothing has to
+#     be configured by hand and a moved port cannot leave a stale URL behind
 # =============================================================================
 
 services:
@@ -71,7 +81,11 @@ services:
     ports:
       - "${GSTREAMER_HOST_PORT:-8080}:8080"
 
+  # Opt-in locally: it authenticates to AWS IoT with certificate files that a
+  # laptop does not have, so on a plain `up` it crash-loops. Start it with
+  # COMPOSE_PROFILES=mqtt-streamer once certs or a local broker config exist.
   mqtt-streamer:
+    profiles: [mqtt-streamer]
     build:
       context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/mqtt-streamer
       dockerfile: Dockerfile
@@ -86,17 +100,42 @@ services:
       context: ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend
       dockerfile: Dockerfile
       target: development
+      args:
+        # @caytu/metering lives in private CodeArtifact. Fill this via
+        # `caytu-client codeartifact-login` before a build from scratch.
+        CODEARTIFACT_AUTH_TOKEN: ${CODEARTIFACT_AUTH_TOKEN:-}
     image: caytu-client/backend:local
     volumes:
       - ${CAYTU_CLIENT_REPO:-../../caytu-client}/backend:/app
       - /app/node_modules
+      # Shadow the developer's own .env, which the bind mount would otherwise
+      # drag in. See no-dotenv.env.
+      - ./no-dotenv.env:/app/.env:ro
     ports:
       - "${BACKEND_HOST_PORT:-5000}:5000"
     environment:
       - NODE_ENV=development
-      - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-admin@caytu.local}
-      - CLIENT_URL=${CLIENT_URL:-http://localhost:3000}
-      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:3000}
+      # The one thing that tells a laptop apart from a customer's on-prem box.
+      # Literal on both sides: this file sets it, docker-compose.yml blanks it,
+      # and neither reads it from a .env. On its own it opens nothing; it lets
+      # LICENSE_DEV_BYPASS=true be honoured. See license/dev-bypass.ts.
+      - CAYTU_LOCAL_PROFILE=1
+      # Restored here because the base file blanks it. Interpolated on purpose:
+      # this file only ever runs on a developer's machine, which is the whole
+      # population the bypass is for.
+      - LICENSE_DEV_BYPASS=${LICENSE_DEV_BYPASS:-}
+      # Left empty on purpose. The administrator is named on the platform's
+      # instance record and written here by `instance provision`.
+      - INITIAL_ADMIN_EMAIL=${INITIAL_ADMIN_EMAIL:-}
+      - INITIAL_ADMIN_NAME=${INITIAL_ADMIN_NAME:-}
+      # Where a person lands: every emailed link is a frontend route, so these
+      # follow the frontend's port and never the backend's.
+      - CLIENT_URL=${CLIENT_URL:-http://localhost:${FRONTEND_HOST_PORT:-3100}}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:${FRONTEND_HOST_PORT:-3100}}
+      - CAYTU_DEPLOYMENT_URL=${CAYTU_DEPLOYMENT_URL:-http://localhost:${FRONTEND_HOST_PORT:-3100}}
+      # Presigned media URLs are opened by a browser, so they follow the
+      # published MinIO port rather than the internal one.
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-http://localhost:${MINIO_HOST_PORT:-9400}}
       # Point at host bridge for locally-run mqtt-streamer if not using the container
       - MQTT_STREAMER_ENDPOINT=${MQTT_STREAMER_ENDPOINT:-http://mqtt-streamer:8100}
 
@@ -110,11 +149,24 @@ services:
       - ${CAYTU_CLIENT_REPO:-../../caytu-client}/client:/app
       - /app/node_modules
       - /app/.next
+      # Same trap as the backend: the bind mount drags in the developer's own
+      # dotenv, and Next reads it. See no-dotenv.env.
+      - ./no-dotenv.env:/app/.env:ro
+      - ./no-dotenv.env:/app/.env.local:ro
     ports:
       - "${FRONTEND_HOST_PORT:-3000}:3000"
     environment:
       - NODE_ENV=development
+      # Server-side rendering runs inside the network, so it uses service names.
       - API_URL=http://backend:5000
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:5000}
+      - WS_URL=ws://backend:5000
+      - MINIO_URL=http://minio:9000
+      # The *_PUBLIC set is what reaches the browser, through the runtime config
+      # the layout injects. Published host ports, never internal service names.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:${BACKEND_HOST_PORT:-5100}}
+      - API_URL_PUBLIC=${API_URL_PUBLIC:-http://localhost:${BACKEND_HOST_PORT:-5100}}
+      - WS_URL_PUBLIC=${WS_URL_PUBLIC:-ws://localhost:${BACKEND_HOST_PORT:-5100}}
+      - MINIO_URL_PUBLIC=${MINIO_URL_PUBLIC:-http://localhost:${MINIO_HOST_PORT:-9400}}
+      - CLIENT_URL=${CLIENT_URL:-http://localhost:${FRONTEND_HOST_PORT:-3100}}
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true

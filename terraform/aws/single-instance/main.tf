@@ -264,11 +264,18 @@ resource "aws_instance" "this" {
 
   # bootstrap.sh is idempotent so it's safe to include as user_data. Operators
   # who need something different should pass user_data via a tfvars override.
+  # Passing the deployment id and platform URL is what turns this from "a machine
+  # with docker on it" into a deployment that finishes itself. Both are readable
+  # by anything on the box and neither is a secret: the credential is issued
+  # against the identity document AWS signs, not against anything written here.
   user_data = <<-EOF
     #!/bin/bash
     set -e
     curl -fsSL https://raw.githubusercontent.com/CAYTU/caytu-client-infra/main/scripts/bootstrap.sh | \
-      DEPLOY_USER=ubuntu bash
+      DEPLOY_USER=ubuntu \
+      CAYTU_INSTANCE_ID='${var.caytu_instance_id}' \
+      CAYTU_PLATFORM_URL='${var.caytu_platform_url}' \
+      bash
   EOF
 
   tags = {

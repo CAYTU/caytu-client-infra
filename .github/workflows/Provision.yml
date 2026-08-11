@@ -1,0 +1,136 @@
+name: Provision a Caytu-hosted deployment
+
+# Create the machine for one deployment, and nothing else.
+#
+# The platform dispatches this rather than running Terraform itself, so no AWS
+# credential ever has to live in a platform service. They stay here, where the
+# other pipeline credentials already are, and every provision leaves a log and an
+# audit trail without anyone building one.
+#
+# State is per deployment. The whole point is worth repeating because getting it
+# wrong is silent and destructive: every deployment uses the same Terraform
+# configuration, so one shared state file would make provisioning the second
+# customer see the first customer's instance as "the" instance and destroy it.
+# The key below is what keeps them apart.
+#
+# Nothing here is customer-supplied. The values come from the deployment record
+# the platform already wrote, so a customer cannot ask for a bigger machine by
+# editing a request.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "The platform's deployment record id"
+        required: true
+      region:
+        description: "AWS region, e.g. us-east-1"
+        required: true
+        default: "us-east-1"
+      subdomain:
+        description: "Hostname label, used to name the resources"
+        required: true
+      platform_url:
+        description: "Where the deployment reports back to"
+        required: true
+      instance_arch:
+        description: "arm64 (Graviton, cheaper) or amd64"
+        required: false
+        default: "arm64"
+      instance_type:
+        description: "Left empty to use the default for the architecture"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_DIR: terraform/aws/single-instance
+  # Must already exist. Terraform cannot create the bucket holding its own state.
+  TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+  TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
+
+jobs:
+  provision:
+    name: Provision ${{ github.event.inputs.subdomain }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Init, with this deployment's own state
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET" || {
+            echo "::error::TF_STATE_BUCKET is not set. Provisioning without remote state would create a machine nothing can ever find again."
+            exit 1
+          }
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=instances/${{ github.event.inputs.instance_id }}/terraform.tfstate" \
+            -backend-config="region=${{ github.event.inputs.region }}" \
+            ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
+            -backend-config="encrypt=true"
+
+      - name: Plan
+        working-directory: ${{ env.TF_DIR }}
+        # Through the environment, not interpolated into the script: a value that
+        # lands inside the shell text is a value that can end the command and
+        # start another one.
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+          INSTANCE_ARCH: ${{ github.event.inputs.instance_arch }}
+          INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+        run: |
+          set -euo pipefail
+          # aws_profile empty on purpose: a runner has environment credentials
+          # and no ~/.aws/credentials for a named profile to live in.
+          # An optional -var is built here rather than with a ${{ }} conditional:
+          # an expression that renders to nothing inside a line continuation is
+          # the kind of thing that works until it does not, and this is a plan
+          # that creates real infrastructure.
+          extra=()
+          if [ -n "${INSTANCE_TYPE}" ]; then
+            extra+=(-var "instance_type=${INSTANCE_TYPE}")
+          fi
+
+          terraform plan -input=false -out=tfplan \
+            -var "aws_profile=" \
+            -var "region=${REGION}" \
+            -var "environment=production" \
+            -var "name_prefix=caytu-${SUBDOMAIN}" \
+            -var "instance_arch=${INSTANCE_ARCH}" \
+            "${extra[@]}" \
+            -var "caytu_instance_id=${INSTANCE_ID}" \
+            -var "caytu_platform_url=${PLATFORM_URL}" \
+            -var 'operator_ssh_cidrs=[]'
+
+      - name: Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: What was created
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          {
+            echo "### Provisioned \`${{ github.event.inputs.subdomain }}\`"
+            echo
+            echo "The machine enrols itself and claims deployment \`${{ github.event.inputs.instance_id }}\`."
+            echo "Nothing else is needed: watch the deployment's state in the console."
+          } >> "$GITHUB_STEP_SUMMARY"

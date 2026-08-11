@@ -1,5 +1,11 @@
 # Secrets
 
+> **Which stack this describes:** the deployment stack in this repository's
+> `compose/` directory, the one a customer runs. The application repository has
+> a `docs/secret-store.md` covering its own compose files, which carry the same
+> filenames with different behaviour. This is the document to follow when
+> provisioning a real host.
+
 **Nothing sensitive is checked into git.** Secrets reach a deployment two ways:
 
 - **One `.env` file** per deployment under `compose/` (gitignored) — infrastructure and application configuration, rsynced to the host mode 600 by `env push`. Covered immediately below.
