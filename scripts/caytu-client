@@ -43,6 +43,24 @@
 #   ssl status [domain]               show issuer and days until expiry
 #   secrets seed [--in FILE] [-y]     upsert the encrypted secret store into MongoDB
 #                                     (reads stdin when --in is omitted)
+#   codeartifact-login [--profile N]  refresh the CodeArtifact token in .env.<target>
+#                                     (needed to build the backend: @caytu/metering)
+#   license fetch [--out F] [--install]  ask the platform to issue this org's license
+#   license install <FILE|->          install a signed token into this deployment
+#   license status                    what the running client thinks its license is
+#   instance provision <id> [--build] configure AND start this target from a
+#                                     platform Instance record, reporting back.
+#                                     This is the deploy: no separate `up` needed.
+#   host profile                      what this machine is: OS, arch, docker,
+#                                     free ports, addresses. Measured, not asked
+#   enroll <CODE> [--platform URL]    claim this host's credential from a code
+#                                     shown in the console; writes its own config
+#   agent up|down|logs                run the provisioner as a service, so nobody
+#                                     keeps a terminal open
+#   instance agent [--interval S]     the same loop in the foreground
+#   instance report <status>          report instance state by hand
+#   admin invite [email]              print a single-use claim link locally, for
+#                                     air-gapped sites or an expired invite
 #
 # Cloud-provider verbs (aws-single):
 #   aws provision                     terraform apply + write outputs to state/env
@@ -80,6 +98,8 @@ set -Eeuo pipefail
 
 # --- constants ---------------------------------------------------------------
 SCRIPT_PATH="$(readlink -f "$0")"
+# Kept so the agent can re-exec itself when this file changes underneath it.
+SCRIPT_ARGV=("$@")
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPOSE_DIR="$REPO_ROOT/compose"
@@ -114,7 +134,12 @@ compose_files_for() {
 
   case "$t" in
     local)
-      args+=(-f "$COMPOSE_DIR/docker-compose.local.yml") ;;
+      args+=(-f "$COMPOSE_DIR/docker-compose.local.yml")
+      # Only when asked for: without a platform on this machine the network does
+      # not exist, and an external network that is missing fails every command.
+      [[ -n "$(env_get "$COMPOSE_DIR/.env.$t" CAYTU_PLATFORM_NETWORK || true)" ]] \
+        && args+=(-f "$COMPOSE_DIR/docker-compose.local-platform.yml")
+      ;;
     onprem|ssh|aws-single|gcp-single)
       args+=(-f "$COMPOSE_DIR/docker-compose.remote.yml") ;;
     aws-cluster|gcp-cluster|self-managed-k8s)
@@ -265,7 +290,33 @@ cmd_doctor() {
   esac
 }
 
-cmd_up()      { local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
+# Refuse to start a real deployment on an unpinned image.
+#
+# The shipped compose falls back to :latest when no tag is set, which is whatever
+# was pushed most recently. That is fine on a laptop that builds its own images
+# and wrong everywhere else: a customer cannot be on a known-good version, a
+# rollback has nothing to roll back to, and two hosts provisioned a week apart
+# silently run different code.
+#
+# Checked here rather than in compose, because `${IMAGE_TAG:?}` in the base file
+# is interpolated before the local overlay can override the image, so requiring
+# it there breaks local development too.
+require_pinned_version() {
+  local env_file=$1
+
+  # The local target builds from the working tree, so there is no version to pin.
+  [[ "$TARGET" == "local" ]] && return 0
+
+  local tag; tag="$(env_get "$env_file" IMAGE_TAG || true)"
+  [[ -n "$tag" && "$tag" != "latest" ]] && return 0
+
+  err "this deployment has no version pinned (IMAGE_TAG is ${tag:-unset})."
+  err "running :latest means the host follows whatever was published most"
+  err "recently, so it cannot be rolled back and two hosts drift apart."
+  die "set a released version, e.g. IMAGE_TAG=v1.4.2, in $(basename "$env_file")"
+}
+
+cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
 cmd_down()    { local vols=""; [[ "${1:-}" == "--volumes" ]] && vols="--volumes"; compose down $vols; }
 cmd_start()   { compose start "$@"; }
 cmd_stop()    { compose stop "$@"; }
@@ -603,6 +654,1419 @@ cmd_ssl() {
   esac
 }
 
+# --- port preflight ----------------------------------------------------------
+#
+# The client and the Caytu platform are expected to run on the same laptop, so a
+# published port that is already taken is a normal mistake rather than an exotic
+# one. Docker's own error for this names a port and nothing else, which leaves
+# you grepping compose files to find out which service wanted it.
+#
+# This says which service, which port, and which variable to change.
+
+# Which env var moves each published port, so the message can be acted on.
+port_var_for() {
+  case "$1" in
+    backend)            echo "BACKEND_HOST_PORT" ;;
+    frontend)           echo "FRONTEND_HOST_PORT" ;;
+    signaling-server)   echo "SIGNALING_HOST_PORT" ;;
+    gstreamer-recorder) echo "GSTREAMER_HOST_PORT" ;;
+    mqtt-streamer)      echo "MQTT_STREAMER_HOST_PORT" ;;
+    mongodb)            echo "MONGO_HOST_PORT" ;;
+    redis)              echo "REDIS_HOST_PORT" ;;
+    minio)              echo "MINIO_HOST_PORT / MINIO_CONSOLE_HOST_PORT" ;;
+    vault)              echo "VAULT_HOST_PORT" ;;
+    *)                  echo "the port mapping for $1" ;;
+  esac
+}
+
+port_in_use() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltn "sport = :$1" 2>/dev/null | tail -n +2 | grep -q .
+  elif command -v lsof >/dev/null 2>&1; then
+    lsof -iTCP:"$1" -sTCP:LISTEN -n -P >/dev/null 2>&1
+  else
+    return 1   # cannot tell; let docker report it
+  fi
+}
+
+preflight_ports() {
+  command -v jq >/dev/null 2>&1 || return 0
+
+  # Our own running containers legitimately hold their ports; checking against
+  # them would make `up` fail on an already-running stack.
+  [[ -n "$(compose ps -q 2>/dev/null)" ]] && return 0
+
+  local config
+  config="$(compose config --format json 2>/dev/null)" || return 0
+
+  local conflicts=0
+  while IFS=$'\t' read -r svc port; do
+    [[ -z "$port" || -z "$svc" ]] && continue
+    if port_in_use "$port"; then
+      err "port $port is already in use, wanted by '$svc'"
+      log "    change $(port_var_for "$svc") in $(basename "$(env_file_for)")"
+      conflicts=$((conflicts + 1))
+    fi
+  done < <(printf '%s' "$config" | jq -r '
+    .services | to_entries[] |
+    .key as $svc | (.value.ports // [])[] |
+    select(.published != null) | "\($svc)\t\(.published)"' 2>/dev/null | sort -u)
+
+  if [[ "$conflicts" -gt 0 ]]; then
+    err "$conflicts port conflict(s) — nothing was started"
+    return 1
+  fi
+}
+
+# What to say when this host has no identity yet.
+#
+# The env file is an implementation detail this CLI manages. Naming a variable
+# in it tells an operator to go and edit a file, which is the one thing the
+# enrollment flow exists to avoid, and which nobody would have access to on a
+# staging or production box anyway.
+not_enrolled() {
+  err "This host is not enrolled."
+  log ""
+  log "  In the console: Billing → Instances → Enroll a host"
+  log "  Then run:       caytu-client -t $TARGET enroll <CODE>"
+  log ""
+  log "  The code is single-use and expires in 30 minutes."
+  exit 1
+}
+
+# --- host profile ------------------------------------------------------------
+#
+# What this machine actually is, so nobody has to be asked.
+#
+# Every question the console would otherwise put to an administrator (which OS,
+# which architecture, is docker there, which ports are free, does the name
+# resolve) has an answer that can be measured. Asking a human instead produces
+# wrong answers confidently: they report the laptop they are sitting at rather
+# than the server, or a port they believed was free.
+#
+# Emits JSON so the platform can store it on the instance and drive the setup.
+
+host_profile() {
+  local os arch kernel
+  case "$(uname -s)" in
+    Linux)  os="linux" ;;
+    Darwin) os="macos" ;;
+    MINGW*|MSYS*|CYGWIN*) os="windows" ;;
+    *) os="unknown" ;;
+  esac
+  # WSL is Linux that behaves like Windows for paths and networking, so it has
+  # to be distinguishable from both.
+  if [[ "$os" == "linux" ]] && grep -qi microsoft /proc/version 2>/dev/null; then
+    os="wsl2"
+  fi
+  arch="$(uname -m)"
+  kernel="$(uname -r 2>/dev/null || echo unknown)"
+
+  local distro=""
+  [[ -r /etc/os-release ]] && distro="$(. /etc/os-release && printf '%s %s' "${NAME:-}" "${VERSION_ID:-}")"
+
+  local docker_version="" compose_version="" docker_ok=false
+  if command -v docker >/dev/null 2>&1; then
+    docker_version="$(docker --version 2>/dev/null | head -1)"
+    docker info >/dev/null 2>&1 && docker_ok=true
+    compose_version="$(docker compose version --short 2>/dev/null || true)"
+  fi
+
+  # Whether the ports we intend to publish are actually free, rather than
+  # whether they are conventionally free.
+  local -a wanted=(80 443 3100 5100 3101 8180 27117 6479 9400 9401)
+  local busy=""
+  for p in "${wanted[@]}"; do
+    port_in_use "$p" && busy="${busy}${busy:+,}$p"
+  done
+
+  local hostname_s fqdn primary_ip
+  hostname_s="$(hostname 2>/dev/null || echo unknown)"
+  fqdn="$(hostname -f 2>/dev/null || echo "$hostname_s")"
+  # The address that actually carries traffic off this box, not loopback.
+  primary_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
+  [[ -z "$primary_ip" ]] && primary_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+  local hosts_path="/etc/hosts"
+  [[ "$os" == "windows" ]] && hosts_path='C:\Windows\System32\drivers\etc\hosts'
+
+  local mem_gb disk_gb
+  mem_gb="$(awk '/MemTotal/ {printf "%.1f", $2/1048576}' /proc/meminfo 2>/dev/null || echo "")"
+  disk_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9' || echo "")"
+
+  jq -n \
+    --arg os "$os" --arg arch "$arch" --arg kernel "$kernel" --arg distro "$distro" \
+    --arg dockerVersion "$docker_version" --arg composeVersion "$compose_version" \
+    --argjson dockerRunning "$docker_ok" \
+    --arg busyPorts "$busy" --arg hostname "$hostname_s" --arg fqdn "$fqdn" \
+    --arg primaryIp "$primary_ip" --arg hostsPath "$hosts_path" \
+    --arg memGb "$mem_gb" --arg diskGb "$disk_gb" \
+    '{
+       os: $os, arch: $arch, kernel: $kernel, distro: $distro,
+       docker: { version: $dockerVersion, composeVersion: $composeVersion, running: $dockerRunning },
+       busyPorts: ($busyPorts | if . == "" then [] else split(",") end),
+       hostname: $hostname, fqdn: $fqdn, primaryIp: $primaryIp,
+       hostsFilePath: $hostsPath,
+       memoryGb: ($memGb | tonumber? // null),
+       diskFreeGb: ($diskGb | tonumber? // null)
+     }'
+}
+
+cmd_host() {
+  require_cmd jq
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    profile) host_profile ;;
+    *) die "usage: caytu-client host profile" ;;
+  esac
+}
+
+# --- enroll ------------------------------------------------------------------
+#
+# Claim this host's own credential from a code shown in the console.
+#
+# The alternative was an administrator minting an API token and pasting it into
+# a file on a server, which needs shell access, puts a long-lived secret in
+# someone's clipboard, and is not something you can hand to a customer. Here the
+# code is single-use and short-lived, and the host writes its own config.
+
+enroll_host() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local code="${1:-}"
+  [[ -n "$code" ]] || die "usage: caytu-client [-t TARGET] enroll <CODE> [--platform URL]"
+  shift || true
+
+  local platform=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --platform) platform=$2; shift 2 ;;
+      *) die "usage: caytu-client [-t TARGET] enroll <CODE> [--platform URL]" ;;
+    esac
+  done
+
+  [[ -z "$platform" ]] && platform="$(env_get "$env_file" PLATFORM_HOST_URL || true)"
+  [[ -z "$platform" ]] && platform="$(env_get "$env_file" CAYTU_BILLINGS_URL || true)"
+  [[ -n "$platform" ]] || die "where is the platform? pass --platform https://caytu.link"
+  platform="${platform%/}"
+
+  [[ -f "$env_file" ]] || cmd_init
+
+  info "enrolling this host with ${platform}…"
+  local body
+  body="$(curl -fsS -X POST "${platform}/api/auth/enroll" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg c "$code" --arg h "$(hostname)" '{code:$c, hostname:$h}')")" \
+    || die "enrollment refused — the code may have expired or already been used"
+
+  local token org
+  token="$(printf '%s' "$body" | jq -r '.token // empty')"
+  org="$(printf '%s' "$body" | jq -r '.organizationId // empty')"
+  [[ -n "$token" && -n "$org" ]] || die "unexpected response from the platform"
+
+  # The host stores its own credential. No human ever holds it.
+  env_upsert "$env_file" CAYTU_METERING_TOKEN "$token"
+  env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
+  env_upsert "$env_file" PLATFORM_HOST_URL "$platform"
+
+  # Host credentials expire now, and the host is what renews them. Recorded so
+  # the agent knows when to, without asking the platform on every tick.
+  local expires host_id
+  expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  host_id="$(printf '%s' "$body" | jq -r '.hostId // empty')"
+  [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
+  [[ -n "$host_id" ]] && env_upsert "$env_file" CAYTU_HOST_ID "$host_id"
+
+  # What the CLI reaches the platform on is not always what the containers do:
+  # in local development these are docker service names, and overwriting them
+  # with a host address sends the running stack to a port it cannot see. Filled
+  # in only when nothing is there yet.
+  local var
+  for var in CAYTU_BILLINGS_URL CAYTU_PLATFORM_URL; do
+    if [[ -z "$(env_get "$env_file" "$var" || true)" ]]; then
+      env_upsert "$env_file" "$var" "$platform"
+    fi
+  done
+
+  ok "enrolled for organization $org"
+  info "start the provisioner:  caytu-client -t $TARGET agent up"
+}
+
+# Where a person reaches this deployment. Not a question worth asking: on a
+# laptop it is the published frontend port, and on a site with a domain it is
+# that domain. Only a box behind a name we cannot work out has to be told.
+deployment_url_for() {
+  local env_file=$1
+  local url; url="$(env_get "$env_file" CAYTU_DEPLOYMENT_URL || true)"
+  if [[ -z "$url" ]]; then
+    local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
+    [[ -n "$domain" ]] && url="https://$domain"
+  fi
+  if [[ -z "$url" && "$TARGET" == "local" ]]; then
+    local port; port="$(env_get "$env_file" FRONTEND_HOST_PORT || true)"
+    url="http://localhost:${port:-3100}"
+  fi
+  printf '%s' "${url%/}"
+}
+
+# --- admin ------------------------------------------------------------------
+#
+# The normal path is automatic: the platform names an administrator on the
+# instance record, the deployment creates the account on boot and mails a
+# single-use claim link. This is the fallback for the cases where that cannot
+# work, an air-gapped site with no outbound mail or a link that expired before
+# anyone used it.
+#
+# It mints the claim link locally and prints it, so an operator can hand it over
+# in person. Nothing is emailed and no password is ever created: the link is the
+# only way in, it works once, and it expires.
+#
+# This talks to the deployment's own MongoDB rather than its API, because the
+# situation it exists for is precisely the one where nobody can log in yet.
+
+# Mints one and prints just the URL, so both the operator-facing verb and the
+# agent's resend can use it. Writes nothing to stdout but the link.
+mint_claim_link() {
+  local email=$1 base=$2 env_file=$3
+
+  # Generated here and never stored: only its sha256 goes into the database, so
+  # a copy of that database does not hand anyone the account.
+  local raw; raw="$(openssl rand -hex 32)"
+  local hash; hash="$(printf %s "$raw" | openssl dgst -sha256 -r | cut -d" " -f1)"
+  local db; db="$(env_get "$env_file" MONGO_DATABASE || true)"; db="${db:-caytu}"
+
+  local js
+  js="$(printf 'const r = db.users.updateOne({email:"%s"},{$set:{resetPasswordToken:"%s",resetPasswordExpire:new Date(Date.now()+7*24*60*60*1000),mustChangePassword:true}}); print(r.matchedCount);' "$email" "$hash")"
+
+  local matched
+  matched="$(compose exec -T mongodb mongosh --quiet "$db" --eval "$js" 2>/dev/null | tr -d "[:space:]")"
+  [[ "$matched" == "1" ]] || return 1
+
+  printf '%s/auth/reset-password/%s' "${base%/}" "$raw"
+}
+
+admin_invite() {
+  require_cmd openssl
+  local env_file; env_file="$(env_file_for)"
+
+  local email="" base=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --url) base=$2; shift 2 ;;
+      -*) die "usage: caytu-client [-t TARGET] admin invite [email] [--url ADDRESS]" ;;
+      *) email=$1; shift ;;
+    esac
+  done
+
+  # Falls back to the administrator the platform named, which provisioning wrote
+  # here. Nobody types it in.
+  [[ -n "$email" ]] || email="$(env_get "$env_file" INITIAL_ADMIN_EMAIL || true)"
+  [[ -n "$email" ]] || die "this deployment has no administrator yet — name one on the instance in the console, or pass the address: caytu-client -t $TARGET admin invite <email>"
+
+  [[ -n "$base" ]] || base="$(deployment_url_for "$env_file")"
+  [[ -n "$base" ]] || die "we do not know how people reach this deployment, so the link would point nowhere — re-run it with --url <https://how-people-reach-it>"
+
+  local link
+  link="$(mint_claim_link "$email" "$base" "$env_file")" \
+    || die "no account for $email on this deployment — name that administrator on the instance in the console, re-run 'instance provision', and try again"
+
+  ok "claim link for $email (valid 7 days, single use):"
+  printf "\n  %s\n\n" "$link"
+  warn "hand this over directly; anyone holding it can claim the account"
+}
+
+cmd_admin() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    invite) admin_invite "$@" ;;
+    *) die "usage: caytu-client admin invite [email] [--url ADDRESS]" ;;
+  esac
+}
+
+# --- instance ----------------------------------------------------------------
+#
+# The platform describes a deployment as an Instance record: which organization,
+# which subdomain, and who administers it. This turns that record into a running
+# stack and reports progress back, so the record stops being a wish and starts
+# being a status.
+#
+#   instance provision <id>   configure this target from the record, start it,
+#                             and report progress to the platform
+#   instance report <status>  report state by hand, for a manual roll or recovery
+
+# The CLI runs on the host; the container-facing URL is a docker service name
+# that does not resolve here. In production both are the same public gateway, so
+# PLATFORM_HOST_URL only needs setting in local development.
+instance_platform_url() {
+  local env_file=$1
+  local url; url="$(env_get "$env_file" PLATFORM_HOST_URL || true)"
+  [[ -z "$url" ]] && url="$(env_get "$env_file" CAYTU_BILLINGS_URL || true)"
+  [[ -n "$url" ]] || not_enrolled
+  printf '%s' "${url%/}"
+}
+
+# Best-effort: losing the platform must not abort a rollout that is otherwise
+# working. The deployment is the thing that matters; the record catches up.
+instance_report() {
+  local env_file=$1 id=$2 payload=$3
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || return 0
+  curl -fsS -X PATCH \
+    "$(instance_platform_url "$env_file")/api/billings/instances/$id/state" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" >/dev/null 2>&1 \
+    || warn "could not report instance state (continuing)"
+}
+
+# Point this host at the images the record names.
+#
+# Without it the record described a deployment but not its software, so a host
+# ran whatever IMAGE_TAG happened to say in its own env file. A fork published
+# under another name had nowhere to be declared, and pinning a site to a
+# known-good version meant editing a file on the box.
+apply_instance_source() {
+  local env_file=$1 record=$2
+  local mode; mode="$(printf '%s' "$record" | jq -r '.source.mode // empty')"
+  [[ -n "$mode" ]] || return 0
+
+  local tag; tag="$(printf '%s' "$record" | jq -r '.source.tag // empty')"
+
+  case "$mode" in
+    caytu)
+      # Ours. Only the tag is worth recording; the repository names are the
+      # defaults the compose files already carry.
+      [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
+      ok "images: Caytu registry${tag:+, pinned to $tag}"
+      ;;
+    registry)
+      local registry; registry="$(printf '%s' "$record" | jq -r '.source.registry // empty')"
+      env_upsert "$env_file" IMAGE_REGISTRY "$registry"
+      [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
+
+      local key name
+      # The record's names, not ours: this is the whole point of the mode.
+      for key in backend:BACKEND frontend:FRONTEND signaling:SIGNALING \
+                 gstreamer:GSTREAMER mqttStreamer:MQTT_STREAMER; do
+        name="$(printf '%s' "$record" | jq -r ".source.images.${key%%:*} // empty")"
+        [[ -n "$name" ]] && env_upsert "$env_file" "${key##*:}_IMAGE_NAME" "$name"
+      done
+      ok "images: ${registry:-docker.io}${tag:+ @ $tag}"
+      ;;
+    build)
+      local repo_path; repo_path="$(printf '%s' "$record" | jq -r '.source.repoPath // empty')"
+      if [[ ! -d "$repo_path" ]]; then
+        die "this instance is set to build from $repo_path, and that directory is not on this host"
+      fi
+      env_upsert "$env_file" CAYTU_CLIENT_REPO "$repo_path"
+      # Empty registry is what makes the compose files use locally built tags
+      # rather than trying to pull something that was never pushed.
+      env_upsert "$env_file" IMAGE_REGISTRY ""
+      ok "images: built on this host from $repo_path"
+      ;;
+    *)
+      warn "this instance names an image source ('$mode') this host does not understand; using the defaults"
+      ;;
+  esac
+}
+
+instance_provision() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "usage: caytu-client [-t TARGET] instance provision <instance-id> [--build]"
+  shift || true
+
+  # A host that builds from source needs it once; a host pulling prebuilt images
+  # never does. Same command either way, rather than a separate deploy step.
+  local build=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --build) build="--build"; shift ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || not_enrolled
+
+  info "reading instance $id from the platform…"
+  local body
+  body="$(curl -fsS "$(instance_platform_url "$env_file")/api/billings/instances" \
+    -H "Authorization: Bearer $token")" \
+    || die "could not reach the platform at $(instance_platform_url "$env_file") — check this host can get there, then re-enroll if it still refuses"
+
+  local record
+  record="$(printf '%s' "$body" | jq -c --arg id "$id" \
+    '.instances[]? | select(.id == $id or ._id == $id)')"
+  [[ -n "$record" ]] || die "no instance $id visible to this token"
+
+  local subdomain org admin_email admin_name
+  subdomain="$(printf '%s' "$record" | jq -r '.subdomain // empty')"
+  org="$(printf '%s' "$record" | jq -r '.organizationId // empty')"
+  admin_email="$(printf '%s' "$record" | jq -r '.adminEmail // empty')"
+  admin_name="$(printf '%s' "$record" | jq -r '.adminName // empty')"
+
+  [[ -n "$subdomain" ]] || die "that instance has no subdomain"
+  [[ -n "$admin_email" ]] || die "that instance names no administrator — nobody could sign in to the result"
+
+  ok "instance \"$(printf '%s' "$record" | jq -r '.name // "?"')\" → ${subdomain}.caytu.link, admin ${admin_email}"
+
+  # The administrator has to be in place before the stack starts: the client
+  # bootstraps its first account from INITIAL_ADMIN_EMAIL on boot.
+  env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
+  env_upsert "$env_file" CAYTU_INSTANCE_ID "$id"
+  remember_instance "$env_file" "$id"
+
+  apply_instance_source "$env_file" "$record"
+  # Only for hosting we run, where we own the DNS. On a customer's own machine
+  # <subdomain>.caytu.link resolves nowhere, and writing it here is how an
+  # administrator ends up with an invite email pointing at a dead name.
+  local placement; placement="$(printf '%s' "$record" | jq -r '.placement // "managed"')"
+  if [[ "$placement" == "managed" ]]; then
+    env_upsert "$env_file" CAYTU_DOMAIN "${subdomain}.caytu.link"
+  fi
+
+  # The address this deployment is actually reachable on.
+  local deployment_url; deployment_url="$(deployment_url_for "$env_file")"
+  if [[ -z "$deployment_url" ]]; then
+    warn "we do not know how people reach this host, so the administrator's invite link"
+    warn "would point nowhere. Give the instance a domain in the console and re-run."
+  fi
+
+  env_upsert "$env_file" INITIAL_ADMIN_EMAIL "$admin_email"
+  [[ -n "$admin_name" ]] && env_upsert "$env_file" INITIAL_ADMIN_NAME "$admin_name"
+  ok "wrote the deployment identity into $(basename "$env_file")"
+
+  instance_report "$env_file" "$id" '{"status":"provisioning","provisioningPercent":25}'
+
+  # Before the stack starts, because the client reads this at boot and refuses
+  # to sign anybody in without it.
+  ensure_deployment_secrets "$env_file"
+
+  # Only when this host builds. One that pulls published images never touches
+  # CodeArtifact and should not be asked for AWS credentials it does not have.
+  [[ -n "$build" ]] && codeartifact_ensure_fresh "$env_file"
+
+  info "starting the stack…"
+  if cmd_up $build; then
+    # Deliberately not claiming adminProvisioned here. A stack that starts is
+    # not proof the named account exists: the client only bootstraps an initial
+    # superAdmin when the deployment has no users at all, so re-provisioning a
+    # box that already has one silently leaves the named admin uncreated. The
+    # deployment reports that flag once it is actually true.
+    instance_report "$env_file" "$id" \
+      "$(jq -n --arg u "$deployment_url" --argjson h "$(host_profile)" \
+        '{status:"running", provisioningPercent:100, hostProfile:$h}
+         + (if $u == "" then {} else {publicUrl:$u} end)')"
+    ok "instance $id reported running"
+  else
+    instance_report "$env_file" "$id" \
+      '{"status":"failed","lastError":"the stack did not come up on the host"}'
+    die "the stack did not come up; reported failed"
+  fi
+}
+
+instance_report_cmd() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local status="${1:-}"; shift || true
+  [[ -n "$status" ]] || die "usage: caytu-client instance report <provisioning|running|suspended|failed> [--percent N] [--error MSG]"
+
+  local id; id="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  [[ -n "$id" ]] || die "this host is not attached to an instance yet — run 'caytu-client -t $TARGET instance provision <id>' first"
+
+  local percent="" err=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --percent) percent=$2; shift 2 ;;
+      --error)   err=$2; shift 2 ;;
+      *) die "unknown flag: $1" ;;
+    esac
+  done
+
+  local payload="{\"status\":\"$status\""
+  [[ -n "$percent" ]] && payload="$payload,\"provisioningPercent\":$percent"
+  [[ -n "$err" ]] && payload="$payload,\"lastError\":$(printf '%s' "$err" | jq -Rs .)"
+  payload="$payload}"
+
+  instance_report "$env_file" "$id" "$payload"
+  ok "reported $status for instance $id"
+}
+
+# Poll the platform for work assigned to this host, and do it.
+#
+# Provisioning cannot be pushed: the command has to run against this machine's
+# docker daemon, and the platform has no route into a customer network. So the
+# host pulls instead. Bootstrap once with a token, run this, and creating an
+# instance in the UI is all an operator ever does.
+#
+# Deliberately dumb: it only ever provisions instances that are already assigned
+# to this organization and still sitting at 0%. It never destroys anything, and
+# it never touches an instance another host has already picked up.
+# --- commands ----------------------------------------------------------------
+#
+# Work the console asked this deployment to do.
+#
+# The platform cannot reach in: a self-hosted box sits behind the customer's
+# NAT, and storing SSH keys for every site would make the platform the most
+# valuable thing on it to steal. So the host pulls. The agent is already polling
+# for instances to provision, which makes it a command channel that costs
+# nothing extra and behaves the same on a laptop and on a machine in a factory
+# with one outbound port open.
+
+# Must stay under the platform's body limit for this route. Kept here as one
+# number so the two cannot drift into a size that is collected and then refused.
+MAX_RESULT_BYTES=262144
+
+# Set by a command that leaves this host with nothing left to run. The agent
+# reads it after the result has been delivered, so the console still hears back.
+AGENT_STOP_REASON=""
+
+# How many commands the last poll actually ran. The agent will not stop on a
+# teardown while work is still arriving: "terminate, then destroy" queues a
+# purge seconds after the teardown, and quitting in between is how a purge ends
+# up waiting for a host that has gone.
+COMMANDS_EXECUTED=0
+
+# Size and mtime are enough to notice an edit, and cost nothing per tick.
+script_fingerprint() {
+  stat -c '%s:%Y' "$SCRIPT_PATH" 2>/dev/null || echo "unknown"
+}
+
+# `docker compose logs` on this stack, as text. Nothing is filtered: an operator
+# reading logs is already trusted with the box.
+#
+# --no-color only stops compose colouring its own prefixes; the applications
+# inside still emit their own escape sequences, which arrive as mojibake in
+# anything that is not a terminal. Stripped here so what is stored is what gets
+# read, rather than cleaning it up differently in every viewer.
+command_run_logs() {
+  local params=$1
+  local lines service since
+  lines="$(printf '%s' "$params" | jq -r '.lines // 200')"
+  service="$(printf '%s' "$params" | jq -r '.service // empty')"
+  since="$(printf '%s' "$params" | jq -r '.since // empty')"
+
+  local -a args=(logs --no-color --timestamps --tail "$lines")
+  # Following a log means asking only for what came after the last line the
+  # console already has. Cheaper than re-sending the whole tail every few
+  # seconds, and it is what makes it read as a stream rather than a redraw.
+  [[ -n "$since" ]] && args+=(--since "$since")
+  [[ -n "$service" ]] && args+=("$service")
+
+  # Capped to what the platform will accept, keeping the tail: the end of a log
+  # is where the failure is. Without this, "all services, 1000 lines" builds a
+  # body the API rejects, and the console waits for a result that never lands.
+  compose "${args[@]}" 2>&1 \
+    | sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B\][^\x07]*\x07//g' \
+    | tail -c "$MAX_RESULT_BYTES"
+}
+
+# Executes one command and reports the outcome. Never returns non-zero: a
+# command that fails is a result to report, not a reason to stop the agent.
+command_execute() {
+  local env_file=$1 token=$2 instance_id=$3 command=$4
+  local id type params
+  id="$(printf '%s' "$command" | jq -r '.id // ._id // empty')"
+  type="$(printf '%s' "$command" | jq -r '.type // empty')"
+  params="$(printf '%s' "$command" | jq -c '.params // {}')"
+
+  [[ -n "$id" && -n "$type" ]] || return 0
+  info "running command $type ($id)"
+
+  # Results go through a file, never an argument. A whole stack's logs run to
+  # hundreds of kilobytes, and anything that size passed on a command line dies
+  # at ARG_MAX with an error that looks nothing like its cause.
+  # Cleaned up explicitly rather than with a RETURN trap: that trap outlives the
+  # function that set it and then fires on every later return, where the
+  # variable it names no longer exists.
+  local work; work="$(mktemp -d)"
+
+  local status="done" error="" claim_url=""
+  # Reported as done, but nothing was touched. Kept apart from a real one so
+  # the log does not read identically whether a stack was destroyed or spared.
+  local skipped=0
+  : > "$work/result"
+
+  case "$type" in
+    logs)
+      if ! command_run_logs "$params" > "$work/result" 2>/dev/null; then
+        status="failed"
+        error="could not read the container logs on this host"
+      fi
+      ;;
+    resend-invite)
+      local email base
+      email="$(env_get "$env_file" INITIAL_ADMIN_EMAIL || true)"
+      base="$(deployment_url_for "$env_file")"
+      if [[ -z "$email" ]]; then
+        status="failed"; error="this deployment has no administrator on record"
+      elif [[ -z "$base" ]]; then
+        status="failed"; error="this deployment has no address, so a link would point nowhere"
+      elif ! claim_url="$(mint_claim_link "$email" "$base" "$env_file")"; then
+        status="failed"; error="no account for $email exists on this deployment yet"
+      else
+        printf 'a fresh claim link was sent to %s' "$email" > "$work/result"
+      fi
+      ;;
+    install-license)
+      # The credential itself never travels through here. The host writes down
+      # which licence the console chose and brings the backend back on it; the
+      # deployment fetches and verifies its own token, exactly as it does on
+      # boot. That keeps a signed licence off the command channel, out of this
+      # script and out of the result the platform stores.
+      local lic
+      lic="$(printf '%s' "$params" | jq -r '.licenseId // empty')"
+      if [[ -z "$lic" ]]; then
+        status="failed"; error="no licence was named"
+      elif ! env_upsert "$env_file" CAYTU_LICENSE_ID "$lic"; then
+        status="failed"; error="the licence could not be written to this host's configuration"
+      # --force-recreate because the value arrives through the env file: a plain
+      # restart reuses the container it is already baked into, so nothing changes
+      # and the command reports success having done nothing.
+      elif ! compose up -d --no-deps --force-recreate backend >/dev/null 2>&1; then
+        status="failed"; error="the backend did not come back, so the licence is configured but not in use"
+      else
+        printf 'licence %s configured; the deployment installs it as it comes back up' "$lic" > "$work/result"
+      fi
+      ;;
+    teardown)
+      # Containers, not data. A billing decision is not consent to destroy a
+      # customer's database, and `down --volumes` has no undo.
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        # Already gone from here, so this is done rather than failed: the
+        # platform asked for that deployment to stop and it is not running.
+        printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+        skipped=1
+      elif compose down >/dev/null 2>&1; then
+        printf 'the stack was stopped; data volumes were kept' > "$work/result"
+        # Stop answering as an instance that no longer exists, or the next
+        # heartbeat re-reports a terminated record and the agent keeps claiming
+        # work for it.
+        env_upsert "$env_file" CAYTU_INSTANCE_ID ""
+        AGENT_STOP_REASON="teardown"
+      else
+        status="failed"
+        error="the stack did not stop cleanly on this host"
+      fi
+      ;;
+    purge)
+      # The deliberate opposite of teardown: volumes and images go too. Still
+      # scoped to this compose project's own services, never a host-wide prune,
+      # because the machine may well be running other things.
+      #
+      # `--rmi all`, not `--rmi local`: "local" means only the images this
+      # project BUILT, and a customer's deployment builds nothing. Every service
+      # in docker-compose.yml pulls a published image, so on the very hosts where
+      # purge matters "local" matched nothing and removed nothing, while the
+      # console said the images were gone. The local profile was the only place
+      # it ever worked, because that overlay is the only one with build: stanzas.
+      #
+      # Safe against a neighbouring project sharing a base image: Docker keeps
+      # the image alive for whatever is still using it and only drops this
+      # project's tag, and compose still exits 0.
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        # The dangerous one. Without this guard a purge queued for a retired
+        # instance wipes the volumes and images of whatever is running now.
+        printf 'this host runs a different deployment now; that one was already gone' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+        skipped=1
+      elif compose down --volumes --rmi all >/dev/null 2>&1; then
+        printf 'containers, volumes and this deployment'"'"'s images were removed' > "$work/result"
+        env_upsert "$env_file" CAYTU_INSTANCE_ID ""
+        AGENT_STOP_REASON="purge"
+      else
+        status="failed"
+        error="the stack did not clean up fully on this host"
+      fi
+      ;;
+    *)
+      status="failed"
+      error="this host does not know how to run '$type'; it may need updating"
+      ;;
+  esac
+
+  # The claim link travels once, straight to the mail that carries it, and is
+  # never stored on the platform. That is the whole point of single-use links.
+  jq -n --rawfile r "$work/result" \
+    --arg s "$status" --arg e "$error" --arg c "$claim_url" \
+    '{status:$s}
+     + (if $r == "" then {} else {result:$r} end)
+     + (if $e == "" then {} else {error:$e} end)
+     + (if $c == "" then {} else {claimUrl:$c} end)' > "$work/payload"
+
+  local delivered=0
+  curl -fsS -X PATCH \
+    "$(instance_platform_url "$env_file")/api/billings/instances/${instance_id}/commands/${id}" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    --data-binary "@$work/payload" >/dev/null 2>&1 && delivered=1
+
+  rm -rf "$work"
+
+  if [[ "$delivered" -eq 1 ]]; then
+    if [[ "$status" != "done" ]]; then
+      warn "$type failed: $error"
+    elif [[ "$skipped" -eq 1 ]]; then
+      info "$type skipped: it was queued for a deployment this host no longer runs"
+    else
+      ok "$type finished"
+    fi
+  else
+    # The work happened; the console will never hear about it. Saying "finished"
+    # here is how a command sits at "waiting for the host" forever.
+    warn "$type ran, but the result could not be delivered to the platform"
+  fi
+}
+
+# Every instance this host has provisioned, newest last, space separated.
+#
+# The agent used to poll only CAYTU_INSTANCE_ID, which made it the agent for one
+# instance rather than for the machine. Two consequences, both seen in the wild:
+# a purge queued against an instance already torn down was never claimed by
+# anybody, and teardown clears CAYTU_INSTANCE_ID, so after one the agent polled
+# nothing at all while looking perfectly healthy.
+remember_instance() {
+  local env_file=$1 id=$2
+  [[ -n "$id" ]] || return 0
+
+  local known; known="$(env_get "$env_file" CAYTU_KNOWN_INSTANCE_IDS || true)"
+  case " $known " in
+    *" $id "*) return 0 ;;
+  esac
+
+  # Bounded: a long-lived host would otherwise grow this forever and spend the
+  # whole tick asking about instances deleted months ago.
+  local -a ids; read -r -a ids <<< "$known $id"
+  while [[ ${#ids[@]} -gt 20 ]]; do ids=("${ids[@]:1}"); done
+
+  env_upsert "$env_file" CAYTU_KNOWN_INSTANCE_IDS "${ids[*]}"
+}
+
+# Drops an instance the platform no longer knows about, so a 404 is not retried
+# on every tick for the rest of the agent's life.
+forget_instance() {
+  local env_file=$1 id=$2
+  local known; known="$(env_get "$env_file" CAYTU_KNOWN_INSTANCE_IDS || true)"
+  local -a kept=()
+  local candidate
+  for candidate in $known; do
+    [[ "$candidate" == "$id" ]] || kept+=("$candidate")
+  done
+  env_upsert "$env_file" CAYTU_KNOWN_INSTANCE_IDS "${kept[*]:-}"
+}
+
+# Whether a command is about the deployment this host is actually running.
+#
+# A host polls for every instance it has ever run, not just the current one, so
+# a teardown or purge queued for a retired instance can be claimed long after
+# something else has taken its place. But the compose project holds exactly one
+# deployment at a time and the handlers act on the whole project, so obeying a
+# command meant for a previous occupant destroys the current one.
+#
+# That is not hypothetical: four stale commands claimed on the first tick after
+# an agent started tore down and then purged a deployment that had been
+# provisioned two minutes earlier, and stopped the agent afterwards for good
+# measure.
+command_targets_current_stack() {
+  local env_file=$1 instance_id=$2
+  local current; current="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  [[ -n "$current" && "$current" == "$instance_id" ]]
+}
+
+# Claims and runs whatever is waiting, one per instance per pass. Silent when
+# there is nothing, which is almost always.
+commands_poll() {
+  local env_file=$1 token=$2
+  COMMANDS_EXECUTED=0
+
+  # The current instance first, then anything else this host has ever run. A
+  # torn-down instance still has a record and can still be sent a purge.
+  local current; current="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  local known; known="$(env_get "$env_file" CAYTU_KNOWN_INSTANCE_IDS || true)"
+
+  local -a targets=()
+  local id
+  for id in $current $known; do
+    case " ${targets[*]:-} " in
+      *" $id "*) continue ;;
+    esac
+    targets+=("$id")
+  done
+
+  [[ ${#targets[@]} -gt 0 ]] || return 0
+
+  for id in "${targets[@]}"; do
+    local body status
+    # No -f here, deliberately. It makes curl exit non-zero on an HTTP error
+    # and print nothing, so the status below would never be seen and a deleted
+    # instance would be re-polled every tick forever.
+    body="$(curl -sS -w '\n%{http_code}' \
+      "$(instance_platform_url "$env_file")/api/billings/instances/${id}/commands?claim=true" \
+      -H "Authorization: Bearer $token" 2>/dev/null)" || continue
+
+    status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+
+    # Purge deletes the record once the host confirms, so the very next poll for
+    # it is a 404. That is success, not an error worth repeating forever.
+    if [[ "$status" == "404" ]]; then
+      forget_instance "$env_file" "$id"
+      continue
+    fi
+
+    # Anything else non-OK is transient as far as the agent is concerned: a
+    # flapping platform must not make it forget instances it still serves.
+    [[ "$status" == "200" ]] || continue
+
+    local command
+    command="$(printf '%s' "$body" | jq -c '.command // empty' 2>/dev/null)"
+    [[ -n "$command" && "$command" != "null" ]] || continue
+
+    command_execute "$env_file" "$token" "$id" "$command" || true
+    COMMANDS_EXECUTED=$((COMMANDS_EXECUTED + 1))
+  done
+}
+
+# Replace this host's credential before it lapses.
+#
+# Host tokens expire after a year. An expiry with no renewal is just a slower
+# outage: every deployment would go dark a year after install, all of them
+# silently, and the only fix would be walking a new enrollment code to the box.
+# So the machine renews itself, the same way it renews its licence.
+#
+# Authenticated by the token being replaced, which is the only thing a host has
+# to prove itself with. Prints nothing and changes nothing outside the window.
+host_renew_token() {
+  local env_file=$1 token=$2
+  local expires; expires="$(env_get "$env_file" CAYTU_TOKEN_EXPIRES_AT || true)"
+
+  # Nothing recorded means a host enrolled before expiries existed. Its token
+  # still works, and the platform migration is what gives it a date.
+  [[ -n "$expires" ]] || return 0
+
+  local expires_epoch now_epoch
+  expires_epoch="$(date -d "$expires" +%s 2>/dev/null)" || return 0
+  now_epoch="$(date +%s)"
+
+  # Thirty days, matching HOST_TOKEN_RENEW_WINDOW_MS on the platform. Wide
+  # enough that a host switched off for a few weeks still catches it.
+  local window=$(( 30 * 24 * 60 * 60 ))
+  (( expires_epoch - now_epoch < window )) || return 0
+
+  info "this host's credential expires $expires; renewing"
+
+  local body
+  if ! body="$(curl -fsS -X POST "$(instance_platform_url "$env_file")/api/auth/enroll/rotate" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' -d '{}' 2>/dev/null)"; then
+    warn "could not renew this host's credential; will try again"
+    return 0
+  fi
+
+  local new_token new_expires
+  new_token="$(printf '%s' "$body" | jq -r '.token // empty')"
+  new_expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  [[ -n "$new_token" ]] || { warn "the platform returned no new credential"; return 0; }
+
+  # Written before anything uses it. A crash between these two lines would
+  # otherwise leave the file holding a token the platform has already retired.
+  env_upsert "$env_file" CAYTU_METERING_TOKEN "$new_token"
+  [[ -n "$new_expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$new_expires"
+
+  # The running backend holds the old one in its environment, and the old one no
+  # longer works, so it has to come back on the new one.
+  compose up -d --no-deps --force-recreate backend >/dev/null 2>&1 \
+    || warn "credential renewed, but the backend did not restart onto it"
+
+  ok "credential renewed, valid until $new_expires"
+  # Tells the caller to keep using the new one for the rest of this run.
+  printf '%s' "$new_token"
+}
+
+instance_agent() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  # Two clocks, because the two jobs have different users. Nobody is watching a
+  # new instance appear, so half a minute is fine; somebody IS watching the
+  # spinner after clicking "fetch logs", and thirty seconds of it reads as
+  # broken. Commands are cheap to check: one request that usually finds nothing.
+  local interval=30 command_interval=3 once=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --interval)         interval=$2; shift 2 ;;
+      --command-interval) command_interval=$2; shift 2 ;;
+      --once)             once=1; shift ;;
+      *) die "usage: caytu-client [-t TARGET] instance agent [--interval SECONDS] [--command-interval SECONDS] [--once]" ;;
+    esac
+  done
+
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || not_enrolled
+
+  info "agent watching $(instance_platform_url "$env_file") (instances every ${interval}s, commands every ${command_interval}s; ctrl-c to stop)"
+
+  # Forces an instance sweep on the first tick rather than after one full
+  # interval, so a freshly started agent picks up waiting work immediately.
+  local since_sweep=$interval
+  local fingerprint; fingerprint="$(script_fingerprint)"
+
+  while true; do
+    # Bash parses a script lazily but keeps what it has already read, so a
+    # long-running agent goes on executing the version it started with. That
+    # has bitten three times now, each time as a command the host "does not
+    # know how to run" while the file on disk plainly does.
+    if [[ "$once" -eq 0 && "$(script_fingerprint)" != "$fingerprint" ]]; then
+      if bash -n "$SCRIPT_PATH" 2>/dev/null; then
+        info "the CLI changed on disk; restarting to pick it up"
+        exec "$SCRIPT_PATH" "${SCRIPT_ARGV[@]}"
+      fi
+      # Mid-save and currently unparseable. Leave the fingerprint alone and
+      # try again next tick rather than exec'ing a half-written file.
+    fi
+
+    if [[ "$since_sweep" -ge "$interval" ]]; then
+      since_sweep=0
+
+      # On the slow clock: a credential with a year on it does not need checking
+      # every three seconds, and the check is free when it is not due.
+      local renewed; renewed="$(host_renew_token "$env_file" "$token")"
+      [[ -n "$renewed" ]] && token="$renewed"
+
+      local body
+      if body="$(curl -fsS "$(instance_platform_url "$env_file")/api/billings/instances" \
+        -H "Authorization: Bearer $token" 2>/dev/null)"; then
+
+        # Anything past 0% has been claimed by someone; leave it alone.
+        local pending
+        pending="$(printf '%s' "$body" | jq -r '
+          [.instances[]? | select(.status == "provisioning" and (.provisioningPercent // 0) == 0)]
+          | .[0].id // empty')"
+
+        if [[ -n "$pending" ]]; then
+          info "picking up instance $pending"
+          # A failure here is already reported by instance_provision, and the
+          # agent must survive it: one bad record cannot stop the host working.
+          instance_provision "$pending" || warn "provisioning $pending failed; continuing"
+        fi
+      else
+        warn "platform unreachable; retrying in ${interval}s"
+      fi
+    fi
+
+    # Every tick, so the console does not wait on the instance sweep's clock.
+    commands_poll "$env_file" "$token" || true
+
+    # A teardown leaves nothing on this host to watch, so somebody who started
+    # the agent in a terminal gets their terminal back. Run as a service it
+    # stays up: it serves the organization rather than one instance, and the
+    # next instance assigned here still needs picking up.
+    #
+    # Not on the spot, though. "Terminate, then destroy" queues a purge seconds
+    # after the teardown, so the agent drains first and only leaves on a pass
+    # that found nothing. Otherwise it walks out on work it was sent.
+    if [[ -n "$AGENT_STOP_REASON" ]]; then
+      if [[ "$COMMANDS_EXECUTED" -gt 0 ]]; then
+        : # something ran this pass; check again before deciding to stop
+      elif [[ -t 1 ]]; then
+        ok "$AGENT_STOP_REASON done; nothing left to watch on this host"
+        return 0
+      else
+        info "$AGENT_STOP_REASON done; waiting for the next instance"
+        AGENT_STOP_REASON=""
+      fi
+    fi
+
+    [[ "$once" -eq 1 ]] && return 0
+    sleep "$command_interval"
+    since_sweep=$((since_sweep + command_interval))
+  done
+}
+
+# Run the provisioner as a service rather than a terminal someone keeps open.
+
+# Enrol this machine using the identity AWS already gives it.
+#
+# A Caytu-hosted deployment comes up with nobody watching, so it cannot be handed
+# an enrolment code. Putting one in user_data would work and is what most people
+# do, but instance metadata is readable by anything on the box, so the code
+# becomes a secret in a place we do not control and proves nothing about which
+# machine presented it.
+#
+# The instance identity document is the alternative: AWS signs it for every
+# instance, it is public, and it is useless to anyone who is not that machine.
+# Two fetches and a POST, which is the whole reason this lives in bash rather
+# than being a presigned SigV4 call.
+#
+# Needs only CAYTU_INSTANCE_ID and the platform URL, neither of them secret.
+enroll_self() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+
+  local record="${CAYTU_INSTANCE_ID:-$(env_get "$env_file" CAYTU_INSTANCE_ID || true)}"
+  local platform="${CAYTU_PLATFORM_URL:-$(env_get "$env_file" CAYTU_PLATFORM_URL || true)}"
+  [[ -n "$record" ]]   || die "CAYTU_INSTANCE_ID is not set, so this machine does not know which deployment it is for"
+  [[ -n "$platform" ]] || die "CAYTU_PLATFORM_URL is not set, so this machine does not know where the platform is"
+
+  # Already enrolled: cloud-init can run more than once and re-enrolling would
+  # be refused anyway, so stop before asking.
+  if [[ -n "$(env_get "$env_file" CAYTU_METERING_TOKEN || true)" ]]; then
+    ok "this machine already holds a credential"
+    return 0
+  fi
+
+  # Overridable only so this path can be exercised without an EC2 instance.
+  # Anyone able to set it already controls the machine, so it grants nothing.
+  local imds="${CAYTU_IMDS_URL:-http://169.254.169.254}"
+  # IMDSv2 first: newer instances refuse the unauthenticated read. Falling back
+  # keeps this working on an instance configured the older way.
+  local imds_token
+  imds_token="$(curl -fsS -m 5 -X PUT "$imds/latest/api/token" \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+  local -a hdr=()
+  [[ -n "$imds_token" ]] && hdr=(-H "X-aws-ec2-metadata-token: $imds_token")
+
+  local doc sig
+  doc="$(curl -fsS -m 5 "${hdr[@]}" "$imds/latest/dynamic/instance-identity/document" 2>/dev/null)" \
+    || die "no instance identity document here, so this is not an EC2 instance"
+  # rsa2048, not the older `signature`, which is SHA-1 over DSA.
+  sig="$(curl -fsS -m 5 "${hdr[@]}" "$imds/latest/dynamic/instance-identity/rsa2048" 2>/dev/null)" \
+    || die "could not read this instance's identity signature"
+
+  info "enrolling with ${platform%/} as deployment $record…"
+  local body
+  body="$(jq -n --arg d "$doc" --arg s "$sig" --arg i "$record" \
+            '{document:$d, signature:$s, instanceId:$i}' \
+          | curl -fsS -X POST "${platform%/}/api/auth/enroll/instance" \
+              -H 'Content-Type: application/json' --data-binary @- 2>/dev/null)" \
+    || die "the platform refused this machine's identity"
+
+  local token org
+  token="$(printf '%s' "$body" | jq -r '.token // empty')"
+  org="$(printf '%s' "$body" | jq -r '.organizationId // empty')"
+  [[ -n "$token" && -n "$org" ]] || die "unexpected response from the platform"
+
+  env_upsert "$env_file" CAYTU_METERING_TOKEN "$token"
+  env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
+  env_upsert "$env_file" CAYTU_INSTANCE_ID "$record"
+  env_upsert "$env_file" CAYTU_PLATFORM_URL "$platform"
+  local expires; expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
+  [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
+  for var in CAYTU_BILLINGS_URL; do
+    [[ -z "$(env_get "$env_file" "$var" || true)" ]] && env_upsert "$env_file" "$var" "$platform"
+  done
+
+  ok "enrolled for organization $org"
+}
+
+cmd_agent() {
+  local sub=${1:-}; shift || true
+  local -a files=(-f "$COMPOSE_DIR/docker-compose.agent.yml")
+  local env_file; env_file="$(env_file_for)"
+
+  case "$sub" in
+    up)
+      ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          docker compose --env-file "$env_file" "${files[@]}" up -d )
+      ok "provisioner agent running; new instances for this org are picked up automatically"
+      ;;
+    down)
+      ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          docker compose --env-file "$env_file" "${files[@]}" down )
+      ok "provisioner agent stopped"
+      ;;
+    logs)
+      ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          docker compose --env-file "$env_file" "${files[@]}" logs -f )
+      ;;
+    *) die "usage: caytu-client [-t TARGET] agent <up|down|logs>" ;;
+  esac
+}
+
+cmd_instance() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    provision) instance_provision "$@" ;;
+    report)    instance_report_cmd "$@" ;;
+    agent)     instance_agent "$@" ;;
+    *) die "usage: caytu-client instance <provision <id>|agent|report <status>>" ;;
+  esac
+}
+
+# --- license -----------------------------------------------------------------
+#
+# A license is an Ed25519 token signed by the platform (KMS-held key) and
+# verified locally by the client, so a site with no internet still enforces it.
+# These verbs are the operator path between the two:
+#
+#   fetch    ask the platform to issue/refresh this org's license
+#   install  put a signed token into this deployment
+#   status   what the running client thinks its license is
+#
+# Connected sites can do `license fetch --install` in one step. Air-gapped sites
+# fetch elsewhere, carry the file in, and `license install` it.
+
+license_backend_url() {
+  local env_file; env_file="$(env_file_for)"
+  local url; url="$(env_get "$env_file" CLIENT_BACKEND_URL || true)"
+  if [[ -z "$url" ]]; then
+    local port; port="$(env_get "$env_file" BACKEND_HOST_PORT || true)"
+    url="http://localhost:${port:-5100}"
+  fi
+  printf '%s' "${url%/}"
+}
+
+# The client's own admin session. Its license endpoints are gated on the
+# client's admin role, not on the platform token.
+license_client_auth() {
+  local env_file=$1
+  local bearer="${LICENSE_AUTH_BEARER:-}"
+  [[ -n "$bearer" ]] && { printf '%s' "$bearer"; return 0; }
+
+  local email pass
+  email="$(env_get "$env_file" CLIENT_ADMIN_EMAIL || true)"
+  pass="$(env_get "$env_file" CLIENT_ADMIN_PASSWORD || true)"
+  [[ -n "$email" && -n "$pass" ]] || die "no administrator sign-in for this deployment — claim the account first with 'caytu-client -t $TARGET admin invite', then re-run with --auth <bearer>"
+
+  local body
+  body="$(curl -fsS -X POST "$(license_backend_url)/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"email\":\"$email\",\"password\":\"$pass\"}")" \
+    || die "login failed against $(license_backend_url)"
+
+  local tok
+  tok="$(printf '%s' "$body" | jq -r '.data.token // .data.accessToken // .accessToken // .token // empty')"
+  [[ -n "$tok" ]] || die "login succeeded but no access token in the response"
+  printf '%s' "$tok"
+}
+
+license_fetch() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local out="" install=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)     out=$2; shift 2 ;;
+      --install) install=1; shift ;;
+      *) die "usage: caytu-client license fetch [--out FILE] [--install]" ;;
+    esac
+  done
+
+  local token org platform
+  token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  org="$(env_get "$env_file" CAYTU_ORGANIZATION_ID || true)"
+  # In production both services sit behind one gateway, so CAYTU_BILLINGS_URL is
+  # usually right. Split deployments (and local dev) need the licenses service
+  # named separately.
+  platform="$(env_get "$env_file" PLATFORM_HOST_URL || true)"
+  [[ -z "$platform" ]] && platform="$(env_get "$env_file" CAYTU_PLATFORM_URL || true)"
+  [[ -z "$platform" ]] && platform="$(env_get "$env_file" CAYTU_BILLINGS_URL || true)"
+  [[ -n "$token" ]] || not_enrolled
+  [[ -n "$org" ]]      || not_enrolled
+  [[ -n "$platform" ]] || not_enrolled
+
+  info "requesting a license from ${platform%/} for org $org…"
+  local body
+  body="$(curl -fsS -X POST "${platform%/}/api/licenses" \
+    -H "Authorization: Bearer $token" \
+    -H 'Content-Type: application/json' \
+    -d "{\"organizationId\":\"$org\"}")" \
+    || die "issuance failed against ${platform%/} — check the URL is reachable from here, and that the token carries an admin role on that organization"
+
+  local signed
+  signed="$(printf '%s' "$body" | jq -r '.token // empty')"
+  [[ -n "$signed" ]] || die "no token in the response: $(printf '%s' "$body" | head -c 200)"
+
+  ok "issued $(printf '%s' "$body" | jq -r '.licenseId // "?"') valid until $(printf '%s' "$body" | jq -r '.notAfter // "?"')"
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$signed" > "$out"
+    ok "written to $out"
+  fi
+  if [[ "$install" -eq 1 ]]; then
+    printf '%s' "$signed" | license_install -
+  elif [[ -z "$out" ]]; then
+    printf '%s\n' "$signed"
+  fi
+}
+
+license_install() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local src="${1:-}"
+  [[ -n "$src" ]] || die "usage: caytu-client license install <FILE|->"
+  shift || true
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --auth) LICENSE_AUTH_BEARER=$2; shift 2 ;;
+      *) die "usage: caytu-client license install <FILE|-> [--auth BEARER]" ;;
+    esac
+  done
+
+  local token
+  if [[ "$src" == "-" ]]; then token="$(cat)"; else
+    [[ -f "$src" ]] || die "no such file: $src"
+    token="$(cat "$src")"
+  fi
+  token="$(printf '%s' "$token" | tr -d '[:space:]')"
+  [[ "$token" == caytu-lic.v1.* ]] || die "that does not look like a caytu-lic.v1 token"
+
+  local bearer; bearer="$(license_client_auth "$env_file")"
+  info "installing into $(license_backend_url)…"
+  local body
+  body="$(curl -fsS -X POST "$(license_backend_url)/api/license" \
+    -H "Authorization: Bearer $bearer" \
+    -H 'Content-Type: application/json' \
+    -d "{\"token\":\"$token\"}")" \
+    || die "install rejected — the client verifies the signature before storing it"
+
+  ok "installed: $(printf '%s' "$body" | jq -r '.data.licenseId // "?"') status=$(printf '%s' "$body" | jq -r '.data.status // "?"') until $(printf '%s' "$body" | jq -r '.data.notAfter // "?"')"
+}
+
+license_status() {
+  require_cmd curl jq
+  local env_file; env_file="$(env_file_for)"
+  local bearer; bearer="$(license_client_auth "$env_file")"
+  curl -fsS "$(license_backend_url)/api/license/status" \
+    -H "Authorization: Bearer $bearer" | jq .
+}
+
+cmd_license() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    fetch)   license_fetch "$@" ;;
+    install) license_install "$@" ;;
+    status)  license_status "$@" ;;
+    *) die "usage: caytu-client license <fetch|install|status>" ;;
+  esac
+}
+
+# --- codeartifact ------------------------------------------------------------
+#
+# @caytu/metering is published to a private CodeArtifact repository, so building
+# the backend from scratch needs a token. It expires every 12 hours, so this
+# refreshes it in .env.<target> instead of asking anyone to paste one.
+
+CODEARTIFACT_DOMAIN="${CODEARTIFACT_DOMAIN:-caytu}"
+CODEARTIFACT_DOMAIN_OWNER="${CODEARTIFACT_DOMAIN_OWNER:-688544396352}"
+CODEARTIFACT_AWS_REGION="${CODEARTIFACT_AWS_REGION:-us-east-1}"
+
+# Secrets a deployment must have and that nobody should have to invent.
+#
+# JWT_SECRET is fail-closed in the client: without it every login dies while
+# signing the session token. That is a uniquely misleading failure, because the
+# claim link works and the new password is accepted and stored, and only then
+# does the sign-in collapse with "An error occurred". The deployment looks
+# provisioned and nobody can get into it.
+#
+# It lived in backend/.env.example and in neither compose file, so it reached a
+# real deployment only if somebody had read that example and copied it across by
+# hand. Provisioning is automatic, so nobody ever did.
+#
+# Generated once and never rotated here: changing it signs out every existing
+# session on the site and invalidates every refresh token.
+ensure_deployment_secrets() {
+  local env_file=$1
+  local key
+  for key in JWT_SECRET; do
+    [[ -n "$(env_get "$env_file" "$key" || true)" ]] && continue
+    require_cmd openssl
+    env_upsert "$env_file" "$key" "$(openssl rand -hex 32)"
+    ok "generated $key for this deployment"
+  done
+}
+
+# Whether the token in this env file is missing or past its expiry.
+#
+# A CodeArtifact token carries its own expiry in the clear: the first segment of
+# the JWE is base64url JSON with an "exp" claim. So this needs no network call
+# and no AWS credentials, which matters because it runs on the path where the
+# answer decides whether to bother building at all.
+#
+# Returns 0 when a refresh is needed.
+codeartifact_token_stale() {
+  local env_file=$1
+  local token; token="$(env_get "$env_file" CODEARTIFACT_AUTH_TOKEN || true)"
+  [[ -n "$token" ]] || return 0
+
+  local header exp
+  header="${token%%.*}"
+  # base64url, and the segment is usually unpadded.
+  exp="$(printf '%s' "$header" | tr '_-' '/+' \
+    | awk '{ while (length($0) % 4) $0 = $0 "="; print }' \
+    | base64 -d 2>/dev/null \
+    | sed -n 's/.*"exp":\([0-9]*\).*/\1/p')"
+
+  # Unreadable is not the same as expired. Say nothing and let the build decide,
+  # rather than refusing to work because the token format changed.
+  [[ -n "$exp" ]] || return 1
+
+  # A minute of slack: a token expiring during the build is as broken as one
+  # that already has.
+  (( exp - 60 <= $(date +%s) ))
+}
+
+# Refresh the token before a build needs it, if we can.
+#
+# The failure this prevents is a bad one to debug: the token lasts 12 hours, so
+# the first build of the day dies several minutes in, inside a yarn install, on
+# a 401 that surfaces as "the stack did not come up on the host". Nothing in
+# that sentence points at a credential.
+codeartifact_ensure_fresh() {
+  local env_file=$1
+  codeartifact_token_stale "$env_file" || return 0
+
+  if ! command -v aws >/dev/null 2>&1; then
+    warn "the CodeArtifact token has expired and the aws CLI is not here to renew it."
+    warn "the backend build will fail on @caytu/metering until it is refreshed."
+    return 0
+  fi
+
+  info "the CodeArtifact token has expired; renewing before the build"
+  # Best effort: a host that pulls prebuilt images does not need this at all, so
+  # a failure here must not stop provisioning.
+  cmd_codeartifact_login || warn "could not renew it; the build may fail on @caytu/metering"
+}
+
+cmd_codeartifact_login() {
+  require_cmd aws
+
+  local profile="${AWS_PROFILE:-eks-admin}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile)   profile=$2; shift 2 ;;
+      --profile=*) profile=${1#*=}; shift ;;
+      *) die "usage: caytu-client [-t TARGET] codeartifact-login [--profile NAME]" ;;
+    esac
+  done
+
+  local env_file; env_file="$(env_file_for)"
+  [[ -f "$env_file" ]] || die "missing $env_file — run: caytu-client -t $TARGET init"
+
+  info "fetching CodeArtifact token (domain $CODEARTIFACT_DOMAIN, profile $profile)…"
+  local token
+  token="$(aws --profile "$profile" --region "$CODEARTIFACT_AWS_REGION" \
+    codeartifact get-authorization-token \
+    --domain "$CODEARTIFACT_DOMAIN" \
+    --domain-owner "$CODEARTIFACT_DOMAIN_OWNER" \
+    --query authorizationToken --output text)" \
+    || die "could not get a token — check that profile '$profile' is authenticated"
+  [[ -n "$token" ]] || die "CodeArtifact returned an empty token"
+
+  # Rewrite through a temp file so a failure can never truncate the env file.
+  local tmp; tmp="$(mktemp)"
+  TOKEN="$token" awk '
+    /^CODEARTIFACT_AUTH_TOKEN=/ { print "CODEARTIFACT_AUTH_TOKEN=" ENVIRON["TOKEN"]; done = 1; next }
+    { print }
+    END { if (!done) print "CODEARTIFACT_AUTH_TOKEN=" ENVIRON["TOKEN"] }
+  ' "$env_file" > "$tmp" && mv "$tmp" "$env_file"
+
+  ok "token written to $(basename "$env_file") — valid for 12 hours"
+}
+
 cmd_secrets() {
   local sub=${1:-}; shift || true
   case "$sub" in
@@ -724,6 +2188,14 @@ main() {
     backup)         cmd_backup "$@" ;;
     ssl)            cmd_ssl "$@" ;;
     secrets)        cmd_secrets "$@" ;;
+    codeartifact-login) cmd_codeartifact_login "$@" ;;
+    license)        cmd_license "$@" ;;
+    instance)       cmd_instance "$@" ;;
+    agent)          cmd_agent "$@" ;;
+    enroll)         enroll_host "$@" ;;
+    enroll-self)    enroll_self "$@" ;;
+    host)           cmd_host "$@" ;;
+    admin)          cmd_admin "$@" ;;
     state)          cmd_state "$@" ;;
     aws)            cmd_aws "$@" ;;
     gcp)            cmd_gcp "$@" ;;
