@@ -208,6 +208,18 @@ variable "iot_role_alias_ttl_seconds" {
 # logging in. Neither is a secret: the credential is issued against the identity
 # document AWS signs for the instance, not against anything carried here.
 
+variable "agent_bucket" {
+  description = "Bucket holding the host agent tarball, under an agent/ prefix."
+  type        = string
+  default     = "caytu-cli"
+}
+
+variable "agent_version" {
+  description = "Which agent to install: a commit sha, or latest."
+  type        = string
+  default     = "latest"
+}
+
 variable "caytu_instance_id" {
   description = "The platform's deployment record this machine is created for. Empty means an unattached machine that an operator will enrol by hand."
   type        = string
