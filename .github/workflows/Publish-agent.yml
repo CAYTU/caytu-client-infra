@@ -1,0 +1,78 @@
+name: Publish the host agent
+
+# Put the agent where a machine can fetch it.
+#
+# A Caytu-hosted machine has nothing but what user_data carries, and user_data
+# is 16KB. The agent and the compose files it drives are around 380KB, so they
+# have to come from somewhere at boot. This publishes them; bootstrap.sh pulls
+# them down using the instance's own IAM role, so no credential is ever put on a
+# customer's machine.
+#
+# Published per commit, and `latest` moved separately, so a machine can be
+# pinned to a known agent and a bad one can be rolled back by moving a pointer
+# rather than reverting a repository.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "compose/**"
+      - ".github/workflows/Publish-agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  BUCKET: ${{ secrets.AGENT_BUCKET || 'caytu-cli' }}
+  PREFIX: agent
+
+jobs:
+  publish:
+    name: Publish agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Build the tarball
+        run: |
+          set -euo pipefail
+          # Only what a host runs. No terraform, no docs, no .github: a customer's
+          # machine has no use for them and every extra file is one more thing
+          # shipped to somewhere we do not control.
+          tar -czf agent.tar.gz scripts compose
+          sha256sum agent.tar.gz | cut -d' ' -f1 > agent.tar.gz.sha256
+          echo "size: $(du -h agent.tar.gz | cut -f1), sha256: $(cat agent.tar.gz.sha256)"
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA}"
+          aws s3 cp agent.tar.gz        "s3://${BUCKET}/${PREFIX}/${sha}.tar.gz"
+          aws s3 cp agent.tar.gz.sha256 "s3://${BUCKET}/${PREFIX}/${sha}.tar.gz.sha256"
+
+          # `latest` is a copy rather than a redirect, so a machine fetching it
+          # gets bytes and not a lookup that can fail differently.
+          aws s3 cp agent.tar.gz        "s3://${BUCKET}/${PREFIX}/latest.tar.gz"
+          aws s3 cp agent.tar.gz.sha256 "s3://${BUCKET}/${PREFIX}/latest.tar.gz.sha256"
+
+      - name: What a machine will fetch
+        run: |
+          {
+            echo "### Agent published"
+            echo
+            echo "- \`s3://${BUCKET}/${PREFIX}/${GITHUB_SHA}.tar.gz\`"
+            echo "- \`s3://${BUCKET}/${PREFIX}/latest.tar.gz\` (moved to the same bytes)"
+            echo
+            echo "sha256 \`$(cat agent.tar.gz.sha256)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
