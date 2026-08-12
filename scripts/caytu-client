@@ -1607,11 +1607,18 @@ instance_agent() {
   local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
   [[ -n "$token" ]] || not_enrolled
 
-  info "agent watching $(instance_platform_url "$env_file") (instances every ${interval}s, commands every ${command_interval}s; ctrl-c to stop)"
+  # Which organization, not just which URL. A credential enrolled into a
+  # different organization gets a clean 200 with an empty list, so the agent sat
+  # there silently while an instance waited in the organization next door. The
+  # id is not a secret and it is the one fact that makes that visible.
+  local org; org="$(env_get "$env_file" CAYTU_ORGANIZATION_ID || true)"
+  info "agent watching $(instance_platform_url "$env_file") for organization ${org:-unknown} (instances every ${interval}s, commands every ${command_interval}s; ctrl-c to stop)"
 
   # Forces an instance sweep on the first tick rather than after one full
   # interval, so a freshly started agent picks up waiting work immediately.
   local since_sweep=$interval
+  # So the empty-list warning is said once rather than every sweep.
+  local reported_empty=0
   local fingerprint; fingerprint="$(script_fingerprint)"
 
   while true; do
@@ -1646,6 +1653,16 @@ instance_agent() {
           [.instances[]? | select(.status == "provisioning" and (.provisioningPercent // 0) == 0)]
           | .[0].id // empty')"
 
+        # Said once, and only when there is genuinely nothing. Silence here is
+        # indistinguishable from a broken agent, which is exactly how an hour
+        # went into a credential pointing at the wrong organization.
+        local total; total="$(printf '%s' "$body" | jq -r '[.instances[]?] | length')"
+        if [[ "$total" -eq 0 && "$reported_empty" -eq 0 ]]; then
+          reported_empty=1
+          warn "no instances in organization ${org:-unknown}. If one is waiting, this host is enrolled somewhere else: re-enroll it from the console."
+        fi
+        [[ "$total" -gt 0 ]] && reported_empty=0
+
         if [[ -n "$pending" ]]; then
           info "picking up instance $pending"
           # A failure here is already reported by instance_provision, and the
@@ -1653,7 +1670,21 @@ instance_agent() {
           instance_provision "$pending" || warn "provisioning $pending failed; continuing"
         fi
       else
-        warn "platform unreachable; retrying in ${interval}s"
+        # curl -f hides the response, so a rejected credential and an unreachable
+        # host looked identical. Asking again for the status code costs one
+        # request and turns "unreachable" into something actionable.
+        # curl already prints 000 when it cannot connect, so nothing is
+        # appended on failure: doing both produced "HTTP 000000".
+        local code
+        code="$(curl -s -o /dev/null -w '%{http_code}' \
+          "$(instance_platform_url "$env_file")/api/billings/instances" \
+          -H "Authorization: Bearer $token" 2>/dev/null)" || true
+        [[ "$code" =~ ^[0-9]{3}$ ]] || code=000
+        case "$code" in
+          000) warn "cannot reach $(instance_platform_url "$env_file"); retrying in ${interval}s" ;;
+          401|403) warn "the platform rejected this host's credential (HTTP $code). Re-enroll it from the console." ;;
+          *)   warn "the platform answered HTTP $code; retrying in ${interval}s" ;;
+        esac
       fi
     fi
 
