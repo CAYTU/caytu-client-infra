@@ -161,7 +161,7 @@ services:
     networks: [caytu]
 
   signaling-server:
-    image: ${IMAGE_REGISTRY:-caytu-client}/${SIGNALING_IMAGE_NAME:-webrtc-signaling}:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${SIGNALING_IMAGE_NAME:-caytu-client-signaling-server}:${SIGNALING_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     profiles: [self-hosted]
     env_file:
       - path: ./.env
@@ -187,7 +187,7 @@ services:
     networks: [caytu]
 
   gstreamer-recorder:
-    image: ${IMAGE_REGISTRY:-caytu-client}/${GSTREAMER_IMAGE_NAME:-gstreamer-recorder}:${GSTREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${GSTREAMER_IMAGE_NAME:-caytu-client-gstreamer-recorder}:${GSTREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     ulimits:
       nofile: { soft: 65536, hard: 65536 }
     volumes:
@@ -250,7 +250,7 @@ services:
     networks: [caytu]
 
   mqtt-streamer:
-    image: ${IMAGE_REGISTRY:-caytu-client}/${MQTT_STREAMER_IMAGE_NAME:-mqtt-streamer}:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${MQTT_STREAMER_IMAGE_NAME:-caytu-client-mqtt-streamer}:${MQTT_STREAMER_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
@@ -283,7 +283,7 @@ services:
   # Application
   # ---------------------------------------------------------------------------
   backend:
-    image: ${IMAGE_REGISTRY:-caytu-client}/${BACKEND_IMAGE_NAME:-backend}:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${BACKEND_IMAGE_NAME:-caytu-client-backend}:${BACKEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
@@ -368,7 +368,7 @@ services:
     networks: [caytu]
 
   frontend:
-    image: ${IMAGE_REGISTRY:-caytu-client}/${FRONTEND_IMAGE_NAME:-frontend}:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
+    image: ${IMAGE_REGISTRY:-caytu-client}/${FRONTEND_IMAGE_NAME:-caytu-client-frontend}:${FRONTEND_IMAGE_TAG:-${IMAGE_TAG:-latest}}
     env_file:
       - path: ./.env
         required: false
