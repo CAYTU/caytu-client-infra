@@ -188,6 +188,26 @@ resource "aws_iam_role_policy_attachment" "ecr_read" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+# Read the agent, and nothing else in the bucket.
+#
+# This is what replaces putting a credential on the machine: the instance uses
+# its own role to fetch the agent at boot. Scoped to the one prefix, so a
+# compromised deployment cannot read the rest of the bucket.
+data "aws_iam_policy_document" "instance_agent_read" {
+  statement {
+    sid       = "ReadAgent"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::${var.agent_bucket}/agent/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "instance_agent_read" {
+  name   = "${var.name_prefix}-${var.environment}-agent-read"
+  role   = aws_iam_role.instance.id
+  policy = data.aws_iam_policy_document.instance_agent_read.json
+}
+
 data "aws_iam_policy_document" "instance_kvs_iot" {
   statement {
     sid    = "KvsSignaling"
@@ -290,6 +310,8 @@ resource "aws_instance" "this" {
     DEPLOY_USER=ubuntu \
       CAYTU_INSTANCE_ID='${var.caytu_instance_id}' \
       CAYTU_PLATFORM_URL='${var.caytu_platform_url}' \
+      CAYTU_AGENT_BUCKET='${var.agent_bucket}' \
+      CAYTU_AGENT_VERSION='${var.agent_version}' \
       bash /tmp/caytu-bootstrap.sh
   EOF
 
