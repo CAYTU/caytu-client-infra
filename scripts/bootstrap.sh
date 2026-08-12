@@ -133,6 +133,32 @@ elif [[ -n "${CAYTU_INSTANCE_ID:-}" ]]; then
   # these two values, neither of them secret.
   log "Caytu-hosted instance for deployment $CAYTU_INSTANCE_ID"
 
+  # Fetch the agent. user_data carries this script and nothing else, so the
+  # agent it calls has to come from somewhere. S3 with the instance's own role:
+  # no credential is written to a customer's machine.
+  : "${CAYTU_AGENT_BUCKET:=caytu-cli}"
+  : "${CAYTU_AGENT_VERSION:=latest}"
+  agent_url="s3://$CAYTU_AGENT_BUCKET/agent/${CAYTU_AGENT_VERSION}.tar.gz"
+
+  log "fetching the agent from $agent_url"
+  tmp="$(mktemp -d)"
+  if aws s3 cp "$agent_url" "$tmp/agent.tar.gz" >/dev/null 2>&1 \
+     && aws s3 cp "${agent_url}.sha256" "$tmp/agent.sha256" >/dev/null 2>&1; then
+    # Checked, because this arrives over the network and then runs as root.
+    if echo "$(cat "$tmp/agent.sha256")  $tmp/agent.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+      tar -xzf "$tmp/agent.tar.gz" -C "$DEPLOY_DIR"
+      chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
+      ln -sf "$DEPLOY_DIR/scripts/caytu-client" /usr/local/bin/caytu-client
+      log "agent installed from $CAYTU_AGENT_VERSION"
+    else
+      log "ERROR: the agent download did not match its checksum, refusing to run it"
+    fi
+  else
+    log "ERROR: could not fetch the agent from $agent_url"
+    log "  The instance role needs s3:GetObject on that bucket."
+  fi
+  rm -rf "$tmp"
+
   run_as() { sudo -u "$DEPLOY_USER" env \
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
