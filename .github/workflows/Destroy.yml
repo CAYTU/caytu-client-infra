@@ -1,0 +1,123 @@
+name: Destroy a Caytu-hosted deployment
+
+# Remove the machine for one deployment, and nothing else.
+#
+# The mirror of Provision.yml, and it matters that it is a mirror: it reads the
+# same per-deployment state file, so it can only ever destroy what that one
+# provision created. A destroy pointed at the wrong key would find a different
+# customer's machine and take it, which is the reason the state was split per
+# deployment in the first place.
+#
+# Nothing here is customer-supplied. The values come from the deployment record.
+
+run-name: Destroy ${{ inputs.subdomain }} (${{ inputs.instance_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "The platform's deployment record id"
+        required: true
+      region:
+        description: "AWS region the machine was built in"
+        required: true
+        default: "us-east-1"
+      subdomain:
+        description: "Hostname label, for the run name only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  TF_DIR: terraform/aws/single-instance
+
+jobs:
+  destroy:
+    name: Destroy ${{ github.event.inputs.instance_id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Init, against this deployment's own state
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET" || {
+            echo "::error::TF_STATE_BUCKET is not set. Without the state there is nothing to destroy from, and the machine would be left running."
+            exit 1
+          }
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=instances/${INSTANCE_ID}/terraform.tfstate" \
+            -backend-config="region=${REGION}" \
+            ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
+            -backend-config="encrypt=true"
+
+      - name: What exists right now
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          # Printed before anything is removed, so the run log records what was
+          # there. If this is empty the state is already clean and the destroy
+          # below is a no-op, which is the expected outcome of running twice.
+          terraform state list || true
+
+      - name: Destroy
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          set -euo pipefail
+          # Only the two that decide *where* and *as whom*. Every other variable
+          # has a default, and none of them affect what gets destroyed: terraform
+          # removes what the state lists, and the rest only ever fed resource
+          # names and tags. Passing the provision's values here would mean
+          # keeping two lists in step forever, and getting one wrong would look
+          # like a successful destroy that left the machine running.
+          terraform destroy -input=false -auto-approve \
+            -var "aws_profile=" \
+            -var "region=${REGION}"
+
+      - name: Confirm nothing is left
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          remaining="$(terraform state list | wc -l)"
+          if [ "$remaining" -ne 0 ]; then
+            echo "::error::$remaining resource(s) still in state after destroy. The machine may still be running and billing."
+            terraform state list
+            exit 1
+          fi
+          echo "state is empty: every resource this deployment created is gone"
+
+      - name: What was removed
+        if: always()
+        run: |
+          {
+            echo "### Destroyed \`${{ github.event.inputs.instance_id }}\`"
+            echo
+            echo "State key: \`instances/${{ github.event.inputs.instance_id }}/terraform.tfstate\`"
+            echo
+            echo "Check the EC2 console if you want a second opinion. A failed run"
+            echo "here means the machine may still exist."
+          } >> "$GITHUB_STEP_SUMMARY"
