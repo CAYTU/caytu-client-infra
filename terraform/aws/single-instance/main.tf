@@ -268,14 +268,29 @@ resource "aws_instance" "this" {
   # with docker on it" into a deployment that finishes itself. Both are readable
   # by anything on the box and neither is a secret: the credential is issued
   # against the identity document AWS signs, not against anything written here.
+  # The script is carried, not fetched. It used to be curl'd from
+  # raw.githubusercontent.com, which cannot work: this repository is private, so
+  # an unauthenticated fetch gets 404. Every machine ever built this way finished
+  # cloud-init seventeen seconds after boot having done nothing, and then sat
+  # there as a bare Ubuntu box waiting to enrol forever.
+  #
+  # Carrying it also removes a boot-time network dependency and pins the script
+  # to the commit that provisioned the machine, rather than whatever `main`
+  # happened to say at the moment it booted.
+  # base64 rather than a nested heredoc. Terraform strips the indentation of a
+  # <<- block based on its least-indented line, so embedding the script raw makes
+  # both the shebang and the inner terminator depend on how a 7,000-line file
+  # happens to be indented. One encoded argument has no such failure mode.
   user_data = <<-EOF
     #!/bin/bash
     set -e
-    curl -fsSL https://raw.githubusercontent.com/CAYTU/caytu-client-infra/main/scripts/bootstrap.sh | \
-      DEPLOY_USER=ubuntu \
+    echo '${base64encode(file("${path.module}/../../../scripts/bootstrap.sh"))}' \
+      | base64 -d > /tmp/caytu-bootstrap.sh
+    chmod +x /tmp/caytu-bootstrap.sh
+    DEPLOY_USER=ubuntu \
       CAYTU_INSTANCE_ID='${var.caytu_instance_id}' \
       CAYTU_PLATFORM_URL='${var.caytu_platform_url}' \
-      bash
+      bash /tmp/caytu-bootstrap.sh
   EOF
 
   tags = {

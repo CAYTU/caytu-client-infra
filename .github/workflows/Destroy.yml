@@ -99,13 +99,26 @@ jobs:
             -var "region=${REGION}"
 
       - name: Confirm nothing is left
+        # Runs even when the destroy failed, which is exactly when it is worth
+        # reading. Without this it is skipped on failure, so the one step that
+        # says what survived stays silent in the only case that matters. A real
+        # failure proved it: the machine went, an IAM role did not, and this
+        # step never ran to say so.
+        if: always()
         working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
           remaining="$(terraform state list | wc -l)"
           if [ "$remaining" -ne 0 ]; then
-            echo "::error::$remaining resource(s) still in state after destroy. The machine may still be running and billing."
+            echo "::error::$remaining resource(s) still in state after destroy. Listed below."
             terraform state list
+            # An instance left behind is the one that costs money. Anything else
+            # is clutter that will collide the next time this subdomain is used.
+            if terraform state list | grep -q '^aws_instance\.'; then
+              echo "::error::The machine itself is still there and still billing."
+            else
+              echo "::warning::The machine is gone. What remains costs nothing but will block re-using this name."
+            fi
             exit 1
           fi
           echo "state is empty: every resource this deployment created is gone"
