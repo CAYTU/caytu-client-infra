@@ -485,24 +485,16 @@ acme_reaches_us() {
   [[ "$got" == "$token" ]]
 }
 
-# Get a certificate for this deployment, and serve it.
+# Get a certificate for this deployment over HTTP-01, and serve it.
 #
 # Runs after the stack is up, because Let's Encrypt validates over HTTP-01 and
 # that means nginx has to be answering on port 80 first. Failure is not fatal:
 # the deployment stays on plain HTTP, which is worse than TLS and much better
 # than not serving at all.
-hosted_issue_certificate() {
-  local env_file=$1 url=$2
-  local host="${url#*://}"; host="${host%%/*}"
-  [[ -n "$host" ]] || return 1
+cert_letsencrypt_http() {
+  local env_file=$1 host=$2
   # A bare IP cannot have one.
   [[ "$host" =~ ^[0-9.]+$ ]] && return 1
-
-  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
-    _nginx_use_tls "$host"
-    compose restart nginx >/dev/null 2>&1 || true
-    return 0
-  fi
 
   local email
   email="$(env_get "$env_file" CAYTU_LETSENCRYPT_EMAIL || true)"
@@ -537,9 +529,6 @@ hosted_issue_certificate() {
        certbot/certbot certonly --webroot -w /var/www/certbot -n \
        --agree-tos --no-eff-email --email "$email" \
        "${acme_server[@]}" -d "$host" >/dev/null 2>&1; then
-    _nginx_use_tls "$host"
-    compose restart nginx >/dev/null 2>&1 || true
-    ok "$host is served over TLS"
     return 0
   fi
 
@@ -547,10 +536,183 @@ hosted_issue_certificate() {
   return 1
 }
 
-hosted_prepare_nginx() {
+# Generate a certificate this machine signs itself, for $1.
+#
+# The address goes in as both an IP and a DNS SAN. openssl works out which
+# applies, and covering both is what lets the same certificate serve a site
+# reached by bare address, where no public CA would issue anything.
+cert_self_signed() {
+  local host=$1
+  require_cmd openssl
+
+  local san="DNS:${host}"
+  [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && san="IP:${host},DNS:${host}"
+
+  local dst; dst="$(_ssl_cert_dir_local "$host")"
+  mkdir -p "$dst" || return 1
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "$dst/privkey.pem" -out "$dst/fullchain.pem" \
+    -days 3650 -subj "/CN=${host}" \
+    -addext "subjectAltName=${san}" \
+    -addext "keyUsage=digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth" 2>/dev/null || return 1
+  chmod 600 "$dst/privkey.pem" 2>/dev/null || true
+}
+
+# Whether this certificate and key can actually serve $3.
+#
+# nginx refuses to start on a mismatched pair, so installing one takes the site
+# down rather than failing where it was typed. Checked here instead, where the
+# operator is still looking at the terminal.
+cert_pair_ok() {
+  local cert=$1 key=$2 host=$3
+  require_cmd openssl
+
+  local cmod kmod
+  cmod="$(openssl x509 -noout -modulus -in "$cert" 2>/dev/null | openssl md5)"
+  kmod="$(openssl rsa  -noout -modulus -in "$key"  2>/dev/null | openssl md5)"
+  if [[ -z "$cmod" || "$cmod" != "$kmod" ]]; then
+    err "that key does not belong to that certificate"
+    err "  nginx would refuse to start and the site would stop being served."
+    return 1
+  fi
+
+  if ! openssl x509 -checkend 0 -noout -in "$cert" >/dev/null 2>&1; then
+    err "that certificate has already expired"
+    return 1
+  fi
+
+  # A name mismatch is the operator's call: a wildcard, a SAN list we parse
+  # badly, or a deliberate choice are all plausible, and refusing would be worse
+  # than saying so.
+  if ! cert_covers_host "$cert" "$host"; then
+    warn "that certificate does not appear to cover $host"
+    warn "browsers will refuse it unless the name matches"
+  fi
+
+  local days; days="$(cert_days_left "$cert")"
+  [[ -n "$days" ]] && (( days < 30 )) && warn "it expires in $days days"
+  return 0
+}
+
+# Whether $1 names $2, in its subject or its SANs. Wildcards count for one label.
+cert_covers_host() {
+  local cert=$1 host=$2 names
+  names="$(openssl x509 -noout -text -in "$cert" 2>/dev/null \
+    | grep -oE '(DNS|IP Address):[^,]*' | cut -d: -f2- | tr -d ' ')"
+  names+=$'\n'"$(openssl x509 -noout -subject -in "$cert" 2>/dev/null \
+    | grep -oE 'CN *= *[^,/]*' | cut -d= -f2- | tr -d ' ')"
+
+  local n
+  while read -r n; do
+    [[ -z "$n" ]] && continue
+    [[ "$n" == "$host" ]] && return 0
+    # *.acme.internal covers host.acme.internal, and nothing deeper.
+    if [[ "$n" == \*.* && "$host" == *.* ]]; then
+      [[ "${n#\*.}" == "${host#*.}" ]] && return 0
+    fi
+  done <<< "$names"
+  return 1
+}
+
+# Days until $1 expires. Prints nothing when it cannot be read, so callers can
+# tell "no certificate" from "expiring".
+cert_days_left() {
+  local cert=$1 end exp
+  end="$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)"
+  [[ -n "$end" ]] || return 0
+  exp="$(date -d "$end" +%s 2>/dev/null)" || return 0
+  echo $(( (exp - $(date +%s)) / 86400 ))
+}
+
+# Which certificate mode this deployment was told to use.
+cert_mode_for() {
+  local env_file=$1
+  local tls; tls="$(env_get "$env_file" CAYTU_ACCESS_TLS || true)"
+  printf '%s' "${tls:-letsencrypt-http}"
+}
+
+# Get this deployment a certificate, by whichever route its record names.
+#
+# Attempting HTTP-01 for everyone is how a site that chose its own certificate
+# spent five minutes waiting for a challenge it never wanted, then reported
+# itself on plain HTTP. Each mode fails differently and none of them is fatal:
+# serving unencrypted beats serving nothing.
+issue_certificate() {
+  local env_file=$1 url=$2
+  local host="${url#*://}"; host="${host%%/*}"
+  [[ -n "$host" ]] || return 1
+
+  # Something in front holds the certificate. Ours would never be presented.
+  case "$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)" in
+    iis|external-proxy) return 1 ;;
+  esac
+
+  # Already there, whatever put it there. Covers a re-provision and a renewal.
+  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    _nginx_use_tls "$host"
+    compose restart nginx >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local mode; mode="$(cert_mode_for "$env_file")"
+  case "$mode" in
+    none)
+      return 1 ;;
+    letsencrypt-http)
+      cert_letsencrypt_http "$env_file" "$host" || return 1 ;;
+    self-signed)
+      info "generating a self-signed certificate for $host…"
+      cert_self_signed "$host" || { warn "could not generate one; $host stays on HTTP"; return 1; }
+      warn "browsers will warn until $COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem"
+      warn "is imported into each client's trust store" ;;
+    byo)
+      # Nothing to do but say where the files go. The operator puts them there,
+      # possibly days later, and the agent picks them up on its next pass.
+      warn "this deployment brings its own certificate, and none is installed yet."
+      warn "put fullchain.pem and privkey.pem in"
+      warn "  $COMPOSE_DIR/certbot/conf/live/$host/"
+      warn "or run: caytu-client -t $TARGET ssl bring-your-own $host <cert> <key>"
+      return 1 ;;
+    letsencrypt-dns)
+      # Deliberately not attempted. See docs/onprem-certificates.md: this needs
+      # a provider integration per DNS host, and pretending otherwise would burn
+      # a rate limit to fail.
+      warn "a DNS-01 certificate for $host is not issued automatically yet."
+      warn "install one with: caytu-client -t $TARGET ssl bring-your-own $host <cert> <key>"
+      return 1 ;;
+    *)
+      warn "this deployment names a certificate mode ('$mode') this host does not understand"
+      return 1 ;;
+  esac
+
+  _nginx_use_tls "$host"
+  compose restart nginx >/dev/null 2>&1 || true
+  ok "$host is served over TLS"
+}
+
+# Make nginx startable, and pointed at the right name, before it starts.
+#
+# The shipped config names a placeholder domain and a certificate that does not
+# exist, so nginx crash-looped and the deployment served nothing while still
+# reporting itself running.
+prepare_nginx() {
   local env_file=$1 url=$2
   local host="${url#*://}"; host="${host%%/*}"
   [[ -n "$host" ]] || return 0
+
+  # Something else owns the ports and terminates TLS. We serve plain HTTP on
+  # loopback and let it proxy in, which also means it never has to know that
+  # /api/config goes to the frontend rather than the backend.
+  local edge; edge="$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
+  case "$edge" in
+    iis|external-proxy)
+      env_upsert "$env_file" NGINX_HTTP_BIND "127.0.0.1:${NGINX_LOOPBACK_HTTP:-8080}"
+      env_upsert "$env_file" NGINX_HTTPS_BIND "127.0.0.1:${NGINX_LOOPBACK_HTTPS:-8443}"
+      _nginx_use_http_only || return 0
+      ok "nginx is on 127.0.0.1:${NGINX_LOOPBACK_HTTP:-8080}; point your $edge there"
+      return 0 ;;
+  esac
 
   if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
     _nginx_use_tls "$host"
@@ -559,7 +721,12 @@ hosted_prepare_nginx() {
   fi
 
   _nginx_use_http_only || return 0
-  warn "no certificate for $host yet; nginx is serving plain HTTP"
+  # Plain HTTP is the chosen answer here, not a step on the way to one.
+  if [[ "$(cert_mode_for "$env_file")" == "none" ]]; then
+    warn "this deployment serves plain HTTP by choice; passwords cross the network in clear"
+  else
+    warn "no certificate for $host yet; nginx is serving plain HTTP"
+  fi
 }
 
 _ssl_pin_nginx_remote() {
@@ -570,6 +737,17 @@ _ssl_pin_nginx_remote() {
     -e 's|/etc/letsencrypt/live/yourdomain.com/|/etc/letsencrypt/live/$host/|g' \
     $rdir/compose/nginx/conf.d/default.conf && \
     rm -f $rdir/compose/nginx/conf.d/default.conf.bak"
+}
+
+# Put the TLS config back before pinning it. Installing a certificate while
+# nginx is on the HTTP-only config used to sed a file with nothing to change,
+# so the site kept serving plain HTTP and nothing said why.
+_ssl_restore_tls_remote() {
+  local host=$1 rdir; rdir="$(ssh_remote_dir)"
+  local rconf="$rdir/compose/nginx/conf.d/default.conf"
+  # shellcheck disable=SC2029
+  ssh_run "test -f $rconf.tls && cp $rconf.tls $rconf || true"
+  _ssl_pin_nginx_remote "$host"
 }
 
 # Days until the remote cert for $1 expires. Prints nothing when there is no
@@ -685,14 +863,14 @@ cmd_ssl() {
         onprem)
           local dst; dst="$(_ssl_cert_dir_local "$host")"
           mkdir -p "$dst" && cp "$tmp"/*.pem "$dst/" && chmod 600 "$dst/privkey.pem"
-          _ssl_pin_nginx_local "$host"
+          _nginx_use_tls "$host"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
           ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
           scp $(ssh_opts | tr '\n' ' ') "$tmp/fullchain.pem" "$tmp/privkey.pem" \
             "$(ssh_target):$rdir/compose/certbot/conf/live/$host/"
-          _ssl_pin_nginx_remote "$host"
+          _ssl_restore_tls_remote "$host"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
@@ -704,6 +882,7 @@ cmd_ssl() {
       local host=${1:-}; local cert=${2:-}; local key=${3:-}
       [[ -n "$host" && -f "$cert" && -f "$key" ]] || \
         die "usage: caytu-client ssl bring-your-own <host> <fullchain.pem> <privkey.pem>"
+      cert_pair_ok "$cert" "$key" "$host" || exit 1
       case "$TARGET" in
         onprem)
           local dst; dst="$(_ssl_cert_dir_local "$host")"
@@ -711,14 +890,14 @@ cmd_ssl() {
           cp "$cert" "$dst/fullchain.pem"
           cp "$key"  "$dst/privkey.pem"
           chmod 600 "$dst/privkey.pem"
-          _ssl_pin_nginx_local "$host"
+          _nginx_use_tls "$host"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
           ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
           scp $(ssh_opts | tr '\n' ' ') "$cert" "$(ssh_target):$rdir/compose/certbot/conf/live/$host/fullchain.pem"
           scp $(ssh_opts | tr '\n' ' ') "$key"  "$(ssh_target):$rdir/compose/certbot/conf/live/$host/privkey.pem"
-          _ssl_pin_nginx_remote "$host"
+          _ssl_restore_tls_remote "$host"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
         *) die "ssl only applies to onprem/remote targets" ;;
@@ -737,12 +916,18 @@ cmd_ssl() {
 
       case "$TARGET" in
         onprem)
-          mv "$COMPOSE_DIR/nginx/conf.d/default.conf" "$COMPOSE_DIR/nginx/conf.d/default.conf.disabled" 2>/dev/null || true
-          cp "$src" "$COMPOSE_DIR/nginx/conf.d/default.conf"
+          # The shared switch, so a later 'ssl self-signed' finds the TLS config
+          # where it expects it. This used to keep its own .disabled copy that
+          # nothing ever read, so switching back left nginx on plain HTTP with a
+          # certificate installed and no sign anything was wrong.
+          _nginx_use_http_only || die "missing $src"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
-          scp $(ssh_opts | tr '\n' ' ') "$src" "$(ssh_target):$rdir/compose/nginx/conf.d/default.conf"
+          local rconf="$rdir/compose/nginx/conf.d/default.conf"
+          # shellcheck disable=SC2029
+          ssh_run "test -f $rconf.tls || cp $rconf $rconf.tls"
+          scp $(ssh_opts | tr '\n' ' ') "$src" "$(ssh_target):$rconf"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
@@ -1544,20 +1729,24 @@ instance_provision() {
   local reporting_to; reporting_to="$(instance_platform_url "$env_file")"
   [[ -n "$reporting_to" ]] && env_upsert "$env_file" CAYTU_BILLINGS_URL "$reporting_to"
 
-  hosted_prepare_nginx "$env_file" "$deployment_url"
+  prepare_nginx "$env_file" "$deployment_url"
 
   # Report the scheme actually being served. Saying https while nginx listens
-  # on 80 alone gives the console a link that cannot work.
-  if [[ "${HOSTED_TLS:-1}" == "0" ]]; then
-    deployment_url="${deployment_url/#https:/http:}"
-  fi
+  # on 80 alone gives the console a link that cannot work. Except behind IIS or
+  # a customer proxy, where our nginx serving plain HTTP on loopback says
+  # nothing about what the browser gets.
+  local edge_now; edge_now="$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
+  case "$edge_now" in
+    iis|external-proxy) : ;;
+    *) [[ "${HOSTED_TLS:-1}" == "0" ]] && deployment_url="${deployment_url/#https:/http:}" ;;
+  esac
 
   info "starting the stack…"
   if cmd_up $build; then
     # Now, not before: HTTP-01 needs nginx already answering on port 80. If it
     # works the scheme below becomes https, and if not the deployment keeps
     # serving plain HTTP rather than nothing.
-    if hosted_issue_certificate "$env_file" "$deployment_url"; then
+    if issue_certificate "$env_file" "$deployment_url"; then
       deployment_url="${deployment_url/#http:/https:}"
     fi
 

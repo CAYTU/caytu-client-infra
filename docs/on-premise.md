@@ -204,7 +204,9 @@ caytu-client -t onprem ssl http-only
 
 Swaps the TLS nginx config for the HTTP-only variant. Everything runs on port 80. **Don't do this if the network is untrusted** — passwords fly plaintext.
 
-Switching back later is `ssl self-signed <host>` — the CLI restores the TLS config from the `.disabled` backup.
+Switching back later is `ssl self-signed <host>` or `ssl bring-your-own <host> ...`. Either one restores the TLS config from the `default.conf.tls` copy that `http-only` leaves behind, then pins it to the host.
+
+Note that these are the manual verbs. A deployment the platform knows about gets whichever of these its `access.tls` names, without anyone running a command. See [onprem-certificates.md](onprem-certificates.md).
 
 ## Firewall on the host
 
