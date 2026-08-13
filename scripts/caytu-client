@@ -1025,6 +1025,60 @@ instance_report() {
     || warn "could not report instance state (continuing)"
 }
 
+# Read one value from instance metadata. IMDSv2 first, since newer instances
+# refuse the unauthenticated read; empty when this is not an EC2 machine.
+imds_get() {
+  local path=$1
+  local base="${CAYTU_IMDS_URL:-http://169.254.169.254}"
+  local token
+  token="$(curl -fsS -m 5 -X PUT "$base/latest/api/token" \
+    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)"
+
+  local -a hdr=()
+  [[ -n "$token" ]] && hdr=(-H "X-aws-ec2-metadata-token: $token")
+  curl -fsS -m 5 "${hdr[@]}" "$base$path" 2>/dev/null || true
+}
+
+# Which ECR this machine pulls from, read off the machine itself.
+#
+# Asked of the instance rather than configured: a hosted machine runs in the
+# account and region that built it, so anything we could write down here would
+# only be a chance to be wrong.
+ecr_registry_here() {
+  local account region
+  account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || return 0
+  [[ -n "$account" && "$account" != "None" ]] || return 0
+
+  region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+  [[ -z "$region" ]] && region="$(aws configure get region 2>/dev/null || true)"
+  [[ -z "$region" ]] && region="$(imds_get /latest/meta-data/placement/region)"
+  [[ -n "$region" ]] || return 0
+
+  printf '%s.dkr.ecr.%s.amazonaws.com' "$account" "$region"
+}
+
+# Log in to ECR, using the instance's own role.
+#
+# No credential is stored anywhere: the role grants pull, and the token it
+# returns lasts twelve hours, which is why this runs before every rollout
+# rather than once at boot.
+ecr_login_if_needed() {
+  local registry=$1
+  [[ "$registry" == *.dkr.ecr.*.amazonaws.com ]] || return 0
+
+  local region="${registry#*.dkr.ecr.}"; region="${region%%.amazonaws.com}"
+
+  if aws ecr get-login-password --region "$region" 2>/dev/null \
+       | docker login --username AWS --password-stdin "$registry" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Not fatal here. The pull that follows fails with a message naming the image,
+  # which says more than a login failure would.
+  warn "could not log in to $registry; the image pull will probably be denied"
+  return 0
+}
+
 # Point this host at the images the record names.
 #
 # Without it the record described a deployment but not its software, so a host
@@ -1040,10 +1094,14 @@ apply_instance_source() {
 
   case "$mode" in
     caytu)
-      # Ours. Only the tag is worth recording; the repository names are the
-      # defaults the compose files already carry.
+      # Ours. The repository names are the compose defaults already, but the
+      # default registry is the bare string "caytu-client", which docker reads
+      # as a Docker Hub organisation, so every pull was denied. Derived from the
+      # machine rather than configured, so it cannot drift from where it runs.
+      local ours; ours="$(ecr_registry_here)"
+      [[ -n "$ours" ]] && env_upsert "$env_file" IMAGE_REGISTRY "$ours"
       [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
-      ok "images: Caytu registry${tag:+, pinned to $tag}"
+      ok "images: ${ours:-Caytu registry}${tag:+, pinned to $tag}"
       ;;
     registry)
       local registry; registry="$(printf '%s' "$record" | jq -r '.source.registry // empty')"
@@ -1153,6 +1211,10 @@ instance_provision() {
   # Only when this host builds. One that pulls published images never touches
   # CodeArtifact and should not be asked for AWS credentials it does not have.
   [[ -n "$build" ]] && codeartifact_ensure_fresh "$env_file"
+
+  # Before the pull, not at boot: the token lasts twelve hours, so a machine
+  # up longer than that would fail on its next update.
+  [[ -z "$build" ]] && ecr_login_if_needed "$(env_get "$env_file" IMAGE_REGISTRY || true)"
 
   info "starting the stack…"
   if cmd_up $build; then
