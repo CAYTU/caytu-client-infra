@@ -1045,14 +1045,19 @@ imds_get() {
 # account and region that built it, so anything we could write down here would
 # only be a chance to be wrong.
 ecr_registry_here() {
-  local account region
-  account="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" || return 0
-  [[ -n "$account" && "$account" != "None" ]] || return 0
+  local doc account region
+  # Metadata, not the AWS CLI: the agent runs in a docker:cli container that has
+  # no aws and cannot usefully get one, since alpine's aws-cli is broken on this
+  # image. The identity document carries both values and needs only curl.
+  doc="$(imds_get /latest/dynamic/instance-identity/document)"
+  [[ -n "$doc" ]] || return 0
 
-  region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
-  [[ -z "$region" ]] && region="$(aws configure get region 2>/dev/null || true)"
-  [[ -z "$region" ]] && region="$(imds_get /latest/meta-data/placement/region)"
-  [[ -n "$region" ]] || return 0
+  account="$(printf '%s' "$doc" | jq -r '.accountId // empty' 2>/dev/null || true)"
+  region="$(printf '%s' "$doc" | jq -r '.region // empty' 2>/dev/null || true)"
+
+  # Not an EC2 machine, or metadata is off. A customer running our images on
+  # their own hardware is legitimate, so this stays quiet.
+  [[ -n "$account" && -n "$region" ]] || return 0
 
   printf '%s.dkr.ecr.%s.amazonaws.com' "$account" "$region"
 }
