@@ -254,6 +254,11 @@ services:
     env_file:
       - path: ./.env
         required: false
+    environment:
+      # Stated here rather than left to the image. Its own default is localhost,
+      # which inside this container is nothing, so it could not reach the secret
+      # store and reported the fallback error: certificate material required.
+      - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true}
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
