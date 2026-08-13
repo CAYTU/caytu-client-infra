@@ -39,6 +39,8 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, DOC)
         if self.path.endswith("/rsa2048"):
             return self._send(200, "FAKESIGNATURE")
+        if self.path.endswith("/public-ipv4"):
+            return self._send(200, "203.0.113.7")
         self._send(404, "{}")
 
     def do_POST(self):
