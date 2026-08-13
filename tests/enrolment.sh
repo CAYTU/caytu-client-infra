@@ -53,6 +53,9 @@ kill "$pid" 2>/dev/null
 check "exits 0" "0" "$rc"
 check "made 3 attempts" "3" "$(cat "${TMPDIR:-/tmp}/caytu-enrol-test/n.txt" 2>/dev/null)"
 check "stored the credential" "tok-abc" "$(grep -oP '(?<=^CAYTU_METERING_TOKEN=).*' "${TMPDIR:-/tmp}/caytu-enrol-test/sandbox/compose/.env.onprem" 2>/dev/null)"
+# Silent when wrong: the deployment reports to the platform named here, so a
+# stale production default means a 404 nobody sees and no invitation.
+check "reports to the platform it enrolled with" "http://127.0.0.1:18081" "$(grep -oP '(?<=^CAYTU_BILLINGS_URL=).*' "${TMPDIR:-/tmp}/caytu-enrol-test/sandbox/compose/.env.onprem" 2>/dev/null)"
 
 echo
 echo "2. a refusal is final and is NOT retried"

@@ -1046,6 +1046,23 @@ enroll_host() {
 # Where a person reaches this deployment. Not a question worth asking: on a
 # laptop it is the published frontend port, and on a site with a domain it is
 # that domain. Only a box behind a name we cannot work out has to be told.
+# The API base the browser uses: the origin, and nothing after it.
+#
+# The client prepends /api to every request itself, so a base that already
+# carries /api produces /api/api/…, which nginx hands to the backend as a path
+# it does not have. That broke the login and reset forms twice.
+#
+# The scheme follows whether a certificate exists, so it never claims https
+# before there is one.
+api_base_for() {
+  local domain=$1
+  [[ -n "$domain" && "$domain" != "example.com" ]] || return 0
+
+  local scheme="https"
+  [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
+  printf '%s://%s' "$scheme" "$domain"
+}
+
 deployment_url_for() {
   local env_file=$1
   local url; url="$(env_get "$env_file" CAYTU_DEPLOYMENT_URL || true)"
@@ -1355,14 +1372,8 @@ instance_provision() {
   # proxies /api/ to the backend. The internal one skips nginx, since the
   # frontend's server side sits on the same network.
   local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
-  if [[ -n "$domain" && "$domain" != "example.com" ]]; then
-    local scheme="https"
-    [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
-    # The origin, with no /api on the end. The client prepends /api to every
-    # request itself, so a base that already carries it produces /api/api/…,
-    # which nginx sends to the backend as a path it does not have.
-    env_upsert "$env_file" NEXT_PUBLIC_API_URL "$scheme://$domain"
-  fi
+  local api_base; api_base="$(api_base_for "$domain")"
+  [[ -n "$api_base" ]] && env_upsert "$env_file" NEXT_PUBLIC_API_URL "$api_base"
   [[ -n "$(env_get "$env_file" CLIENT_BACKEND_URL || true)" ]] \
     || env_upsert "$env_file" CLIENT_BACKEND_URL "http://backend:5000"
 

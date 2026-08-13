@@ -35,6 +35,14 @@ check "placeholder is gone" 0 "$(grep -c 'yourdomain.com' "$conf")"
 # The round trip is what matters: an operator may flip back and forth.
 _nginx_use_http_only
 _nginx_use_tls "binsix.caytu.link"
+# One line, and without it the login page silently fails: the browser is told
+# where the API is by the frontend, on a path under /api/.
+check "tls config sends the config route to the frontend" 1 \
+  "$(grep -c 'location = /api/config' "$conf")"
+_nginx_use_http_only
+check "http-only config does too" 1 "$(grep -c 'location = /api/config' "$conf")"
+_nginx_use_tls "binsix.caytu.link"
+
 check "survives a round trip" 1 "$(grep -c 'live/binsix.caytu.link/fullchain.pem' "$conf")"
 rm -rf "$d"
 echo
