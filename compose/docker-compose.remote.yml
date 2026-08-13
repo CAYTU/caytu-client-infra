@@ -32,9 +32,13 @@ services:
 
   nginx:
     image: nginx:${NGINX_VERSION:-alpine}
+    # Where nginx publishes. The defaults are the whole host on the usual ports,
+    # which is right whenever we are the edge. A site with IIS or its own proxy
+    # in front sets these to loopback so the two do not fight for :80, and points
+    # that proxy at one port rather than restating our routing rules.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${NGINX_HTTP_BIND:-80}:80"
+      - "${NGINX_HTTPS_BIND:-443}:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
