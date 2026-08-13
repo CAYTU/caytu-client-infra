@@ -170,6 +170,71 @@ ENVEOF
   fi
   rm -rf "$tmp"
 
+  # Keep a docker login to our registry alive on the host.
+  #
+  # The agent runs in a docker:cli container with no aws, and alpine's aws-cli
+  # is broken on that image, so the login cannot happen where the pull is
+  # started. It happens here instead, and the agent container mounts the result.
+  # The token lasts twelve hours, hence the timer rather than a one-off at boot.
+  account="$(curl -fsS -m 5 http://169.254.169.254/latest/dynamic/instance-identity/document \
+    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
+      http://169.254.169.254/latest/api/token \
+      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null \
+    | grep -o '"accountId"[^,]*' | cut -d'"' -f4 || true)"
+  region="$(curl -fsS -m 5 http://169.254.169.254/latest/meta-data/placement/region \
+    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
+      http://169.254.169.254/latest/api/token \
+      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null || true)"
+
+  if [[ -n "$account" && -n "$region" ]]; then
+    registry="$account.dkr.ecr.$region.amazonaws.com"
+
+    cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
+#!/bin/bash
+# Refresh the docker login for our registry. No credential is stored: the
+# instance role grants the pull and the token it returns is short lived.
+set -e
+aws ecr get-login-password --region $region \
+  | docker login --username AWS --password-stdin $registry
+ECRLOGIN
+    chmod +x /usr/local/bin/caytu-ecr-login
+
+    cat > /etc/systemd/system/caytu-ecr-login.service <<'ECRSVC'
+[Unit]
+Description=Refresh the docker login for the Caytu registry
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=DEPLOY_USER_PLACEHOLDER
+ExecStart=/usr/local/bin/caytu-ecr-login
+ECRSVC
+    sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
+
+    cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
+[Unit]
+Description=Keep the Caytu registry login fresh
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+ECRTIMER
+
+    systemctl daemon-reload
+    systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
+    # Now, because provisioning starts within the minute and needs the login.
+    if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
+      log "logged in to $registry"
+    else
+      log "WARNING: could not log in to $registry; image pulls will be denied"
+    fi
+  fi
+
   run_as() { sudo -u "$DEPLOY_USER" env \
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
