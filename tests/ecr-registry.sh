@@ -37,6 +37,25 @@ check "never the bare compose default" "" "$(probe "http://127.0.0.1:$port" | gr
 # so this stays quiet rather than guessing.
 check "empty when there is no metadata" "" "$(probe "http://127.0.0.1:1")"
 
+
+# The only address that works before DNS resolves, so the console has something
+# to show in a deployment's first minutes.
+direct() {
+  bash -c '
+    source "'"$SRC"'/scripts/lib/common.sh" >/dev/null 2>&1
+    CAYTU_IMDS_URL="'"$1"'"
+    '"$(sed -n '/^imds_get() {/,/^}/p' "$SRC/scripts/caytu-client")"'
+    '"$(sed -n '/^direct_url() {/,/^}/p' "$SRC/scripts/caytu-client")"'
+    direct_url
+  '
+}
+
+echo
+echo "the address that works before dns does"
+check "built from the machine's public address" \
+  "http://203.0.113.7" "$(direct "http://127.0.0.1:$port")"
+check "empty off EC2, rather than a guess" "" "$(direct "http://127.0.0.1:1")"
+
 kill "$fake" 2>/dev/null
 echo
 printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
