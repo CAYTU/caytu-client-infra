@@ -1733,12 +1733,29 @@ instance_agent() {
 # than being a presigned SigV4 call.
 #
 # Needs only CAYTU_INSTANCE_ID and the platform URL, neither of them secret.
+
+# Where a provisioned machine remembers which deployment it is. Written by the
+# bootstrap before anything can fail, so this survives a failed enrolment.
+DEPLOYMENT_FILE="${CAYTU_DEPLOYMENT_FILE:-/etc/caytu-client/deployment.env}"
+
+# Roughly seven minutes of backoff, well inside the platform's window.
+ENROLL_ATTEMPTS="${CAYTU_ENROLL_ATTEMPTS:-10}"
+
 enroll_self() {
   require_cmd curl jq
   local env_file; env_file="$(env_file_for)"
 
   local record="${CAYTU_INSTANCE_ID:-$(env_get "$env_file" CAYTU_INSTANCE_ID || true)}"
   local platform="${CAYTU_PLATFORM_URL:-$(env_get "$env_file" CAYTU_PLATFORM_URL || true)}"
+
+  # Fall back to what the bootstrap left behind. Without this, a machine whose
+  # first enrolment failed had no idea which deployment it was for, because the
+  # ids only ever existed in cloud-init's environment.
+  if [[ -r "$DEPLOYMENT_FILE" ]]; then
+    [[ -z "$record" ]]   && record="$(env_get "$DEPLOYMENT_FILE" CAYTU_INSTANCE_ID || true)"
+    [[ -z "$platform" ]] && platform="$(env_get "$DEPLOYMENT_FILE" CAYTU_PLATFORM_URL || true)"
+  fi
+
   [[ -n "$record" ]]   || die "CAYTU_INSTANCE_ID is not set, so this machine does not know which deployment it is for"
   [[ -n "$platform" ]] || die "CAYTU_PLATFORM_URL is not set, so this machine does not know where the platform is"
 
@@ -1768,12 +1785,53 @@ enroll_self() {
     || die "could not read this instance's identity signature"
 
   info "enrolling with ${platform%/} as deployment $record…"
-  local body
-  body="$(jq -n --arg d "$doc" --arg s "$sig" --arg i "$record" \
-            '{document:$d, signature:$s, instanceId:$i}' \
-          | curl -fsS -X POST "${platform%/}/api/auth/enroll/instance" \
-              -H 'Content-Type: application/json' --data-binary @- 2>/dev/null)" \
-    || die "the platform refused this machine's identity"
+
+  local payload
+  payload="$(jq -n --arg d "$doc" --arg s "$sig" --arg i "$record" \
+               '{document:$d, signature:$s, instanceId:$i}')"
+
+  # The platform accepts an identity document only for a short window after
+  # launch, so a first boot that races the platform has to retry inside it.
+  # One attempt meant a machine that came up a minute early stayed unenrolled
+  # for good.
+  local body status message
+  local -i attempt=0 delay=5
+  while :; do
+    attempt+=1
+
+    # No -f here: it hides the body, and the body is what says whether trying
+    # again could ever work.
+    body="$(printf '%s' "$payload" \
+            | curl -sS -m 20 -w '\n%{http_code}' \
+                -X POST "${platform%/}/api/auth/enroll/instance" \
+                -H 'Content-Type: application/json' --data-binary @- 2>/dev/null)" \
+      || body=$'\n000'
+    status="${body##*$'\n'}"
+    body="${body%$'\n'*}"
+
+    [[ "$status" == "200" || "$status" == "201" ]] && break
+
+    message="$(printf '%s' "$body" | jq -r '.errors[0].message // empty' 2>/dev/null || true)"
+
+    # A refusal is a verdict on a document that never changes, so the same
+    # answer is waiting on every retry. Being rate limited is not a refusal.
+    if [[ "$status" =~ ^4[0-9][0-9]$ && "$status" != "408" && "$status" != "429" ]]; then
+      err "the platform refused this machine's identity: ${message:-HTTP $status}"
+      err "  This will not fix itself. The deployment is $record at ${platform%/}."
+      return 1
+    fi
+
+    if (( attempt >= ENROLL_ATTEMPTS )); then
+      err "gave up enrolling after $attempt attempts: ${message:-HTTP $status}"
+      err "  The identity document expires shortly after launch, so this machine"
+      err "  most likely now needs replacing rather than retrying."
+      return 1
+    fi
+
+    warn "enrolment attempt $attempt did not get through (${message:-HTTP $status}); retrying in ${delay}s"
+    sleep "$delay"
+    (( delay = delay < 60 ? delay * 2 : 60 ))
+  done
 
   local token org
   token="$(printf '%s' "$body" | jq -r '.token // empty')"
