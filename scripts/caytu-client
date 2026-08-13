@@ -256,6 +256,9 @@ cmd_init() {
     return 0
   fi
   cp "$COMPOSE_DIR/.env.example" "$env_file"
+  # Owner only from the start. It ends up holding the host's platform
+  # credential and everything else the stack reads.
+  chmod 600 "$env_file"
   ok "created $env_file"
   info "Edit it to set CAYTU_ENV, IMAGE_REGISTRY, IMAGE_TAG, MINIO_ROOT_*, etc."
 
@@ -1009,6 +1012,10 @@ enroll_host() {
   [[ -n "$token" && -n "$org" ]] || die "unexpected response from the platform"
 
   # The host stores its own credential. No human ever holds it.
+  # Owner only before a live credential goes in, and again on renewal: the
+  # file holds the host's platform token, so a copy of it is a working
+  # credential for the organization.
+  chmod 600 "$env_file" 2>/dev/null || true
   env_upsert "$env_file" CAYTU_METERING_TOKEN "$token"
   env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
   env_upsert "$env_file" PLATFORM_HOST_URL "$platform"
@@ -1836,6 +1843,10 @@ host_renew_token() {
 
   # Written before anything uses it. A crash between these two lines would
   # otherwise leave the file holding a token the platform has already retired.
+  # Owner only before a live credential goes in, and again on renewal: the
+  # file holds the host's platform token, so a copy of it is a working
+  # credential for the organization.
+  chmod 600 "$env_file" 2>/dev/null || true
   env_upsert "$env_file" CAYTU_METERING_TOKEN "$new_token"
   [[ -n "$new_expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$new_expires"
 
@@ -2101,6 +2112,10 @@ enroll_self() {
   org="$(printf '%s' "$body" | jq -r '.organizationId // empty')"
   [[ -n "$token" && -n "$org" ]] || die "unexpected response from the platform"
 
+  # Owner only before a live credential goes in, and again on renewal: the
+  # file holds the host's platform token, so a copy of it is a working
+  # credential for the organization.
+  chmod 600 "$env_file" 2>/dev/null || true
   env_upsert "$env_file" CAYTU_METERING_TOKEN "$token"
   env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
   env_upsert "$env_file" CAYTU_INSTANCE_ID "$record"
