@@ -1,0 +1,42 @@
+# Runs the shell test suites.
+#
+# They existed before this and nothing ran them, so they protected nothing:
+# every check only fired if someone remembered to type the command.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "compose/nginx/**"
+      - "tests/**"
+      - ".github/workflows/Tests.yml"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "compose/nginx/**"
+      - "tests/**"
+      - ".github/workflows/Tests.yml"
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax
+        run: |
+          set -euo pipefail
+          for f in scripts/caytu-client scripts/bootstrap.sh scripts/lib/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: Suites
+        run: |
+          set -euo pipefail
+          for t in tests/*.sh; do
+            echo "::group::$t"
+            bash "$t"
+            echo "::endgroup::"
+          done
