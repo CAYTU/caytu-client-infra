@@ -419,6 +419,30 @@ _ssl_pin_nginx_local() {
     "$COMPOSE_DIR/nginx/conf.d/default.conf"
   rm -f "$COMPOSE_DIR/nginx/conf.d/default.conf.bak"
 }
+# Point nginx at this deployment's own name, and serve plain HTTP until a
+# certificate exists. Without a cert the TLS block cannot load and nginx dies,
+# which is worse than serving unencrypted on a box nobody can reach yet.
+hosted_prepare_nginx() {
+  local env_file=$1 url=$2
+  local host="${url#*://}"; host="${host%%/*}"
+  [[ -n "$host" ]] || return 0
+
+  local conf="$COMPOSE_DIR/nginx/conf.d/default.conf"
+  local http_only="$COMPOSE_DIR/nginx/conf.d/onprem-http.conf.template"
+  local cert="$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem"
+
+  if [[ -f "$cert" ]]; then
+    _ssl_pin_nginx_local "$host"
+    ok "nginx serving $host over TLS"
+    return 0
+  fi
+
+  if [[ -f "$http_only" ]]; then
+    cp "$http_only" "$conf"
+    warn "no certificate for $host yet; nginx is serving plain HTTP"
+  fi
+}
+
 _ssl_pin_nginx_remote() {
   local host=$1 rdir; rdir="$(ssh_remote_dir)"
   # shellcheck disable=SC2029
@@ -745,6 +769,17 @@ not_enrolled() {
 # than the server, or a port they believed was free.
 #
 # Emits JSON so the platform can store it on the instance and drive the setup.
+
+# Where this machine answers without DNS.
+#
+# The friendly hostname needs a record and a certificate, and neither exists in
+# the first minutes of a deployment's life, so the console showed an address
+# that resolved nowhere and had nothing else to offer.
+direct_url() {
+  local ip; ip="$(imds_get /latest/meta-data/public-ipv4)"
+  [[ -n "$ip" ]] || return 0
+  printf 'http://%s' "$ip"
+}
 
 host_profile() {
   local os arch kernel
@@ -1221,6 +1256,13 @@ instance_provision() {
   # up longer than that would fail on its next update.
   [[ -z "$build" ]] && ecr_login_if_needed "$(env_get "$env_file" IMAGE_REGISTRY || true)"
 
+  # Make nginx startable before starting it.
+  #
+  # The shipped config names a placeholder domain and a certificate that does
+  # not exist, so on a hosted machine nginx crash-looped and the deployment
+  # served nothing while still reporting itself running.
+  hosted_prepare_nginx "$env_file" "$deployment_url"
+
   info "starting the stack…"
   if cmd_up $build; then
     # Deliberately not claiming adminProvisioned here. A stack that starts is
@@ -1229,9 +1271,11 @@ instance_provision() {
     # box that already has one silently leaves the named admin uncreated. The
     # deployment reports that flag once it is actually true.
     instance_report "$env_file" "$id" \
-      "$(jq -n --arg u "$deployment_url" --argjson h "$(host_profile)" \
+      "$(jq -n --arg u "$deployment_url" --arg d "$(direct_url)" \
+            --argjson h "$(host_profile)" \
         '{status:"running", provisioningPercent:100, hostProfile:$h}
-         + (if $u == "" then {} else {publicUrl:$u} end)')"
+         + (if $u == "" then {} else {publicUrl:$u} end)
+         + (if $d == "" then {} else {directUrl:$d} end)')"
     ok "instance $id reported running"
   else
     instance_report "$env_file" "$id" \
