@@ -133,6 +133,17 @@ elif [[ -n "${CAYTU_INSTANCE_ID:-}" ]]; then
   # these two values, neither of them secret.
   log "Caytu-hosted instance for deployment $CAYTU_INSTANCE_ID"
 
+  # Written first, because everything below can fail. These only ever lived in
+  # cloud-init's environment, so a machine whose enrolment failed could not
+  # even be told to try again: it no longer knew which deployment it was.
+  # Neither value is secret, which is why they can sit here readable.
+  mkdir -p /etc/caytu-client
+  cat > /etc/caytu-client/deployment.env <<ENVEOF
+CAYTU_INSTANCE_ID=$CAYTU_INSTANCE_ID
+CAYTU_PLATFORM_URL=${CAYTU_PLATFORM_URL:-}
+ENVEOF
+  chmod 0644 /etc/caytu-client/deployment.env
+
   # Fetch the agent. user_data carries this script and nothing else, so the
   # agent it calls has to come from somewhere. S3 with the instance's own role:
   # no credential is written to a customer's machine.
