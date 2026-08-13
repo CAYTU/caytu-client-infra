@@ -1263,6 +1263,11 @@ instance_provision() {
   # The shipped config names a placeholder domain and a certificate that does
   # not exist, so on a hosted machine nginx crash-looped and the deployment
   # served nothing while still reporting itself running.
+  # Repairs a deployment enrolled before this was fixed: the backend reads this
+  # to report in, and the template's default names production.
+  local reporting_to; reporting_to="$(instance_platform_url "$env_file")"
+  [[ -n "$reporting_to" ]] && env_upsert "$env_file" CAYTU_BILLINGS_URL "$reporting_to"
+
   hosted_prepare_nginx "$env_file" "$deployment_url"
 
   # Report the scheme actually being served. Saying https while nginx listens
@@ -1969,9 +1974,10 @@ enroll_self() {
   env_upsert "$env_file" CAYTU_PLATFORM_URL "$platform"
   local expires; expires="$(printf '%s' "$body" | jq -r '.tokenExpiresAt // empty')"
   [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
-  for var in CAYTU_BILLINGS_URL; do
-    [[ -z "$(env_get "$env_file" "$var" || true)" ]] && env_upsert "$env_file" "$var" "$platform"
-  done
+  # Always, not only when empty. The template ships this pointing at production,
+  # so a staging deployment reported itself to the wrong platform and got a 404:
+  # the account it had just created was never announced, and nobody was invited.
+  env_upsert "$env_file" CAYTU_BILLINGS_URL "$platform"
 
   ok "enrolled for organization $org"
 }
