@@ -18,7 +18,11 @@ services:
   provisioner-agent:
     image: docker:${DOCKER_CLI_VERSION:-27-cli}
     restart: unless-stopped
-    working_dir: /repo
+    # Mounted at its host path, not /repo. The daemon doing the mounting is
+    # the host's, so a service bind like ./nginx/nginx.conf resolves out
+    # there: a path that exists only in here becomes a directory the host
+    # invents, and the container fails to start.
+    working_dir: ${CAYTU_INFRA_REPO:-/repo}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -32,10 +36,15 @@ services:
       # Someone is watching a spinner when this one matters, so it ticks faster.
       - AGENT_COMMAND_INTERVAL=${AGENT_COMMAND_INTERVAL:-3}
     volumes:
-      # The repo, because the agent runs compose from it.
-      - ${CAYTU_INFRA_REPO:-..}:/repo
+      # The repo, because the agent runs compose from it. Same path both
+      # sides, so relative binds inside it mean the same thing.
+      - ${CAYTU_INFRA_REPO:-..}:${CAYTU_INFRA_REPO:-/repo}
       # The host's docker, because that is what it provisions onto.
       - /var/run/docker.sock:/var/run/docker.sock
+      # The host's registry login. The pull is started in here, so the credential
+      # has to be in here, but this container has no aws to fetch one: a timer on
+      # the host keeps it fresh instead.
+      - ${CAYTU_DOCKER_CONFIG:-/home/ubuntu/.docker}:/root/.docker:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
