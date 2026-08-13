@@ -1351,7 +1351,10 @@ instance_provision() {
   if [[ -n "$domain" && "$domain" != "example.com" ]]; then
     local scheme="https"
     [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
-    env_upsert "$env_file" NEXT_PUBLIC_API_URL "$scheme://$domain/api"
+    # The origin, with no /api on the end. The client prepends /api to every
+    # request itself, so a base that already carries it produces /api/api/…,
+    # which nginx sends to the backend as a path it does not have.
+    env_upsert "$env_file" NEXT_PUBLIC_API_URL "$scheme://$domain"
   fi
   [[ -n "$(env_get "$env_file" CLIENT_BACKEND_URL || true)" ]] \
     || env_upsert "$env_file" CLIENT_BACKEND_URL "http://backend:5000"
