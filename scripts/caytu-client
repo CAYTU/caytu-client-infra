@@ -422,27 +422,134 @@ _ssl_pin_nginx_local() {
 # Point nginx at this deployment's own name, and serve plain HTTP until a
 # certificate exists. Without a cert the TLS block cannot load and nginx dies,
 # which is worse than serving unencrypted on a box nobody can reach yet.
+# The TLS config, kept aside while we serve plain HTTP so it can come back.
+_nginx_tls_conf()  { printf '%s' "$COMPOSE_DIR/nginx/conf.d/default.conf.tls"; }
+_nginx_conf()      { printf '%s' "$COMPOSE_DIR/nginx/conf.d/default.conf"; }
+
+# Serve plain HTTP. Keeps a copy of the TLS config, because that file is the
+# only place the proxy rules live and copying over it would lose them.
+_nginx_use_http_only() {
+  local conf; conf="$(_nginx_conf)"
+  local tls;  tls="$(_nginx_tls_conf)"
+  local template="$COMPOSE_DIR/nginx/conf.d/onprem-http.conf.template"
+  [[ -f "$template" ]] || return 1
+
+  [[ -f "$tls" ]] || cp "$conf" "$tls"
+  cp "$template" "$conf"
+  HOSTED_TLS=0
+}
+
+# Serve TLS for $1, from the config we kept.
+_nginx_use_tls() {
+  local host=$1
+  local conf; conf="$(_nginx_conf)"
+  local tls;  tls="$(_nginx_tls_conf)"
+
+  [[ -f "$tls" ]] && cp "$tls" "$conf"
+  _ssl_pin_nginx_local "$host"
+  HOSTED_TLS=1
+}
+
+# How long to wait for the new DNS record to point here. Route53 answers in
+# seconds, but a resolver that already cached NXDOMAIN can hold it longer.
+ACME_WAIT_TRIES="${CAYTU_ACME_WAIT_TRIES:-20}"
+ACME_WAIT_SECONDS="${CAYTU_ACME_WAIT_SECONDS:-15}"
+
+# Whether $1 reaches this machine's nginx right now.
+#
+# Fetches a token we just wrote, over the same path and protocol Let's Encrypt
+# will use. Comparing IP addresses would prove less and still leave the request
+# itself untested.
+acme_reaches_us() {
+  local host=$1
+  local dir="$COMPOSE_DIR/certbot/www/.well-known/acme-challenge"
+  local token; token="caytu-probe-$RANDOM$RANDOM"
+
+  mkdir -p "$dir" 2>/dev/null || return 1
+  printf '%s' "$token" > "$dir/$token" 2>/dev/null || return 1
+
+  local got
+  got="$(curl -fsS -m 8 "http://$host/.well-known/acme-challenge/$token" 2>/dev/null || true)"
+  rm -f "$dir/$token"
+
+  [[ "$got" == "$token" ]]
+}
+
+# Get a certificate for this deployment, and serve it.
+#
+# Runs after the stack is up, because Let's Encrypt validates over HTTP-01 and
+# that means nginx has to be answering on port 80 first. Failure is not fatal:
+# the deployment stays on plain HTTP, which is worse than TLS and much better
+# than not serving at all.
+hosted_issue_certificate() {
+  local env_file=$1 url=$2
+  local host="${url#*://}"; host="${host%%/*}"
+  [[ -n "$host" ]] || return 1
+  # A bare IP cannot have one.
+  [[ "$host" =~ ^[0-9.]+$ ]] && return 1
+
+  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    _nginx_use_tls "$host"
+    compose restart nginx >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local email
+  email="$(env_get "$env_file" CAYTU_LETSENCRYPT_EMAIL || true)"
+  [[ -z "$email" || "$email" == "ops@example.com" ]] \
+    && email="$(env_get "$env_file" INITIAL_ADMIN_EMAIL || true)"
+  if [[ -z "$email" ]]; then
+    warn "no contact address for Let's Encrypt; $host stays on HTTP"
+    return 1
+  fi
+
+  info "waiting for $host to reach this machine…"
+  local -i tries=0
+  until acme_reaches_us "$host"; do
+    tries+=1
+    if (( tries >= ACME_WAIT_TRIES )); then
+      warn "$host does not reach this machine yet; it stays on HTTP"
+      return 1
+    fi
+    sleep "$ACME_WAIT_SECONDS"
+  done
+
+  # Their limits count per registered domain, so every deployment shares one
+  # allowance. Heavy testing should set this and take an untrusted certificate.
+  local -a acme_server=()
+  [[ "${CAYTU_ACME_STAGING:-0}" == "1" ]] \
+    && acme_server=(--server https://acme-staging-v02.api.letsencrypt.org/directory)
+
+  info "asking Let's Encrypt for a certificate for $host…"
+  if docker run --rm \
+       -v "$COMPOSE_DIR/certbot/conf:/etc/letsencrypt" \
+       -v "$COMPOSE_DIR/certbot/www:/var/www/certbot" \
+       certbot/certbot certonly --webroot -w /var/www/certbot -n \
+       --agree-tos --no-eff-email --email "$email" \
+       "${acme_server[@]}" -d "$host" >/dev/null 2>&1; then
+    _nginx_use_tls "$host"
+    compose restart nginx >/dev/null 2>&1 || true
+    ok "$host is served over TLS"
+    return 0
+  fi
+
+  warn "could not get a certificate for $host; it stays on HTTP"
+  return 1
+}
+
 hosted_prepare_nginx() {
   local env_file=$1 url=$2
   local host="${url#*://}"; host="${host%%/*}"
   [[ -n "$host" ]] || return 0
 
-  local conf="$COMPOSE_DIR/nginx/conf.d/default.conf"
-  local http_only="$COMPOSE_DIR/nginx/conf.d/onprem-http.conf.template"
-  local cert="$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem"
-
-  if [[ -f "$cert" ]]; then
-    _ssl_pin_nginx_local "$host"
-    HOSTED_TLS=1
+  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    _nginx_use_tls "$host"
     ok "nginx serving $host over TLS"
     return 0
   fi
 
-  if [[ -f "$http_only" ]]; then
-    cp "$http_only" "$conf"
-    HOSTED_TLS=0
-    warn "no certificate for $host yet; nginx is serving plain HTTP"
-  fi
+  _nginx_use_http_only || return 0
+  warn "no certificate for $host yet; nginx is serving plain HTTP"
 }
 
 _ssl_pin_nginx_remote() {
@@ -1278,6 +1385,13 @@ instance_provision() {
 
   info "starting the stack…"
   if cmd_up $build; then
+    # Now, not before: HTTP-01 needs nginx already answering on port 80. If it
+    # works the scheme below becomes https, and if not the deployment keeps
+    # serving plain HTTP rather than nothing.
+    if hosted_issue_certificate "$env_file" "$deployment_url"; then
+      deployment_url="${deployment_url/#http:/https:}"
+    fi
+
     # Deliberately not claiming adminProvisioned here. A stack that starts is
     # not proof the named account exists: the client only bootstraps an initial
     # superAdmin when the deployment has no users at all, so re-provisioning a
