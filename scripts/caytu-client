@@ -1340,6 +1340,22 @@ instance_provision() {
     env_upsert "$env_file" CAYTU_DOMAIN "${subdomain}.caytu.link"
   fi
 
+  # Where the browser and the frontend's server side send API calls.
+  #
+  # Both ship empty, so the browser had no address to post to and the request
+  # never left it: the reset-password form answered "an error occurred" with
+  # nothing reaching nginx at all. The public one goes through nginx, which
+  # proxies /api/ to the backend. The internal one skips nginx, since the
+  # frontend's server side sits on the same network.
+  local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
+  if [[ -n "$domain" && "$domain" != "example.com" ]]; then
+    local scheme="https"
+    [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
+    env_upsert "$env_file" NEXT_PUBLIC_API_URL "$scheme://$domain/api"
+  fi
+  [[ -n "$(env_get "$env_file" CLIENT_BACKEND_URL || true)" ]] \
+    || env_upsert "$env_file" CLIENT_BACKEND_URL "http://backend:5000"
+
   # The address this deployment is actually reachable on.
   local deployment_url; deployment_url="$(deployment_url_for "$env_file")"
   if [[ -z "$deployment_url" ]]; then
