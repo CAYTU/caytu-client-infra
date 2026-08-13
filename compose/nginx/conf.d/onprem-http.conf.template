@@ -11,6 +11,12 @@ server {
     listen 80 default_server;
     server_name _;
 
+    # Served even with no TLS, because this is how a certificate is obtained in
+    # the first place. Let's Encrypt fetches a token from here over plain HTTP.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
     client_max_body_size 100m;
     proxy_connect_timeout 300s;
     proxy_send_timeout 300s;
