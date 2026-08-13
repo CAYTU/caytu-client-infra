@@ -997,9 +997,15 @@ cmd_admin() {
 # The CLI runs on the host; the container-facing URL is a docker service name
 # that does not resolve here. In production both are the same public gateway, so
 # PLATFORM_HOST_URL only needs setting in local development.
+# In order of how much each is worth trusting: an operator's explicit setting,
+# then the platform this machine actually enrolled with, then the template.
+# CAYTU_BILLINGS_URL ships pointing at production and enrolment only fills it in
+# when empty, so a machine enrolled against staging polled production and got a
+# 404 on every tick: it never claimed its deployment and never took a command.
 instance_platform_url() {
   local env_file=$1
   local url; url="$(env_get "$env_file" PLATFORM_HOST_URL || true)"
+  [[ -z "$url" ]] && url="$(env_get "$env_file" CAYTU_PLATFORM_URL || true)"
   [[ -z "$url" ]] && url="$(env_get "$env_file" CAYTU_BILLINGS_URL || true)"
   [[ -n "$url" ]] || not_enrolled
   printf '%s' "${url%/}"
