@@ -71,6 +71,7 @@ caytu-client -t onprem ssl self-signed 10.0.1.42   # or: ssl http-only / ssl bri
 
 ## Docs
 
+- [Caytu-hosted deployments](docs/caytu-hosted.md) - what the platform provisions, and how to debug it
 - [Deployment matrix](docs/deployment-matrix.md) — which target for which use case
 - [Local development](docs/local-development.md)
 - [On-premise deployment](docs/on-premise.md)
