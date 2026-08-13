@@ -98,6 +98,8 @@ jobs:
         env:
           REGION: ${{ github.event.inputs.region }}
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+          # The zone every hosted deployment gets a name in.
+          DNS_ZONE: caytu.link
           INSTANCE_ARCH: ${{ github.event.inputs.instance_arch }}
           INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
@@ -128,7 +130,10 @@ jobs:
             "${extra[@]}" \
             -var "caytu_instance_id=${INSTANCE_ID}" \
             -var "caytu_platform_url=${PLATFORM_URL}" \
-            -var 'operator_ssh_cidrs=[]'
+            -var "enable_route53=true" \
+              -var "route53_zone_name=${DNS_ZONE}" \
+              -var "domain_name=${SUBDOMAIN}.${DNS_ZONE}" \
+              -var 'operator_ssh_cidrs=[]'
 
       - name: Apply
         working-directory: ${{ env.TF_DIR }}
