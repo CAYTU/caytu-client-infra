@@ -43,12 +43,22 @@ env_upsert() {
   local file=$1 key=$2 value=$3
   [[ -f "$file" ]] || die "no such env file: $file"
   local tmp; tmp="$(mktemp)"
+  # Keep the owner and mode. The agent writes this as root from a container, so
+  # a plain mv hands the deploy user's env file to root and locks them out.
+  local owner mode
+  owner="$(stat -c '%u:%g' "$file" 2>/dev/null || true)"
+  mode="$(stat -c '%a' "$file" 2>/dev/null || true)"
+
   KEY="$key" VALUE="$value" awk '
     BEGIN { k = ENVIRON["KEY"]; v = ENVIRON["VALUE"]; done = 0 }
     index($0, k "=") == 1 { print k "=" v; done = 1; next }
     { print }
     END { if (!done) print k "=" v }
-  ' "$file" > "$tmp" && mv "$tmp" "$file"
+  ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+
+  [[ -n "$owner" ]] && chown "$owner" "$tmp" 2>/dev/null || true
+  [[ -n "$mode" ]] && chmod "$mode" "$tmp" 2>/dev/null || true
+  mv "$tmp" "$file"
 }
 
 # State: a tiny JSON blob next to the script. We use jq if available, otherwise
