@@ -433,12 +433,14 @@ hosted_prepare_nginx() {
 
   if [[ -f "$cert" ]]; then
     _ssl_pin_nginx_local "$host"
+    HOSTED_TLS=1
     ok "nginx serving $host over TLS"
     return 0
   fi
 
   if [[ -f "$http_only" ]]; then
     cp "$http_only" "$conf"
+    HOSTED_TLS=0
     warn "no certificate for $host yet; nginx is serving plain HTTP"
   fi
 }
@@ -1257,6 +1259,12 @@ instance_provision() {
   # not exist, so on a hosted machine nginx crash-looped and the deployment
   # served nothing while still reporting itself running.
   hosted_prepare_nginx "$env_file" "$deployment_url"
+
+  # Report the scheme actually being served. Saying https while nginx listens
+  # on 80 alone gives the console a link that cannot work.
+  if [[ "${HOSTED_TLS:-1}" == "0" ]]; then
+    deployment_url="${deployment_url/#https:/http:}"
+  fi
 
   info "starting the stack…"
   if cmd_up $build; then
