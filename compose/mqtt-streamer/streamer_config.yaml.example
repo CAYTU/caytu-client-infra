@@ -14,11 +14,9 @@ mqtt:
   endpoint: "mqtt-broker"
   port: 1885
   protocol: "mqtt"          # mqtts for TLS, mqtt for plain
-  authType: "anonymous"     # matches compose/mosquitto/mosquitto.conf
-  # For username/password, use:
-  #   authType: "username"
-  #   username: "caytu"
-  #   password: "caytu"
+  authType: "username"      # matches compose/mosquitto/mosquitto.conf
+  username: "caytu"
+  password: "caytu"
 
 # ---------------------------------------------------------------------------
 # Where the streamer POSTs decoded messages. The default targets the backend
