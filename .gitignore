@@ -18,6 +18,15 @@ compose/secrets/*
 # fleet). Only the .example template is committed.
 compose/mqtt-streamer/streamer_config.yaml
 
+# Secret-store inputs and outputs. `.env.secrets` is the plaintext values fed
+# into encrypt-secrets.sh; `vault*.json` is the encrypted blob it produces.
+# Neither belongs in git — encrypted or not, a secret blob is still a secret.
+compose/vault/.env.secrets
+compose/vault/vault*.json
+vault*.json
+*.vault.json
+!compose/vault/.env.secrets.example
+
 # Terraform (added in phases 2-5)
 **/.terraform/
 **/.terraform.lock.hcl
