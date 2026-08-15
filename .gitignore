@@ -12,6 +12,11 @@ compose/certbot/conf/
 compose/certbot/www/
 compose/secrets/*
 !compose/secrets/.gitkeep
+!compose/secrets/signaling-tokens.example.json
+
+# mqtt-streamer per-operator config (holds the ingest API token and device
+# fleet). Only the .example template is committed.
+compose/mqtt-streamer/streamer_config.yaml
 
 # Terraform (added in phases 2-5)
 **/.terraform/

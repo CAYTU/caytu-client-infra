@@ -151,6 +151,13 @@ compose_files_for() {
       die "unknown target: $t" ;;
   esac
 
+  # Targets that run the local mqtt-broker also override the streamer's YAML
+  # to point at it. aws-* skip this — they keep the image's AWS IoT config.
+  case "$t" in
+    local|onprem|ssh|gcp-single)
+      args+=(-f "$COMPOSE_DIR/docker-compose.self-hosted-mqtt.yml") ;;
+  esac
+
   # Optional overlays (opt-in via state flags set by `monitor up` / `backup enable`)
   [[ "$(state_get "monitoring_${t}")" == "on" ]] && args+=(-f "$COMPOSE_DIR/docker-compose.monitoring.yml")
   [[ "$(state_get "backup_${t}")"     == "on" ]] && args+=(-f "$COMPOSE_DIR/docker-compose.backup.yml")
@@ -174,11 +181,11 @@ default_profiles_for() {
   local t=${1:-$TARGET}
   case "$t" in
     local)                            echo "self-hosted" ;;      # dev; turn off (noisy ports)
-    onprem|ssh)                       echo "self-hosted,turn" ;;
+    onprem|ssh)                       echo "self-hosted,turn,mqtt-broker" ;;
     aws-single|aws-cluster)           echo "" ;;                 # KVS + IoT Core
-    gcp-single|gcp-cluster)           echo "self-hosted,turn" ;; # no managed GCP path
-    self-managed-k8s)                 echo "self-hosted,turn" ;; # operator's infra, no cloud managed svcs
-    *)                                echo "self-hosted,turn" ;;
+    gcp-single|gcp-cluster)           echo "self-hosted,turn,mqtt-broker" ;; # no managed GCP path
+    self-managed-k8s)                 echo "self-hosted,turn" ;; # operator's infra, bring your own broker
+    *)                                echo "self-hosted,turn,mqtt-broker" ;;
   esac
 }
 
@@ -319,7 +326,7 @@ require_pinned_version() {
   die "set a released version, e.g. IMAGE_TAG=v1.4.2, in $(basename "$env_file")"
 }
 
-cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
+cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_bind_mount_files || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
 cmd_down()    { local vols=""; [[ "${1:-}" == "--volumes" ]] && vols="--volumes"; compose down $vols; }
 cmd_start()   { compose start "$@"; }
 cmd_stop()    { compose stop "$@"; }
@@ -823,6 +830,34 @@ port_in_use() {
   else
     return 1   # cannot tell; let docker report it
   fi
+}
+
+# --- bind-mount preflight ----------------------------------------------------
+#
+# A handful of files are bind-mounted into containers (streamer config,
+# signaling tokens). If the source file doesn't exist on the host, Docker
+# silently creates an empty directory in its place — the container then
+# fails with a confusing "is a directory" error. We seed each one from its
+# committed .example so `up` never trips on a missing file.
+#
+# The templates ship with REPLACE_WITH_* placeholders on purpose. We warn
+# loudly the first time we install one; the operator is expected to edit
+# it before running against real traffic.
+preflight_bind_mount_files() {
+  local seeded=0
+  local pair
+  for pair in \
+      "secrets/signaling-tokens.example.json:secrets/signaling-tokens.json" \
+      "mqtt-streamer/streamer_config.yaml.example:mqtt-streamer/streamer_config.yaml"; do
+    local src="$COMPOSE_DIR/${pair%%:*}"
+    local dst="$COMPOSE_DIR/${pair##*:}"
+    [[ -f "$dst" ]] && continue
+    [[ -f "$src" ]] || continue
+    cp "$src" "$dst"
+    warn "seeded $(basename "$dst") from template — edit $dst before production use"
+    seeded=$((seeded + 1))
+  done
+  return 0
 }
 
 preflight_ports() {

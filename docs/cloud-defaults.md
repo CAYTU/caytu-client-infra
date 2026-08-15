@@ -26,9 +26,9 @@ GCP has no equivalent to either KVS (retired IoT Core in 2023, no managed WebRTC
 | Target | Profiles activated | signaling-server | coturn | MQTT / signaling source |
 |---|---|---|---|---|
 | `local` | `self-hosted` | ✓ | ✗ | in-stack signaling; laptop MQTT via `mqtt-broker` profile |
-| `onprem` | `self-hosted,turn` | ✓ | ✓ | in-stack signaling; MQTT via `mqtt-broker` or external |
-| `ssh` | `self-hosted,turn` | ✓ | ✓ | in-stack signaling; MQTT via `mqtt-broker` or external |
-| `gcp-single` | `self-hosted,turn` | ✓ | ✓ | in-stack (no managed GCP path) |
+| `onprem` | `self-hosted,turn,mqtt-broker` | ✓ | ✓ | in-stack signaling and MQTT (mosquitto) |
+| `ssh` | `self-hosted,turn,mqtt-broker` | ✓ | ✓ | in-stack signaling and MQTT (mosquitto) |
+| `gcp-single` | `self-hosted,turn,mqtt-broker` | ✓ | ✓ | in-stack (no managed GCP path) |
 | `gcp-cluster` (phase 4) | `self-hosted,turn` | ✓ (StatefulSet/Deployment) | ✓ (Deployment) | in-cluster (no managed GCP path) |
 | `self-managed-k8s` (phase 4) | `self-hosted,turn` | ✓ (Deployment) | ✓ (Deployment) | in-cluster; operator's own MQTT if needed |
 | `aws-single` (phase 2) | *(none)* | ✗ | ✗ | AWS IoT Core + KVS WebRTC |
@@ -36,7 +36,7 @@ GCP has no equivalent to either KVS (retired IoT Core in 2023, no managed WebRTC
 
 For the k8s targets, `COMPOSE_PROFILES` is informational — the actual enable/disable is done by the kustomize overlay under `kubernetes/overlays/<target>/`. The `aws-eks` overlay omits the signaling-server and coturn manifests entirely; `gcp-gke` and `self-managed` include them.
 
-Profiles that are never on by default (opt-in only, all targets): `search` (mongot), `vault`, `mqtt-broker` (mosquitto).
+Profiles that are never on by default (opt-in only, all targets): `search` (mongot), `vault`. The `mqtt-broker` profile is now on by default for compose-driven targets that don't use AWS IoT Core; disable it by setting `COMPOSE_PROFILES` explicitly if you point the streamer at an external broker.
 
 ## What actually changes for AWS targets
 
