@@ -83,7 +83,7 @@ Open on the host:
 - `80/tcp`  HTTP (redirects + Let's Encrypt challenges)
 - `443/tcp` HTTPS (all app traffic)
 - `3478/tcp+udp`, `5349/tcp+udp`, `49152-49252/udp`  TURN (only if `STREAMING_PROVIDER=self-hosted`)
-- `1883/tcp`, `8883/tcp` MQTT (only if `--profile mqtt-broker`)
+- `1885/tcp`, `8883/tcp` MQTT (only if `--profile mqtt-broker`)
 
 ## Monitoring
 
