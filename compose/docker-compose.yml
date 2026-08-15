@@ -249,7 +249,7 @@ services:
       - net.ipv6.conf.all.disable_ipv6=1
     logging: *default-logging
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 1883 || exit 1"]
+      test: ["CMD-SHELL", "nc -z localhost 1885 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

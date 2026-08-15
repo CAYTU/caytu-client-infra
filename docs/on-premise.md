@@ -58,7 +58,7 @@ The `onprem` target activates these compose profiles:
 - `mqtt-broker` — mosquitto (local MQTT broker; AWS IoT Core is not used on-prem)
 
 The `mqtt-streamer` runs unconditionally and, out of the box, connects to the
-local `mqtt-broker` container on port 1883. Its config lives in
+local `mqtt-broker` container on port 1885. Its config lives in
 [`compose/mqtt-streamer/streamer_config.yaml`](../compose/mqtt-streamer/streamer_config.yaml.example),
 seeded from the committed `.example` on first `up`. Edit it to list your real
 devices and set the ingest API token — the streamer refuses to boot with
@@ -213,7 +213,7 @@ Open on the LAN interface:
 - `80/tcp` if `ssl http-only`, otherwise for HTTPS redirects
 - `443/tcp` if self-signed or bring-your-own
 - `3478/tcp+udp`, `5349/tcp+udp`, `49152-49252/udp` if `STREAMING_PROVIDER=self-hosted`
-- `1883/tcp` for the local mosquitto broker (on by default; only needs to be LAN-reachable if devices publish from other hosts)
+- `1885/tcp` for the local mosquitto broker (on by default; only needs to be LAN-reachable if devices publish from other hosts)
 
 Restrict to the LAN CIDR — no reason for these to be reachable from the general internet.
 

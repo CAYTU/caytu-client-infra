@@ -12,7 +12,7 @@
 # ---------------------------------------------------------------------------
 mqtt:
   endpoint: "mqtt-broker"
-  port: 1883
+  port: 1885
   protocol: "mqtt"          # mqtts for TLS, mqtt for plain
   authType: "anonymous"     # matches compose/mosquitto/mosquitto.conf
   # For username/password, use:
