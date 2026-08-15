@@ -114,9 +114,15 @@ HTTPS edge and browsers block them as mixed content.
 
 The customer's nginx, Apache, Traefik, Caddy or hardware load balancer. Same
 requirements as IIS: forward `X-Forwarded-Proto` and `X-Forwarded-For`, allow
-WebSocket upgrade, and raise the body-size limit. Point it at the backend port
-(`BACKEND_HOST_PORT`, default 5100) and set `COMPOSE_PROFILES` so the bundled
-nginx does not start and fight for the ports.
+WebSocket upgrade, and raise the body-size limit.
+
+Point it at the bundled nginx on loopback rather than at the backend directly.
+Provisioning sets `NGINX_HTTP_BIND=127.0.0.1:8080` when `edge` is `iis` or
+`external-proxy`, so the two never fight for `:80`, and the customer's proxy
+needs one rule instead of restating our routing. That matters most for
+`/api/config`, which is served by the frontend even though it sits under
+`/api/`: a proxy sending all of `/api/` to the backend breaks the login page,
+and pointing at our nginx means theirs never has to know.
 
 ### hostPlatform: `windows-docker-desktop`
 
