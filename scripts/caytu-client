@@ -922,8 +922,20 @@ not_enrolled() {
 # The friendly hostname needs a record and a certificate, and neither exists in
 # the first minutes of a deployment's life, so the console showed an address
 # that resolved nowhere and had nothing else to offer.
+
+# The address that actually carries traffic off this box, not loopback.
+primary_ip() {
+  local ip
+  ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
+  [[ -z "$ip" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  printf '%s' "$ip"
+}
+
 direct_url() {
   local ip; ip="$(imds_get /latest/meta-data/public-ipv4)"
+  # Off EC2 there is no metadata service, and a LAN address is still the answer
+  # to "where does this machine answer without DNS".
+  [[ -n "$ip" ]] || ip="$(primary_ip)"
   [[ -n "$ip" ]] || return 0
   printf 'http://%s' "$ip"
 }
@@ -962,12 +974,10 @@ host_profile() {
     port_in_use "$p" && busy="${busy}${busy:+,}$p"
   done
 
-  local hostname_s fqdn primary_ip
+  local hostname_s fqdn ip
   hostname_s="$(hostname 2>/dev/null || echo unknown)"
   fqdn="$(hostname -f 2>/dev/null || echo "$hostname_s")"
-  # The address that actually carries traffic off this box, not loopback.
-  primary_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
-  [[ -z "$primary_ip" ]] && primary_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  ip="$(primary_ip)"
 
   local hosts_path="/etc/hosts"
   [[ "$os" == "windows" ]] && hosts_path='C:\Windows\System32\drivers\etc\hosts'
@@ -981,7 +991,7 @@ host_profile() {
     --arg dockerVersion "$docker_version" --arg composeVersion "$compose_version" \
     --argjson dockerRunning "$docker_ok" \
     --arg busyPorts "$busy" --arg hostname "$hostname_s" --arg fqdn "$fqdn" \
-    --arg primaryIp "$primary_ip" --arg hostsPath "$hosts_path" \
+    --arg primaryIp "$ip" --arg hostsPath "$hosts_path" \
     --arg memGb "$mem_gb" --arg diskGb "$disk_gb" \
     '{
        os: $os, arch: $arch, kernel: $kernel, distro: $distro,
@@ -1089,12 +1099,37 @@ enroll_host() {
 #
 # The scheme follows whether a certificate exists, so it never claims https
 # before there is one.
-api_base_for() {
-  local domain=$1
-  [[ -n "$domain" && "$domain" != "example.com" ]] || return 0
 
-  local scheme="https"
-  [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
+# Whether this deployment is served over TLS, from what the record says rather
+# than from what we hope.
+#
+# A hosted machine terminates its own TLS, so the certificate file is the whole
+# answer. On-premise it is not: an external proxy or IIS holds the certificate
+# somewhere we cannot see, and a site that chose plain HTTP has no certificate
+# anywhere by design. Guessing https in either case gives the console a link
+# that cannot connect, and gives the browser an API base it cannot reach.
+deployment_scheme() {
+  local host=$1 tls=${2:-} edge=${3:-}
+
+  # Their choice, and the one case where no certificate is a decision.
+  [[ "$tls" == "none" ]] && { printf 'http'; return 0; }
+
+  # Something in front of us terminates it, so nothing lands in our cert dir.
+  case "$edge" in
+    iis|external-proxy) printf 'https'; return 0 ;;
+  esac
+
+  if [[ -n "$host" && -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    printf 'https'
+  else
+    printf 'http'
+  fi
+}
+
+api_base_for() {
+  local domain=$1 scheme=${2:-}
+  [[ -n "$domain" && "$domain" != "example.com" ]] || return 0
+  [[ -n "$scheme" ]] || scheme="$(deployment_scheme "$domain")"
   printf '%s://%s' "$scheme" "$domain"
 }
 
@@ -1103,13 +1138,21 @@ deployment_url_for() {
   local url; url="$(env_get "$env_file" CAYTU_DEPLOYMENT_URL || true)"
   if [[ -z "$url" ]]; then
     local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
-    [[ -n "$domain" ]] && url="https://$domain"
+    [[ -n "$domain" ]] && url="$(api_base_for "$domain" "$(access_scheme "$env_file" "$domain")")"
   fi
   if [[ -z "$url" && "$TARGET" == "local" ]]; then
     local port; port="$(env_get "$env_file" FRONTEND_HOST_PORT || true)"
     url="http://localhost:${port:-3100}"
   fi
   printf '%s' "${url%/}"
+}
+
+# deployment_scheme, using the access choices provisioning wrote here.
+access_scheme() {
+  local env_file=$1 host=$2
+  deployment_scheme "$host" \
+    "$(env_get "$env_file" CAYTU_ACCESS_TLS || true)" \
+    "$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
 }
 
 # --- admin ------------------------------------------------------------------
@@ -1342,6 +1385,52 @@ apply_instance_source() {
   esac
 }
 
+
+# Bring the four access choices onto the host.
+#
+# The record has carried them for a while and nothing here ever read them, so
+# the console described how a deployment was reached and the machine was
+# configured separately by hand. Written into the env file rather than kept in
+# a variable, because everything after provisioning (the ssl verbs, the agent
+# on its next tick, admin invite) has to reach the same answer.
+apply_instance_access() {
+  local env_file=$1 record=$2
+
+  local field
+  for field in resolution:RESOLUTION tls:TLS edge:EDGE hostPlatform:HOST_PLATFORM \
+               dnsProvider:DNS_PROVIDER; do
+    local value
+    value="$(printf '%s' "$record" | jq -r ".access.${field%%:*} // empty")"
+    [[ -n "$value" ]] && env_upsert "$env_file" "CAYTU_ACCESS_${field##*:}" "$value"
+  done
+
+  # The address Let's Encrypt wants is already read from here, so the record
+  # feeds the variable that exists rather than a second one beside it.
+  local acme; acme="$(printf '%s' "$record" | jq -r '.access.acmeEmail // empty')"
+  [[ -n "$acme" ]] && env_upsert "$env_file" CAYTU_LETSENCRYPT_EMAIL "$acme"
+}
+
+# The name clients use to reach this deployment.
+#
+# Ours is derived, because we create the record for it. Anyone else's is theirs
+# to tell us, except a site reached by bare IP, where the machine is the only
+# thing that knows its own address.
+instance_hostname() {
+  local record=$1 placement=$2 subdomain=$3
+
+  if [[ "$placement" == "managed" ]]; then
+    printf '%s.caytu.link' "$subdomain"
+    return 0
+  fi
+
+  local host; host="$(printf '%s' "$record" | jq -r '.access.hostname // empty')"
+  if [[ -z "$host" ]] \
+     && [[ "$(printf '%s' "$record" | jq -r '.access.resolution // empty')" == "ip" ]]; then
+    host="$(primary_ip)"
+  fi
+  printf '%s' "$host"
+}
+
 instance_provision() {
   require_cmd curl jq
   local env_file; env_file="$(env_file_for)"
@@ -1373,16 +1462,18 @@ instance_provision() {
     '.instances[]? | select(.id == $id or ._id == $id)')"
   [[ -n "$record" ]] || die "no instance $id visible to this token"
 
-  local subdomain org admin_email admin_name
+  local subdomain org admin_email admin_name placement
   subdomain="$(printf '%s' "$record" | jq -r '.subdomain // empty')"
   org="$(printf '%s' "$record" | jq -r '.organizationId // empty')"
   admin_email="$(printf '%s' "$record" | jq -r '.adminEmail // empty')"
   admin_name="$(printf '%s' "$record" | jq -r '.adminName // empty')"
+  placement="$(printf '%s' "$record" | jq -r '.placement // "managed"')"
 
   [[ -n "$subdomain" ]] || die "that instance has no subdomain"
   [[ -n "$admin_email" ]] || die "that instance names no administrator — nobody could sign in to the result"
 
-  ok "instance \"$(printf '%s' "$record" | jq -r '.name // "?"')\" → ${subdomain}.caytu.link, admin ${admin_email}"
+  local domain; domain="$(instance_hostname "$record" "$placement" "$subdomain")"
+  ok "instance \"$(printf '%s' "$record" | jq -r '.name // "?"')\" → ${domain:-no address yet}, admin ${admin_email}"
 
   # The administrator has to be in place before the stack starts: the client
   # bootstraps its first account from INITIAL_ADMIN_EMAIL on boot.
@@ -1391,23 +1482,28 @@ instance_provision() {
   remember_instance "$env_file" "$id"
 
   apply_instance_source "$env_file" "$record"
-  # Only for hosting we run, where we own the DNS. On a customer's own machine
-  # <subdomain>.caytu.link resolves nowhere, and writing it here is how an
-  # administrator ends up with an invite email pointing at a dead name.
-  local placement; placement="$(printf '%s' "$record" | jq -r '.placement // "managed"')"
-  if [[ "$placement" == "managed" ]]; then
-    env_upsert "$env_file" CAYTU_DOMAIN "${subdomain}.caytu.link"
+  apply_instance_access "$env_file" "$record"
+
+  # The name this deployment answers on. <subdomain>.caytu.link is only ours to
+  # write for hosting we run: on a customer's own machine it resolves nowhere,
+  # and writing it there is how an administrator ends up with an invite link
+  # pointing at a dead name.
+  if [[ -n "$domain" ]]; then
+    env_upsert "$env_file" CAYTU_DOMAIN "$domain"
+  else
+    domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
+    [[ "$domain" == "example.com" ]] && domain=""
   fi
 
   # Where the browser and the frontend's server side send API calls.
   #
   # Both ship empty, so the browser had no address to post to and the request
   # never left it: the reset-password form answered "an error occurred" with
-  # nothing reaching nginx at all. The public one goes through nginx, which
-  # proxies /api/ to the backend. The internal one skips nginx, since the
-  # frontend's server side sits on the same network.
-  local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
-  local api_base; api_base="$(api_base_for "$domain")"
+  # nothing reaching nginx at all. This used to be written for hosting we run
+  # and nothing else, so every on-premise site got the same silence. The public
+  # one goes through nginx, which proxies /api/ to the backend. The internal one
+  # skips nginx, since the frontend's server side sits on the same network.
+  local api_base; api_base="$(api_base_for "$domain" "$(access_scheme "$env_file" "$domain")")"
   [[ -n "$api_base" ]] && env_upsert "$env_file" NEXT_PUBLIC_API_URL "$api_base"
   [[ -n "$(env_get "$env_file" CLIENT_BACKEND_URL || true)" ]] \
     || env_upsert "$env_file" CLIENT_BACKEND_URL "http://backend:5000"
@@ -1416,7 +1512,8 @@ instance_provision() {
   local deployment_url; deployment_url="$(deployment_url_for "$env_file")"
   if [[ -z "$deployment_url" ]]; then
     warn "we do not know how people reach this host, so the administrator's invite link"
-    warn "would point nowhere. Give the instance a domain in the console and re-run."
+    warn "would point nowhere. Set the hostname on the instance's access settings in"
+    warn "the console, or choose 'ip' if this site is reached by address, and re-run."
   fi
 
   env_upsert "$env_file" INITIAL_ADMIN_EMAIL "$admin_email"

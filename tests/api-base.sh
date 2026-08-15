@@ -10,7 +10,7 @@ d="$(mktemp -d)"
 probe() { # domain
   COMPOSE_DIR="$d" bash -c '
     COMPOSE_DIR="'"$d"'"
-    '"$(sed -n '/^api_base_for() {/,/^}/p' "$SRC/scripts/caytu-client")"'
+    '"$(sed -n '/^deployment_scheme() {/,/^}/p;/^api_base_for() {/,/^}/p' "$SRC/scripts/caytu-client")"'
     api_base_for "'"$1"'"
   '
 }
