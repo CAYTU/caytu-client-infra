@@ -245,6 +245,13 @@ services:
     environment:
       - MQTT_USER=${MQTT_USER:-caytu}
       - MQTT_PASS=${MQTT_PASS:-caytu}
+    # Regenerate the password file from env vars on every boot so credentials
+    # stay in sync with .env. mosquitto_passwd needs the file to exist before
+    # -b will hash into it, hence the `touch` first.
+    command: >
+      sh -c "touch /mosquitto/config/passwd &&
+             mosquitto_passwd -b /mosquitto/config/passwd $$MQTT_USER $$MQTT_PASS &&
+             exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf"
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=1
     logging: *default-logging
