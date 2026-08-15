@@ -41,6 +41,8 @@
 #   ssl http-only                     switch nginx to HTTP-only (no TLS)
 #   ssl renew                         renew Let's Encrypt cert + reload nginx
 #   ssl status [domain]               show issuer and days until expiry
+#   secrets bootstrap                 seed a new encrypted secret store, so this
+#                                     deployment can be licensed
 #   secrets seed [--in FILE] [-y]     upsert the encrypted secret store into MongoDB
 #                                     (reads stdin when --in is omitted)
 #   codeartifact-login [--profile N]  refresh the CodeArtifact token in .env.<target>
@@ -1766,6 +1768,13 @@ instance_provision() {
       deployment_url="${deployment_url/#http:/https:}"
     fi
 
+    # After the stack, because it needs mongodb. A deployment that cannot be
+    # licensed still runs and can still be logged into, so this does not fail
+    # the rollout, but the console is told rather than left to infer it from
+    # ten healthy containers serving 503.
+    local seeded=""
+    if bootstrap_secret_store "$env_file"; then seeded=1; fi
+
     # Deliberately not claiming adminProvisioned here. A stack that starts is
     # not proof the named account exists: the client only bootstraps an initial
     # superAdmin when the deployment has no users at all, so re-provisioning a
@@ -1773,10 +1782,11 @@ instance_provision() {
     # deployment reports that flag once it is actually true.
     instance_report "$env_file" "$id" \
       "$(jq -n --arg u "$deployment_url" --arg d "$(direct_url)" \
-            --argjson h "$(host_profile)" \
+            --argjson h "$(host_profile)" --arg s "$seeded" \
         '{status:"running", provisioningPercent:100, hostProfile:$h}
          + (if $u == "" then {} else {publicUrl:$u} end)
-         + (if $d == "" then {} else {directUrl:$d} end)')"
+         + (if $d == "" then {} else {directUrl:$d} end)
+         + (if $s == "" then {lastError:"the secret store is not seeded, so this deployment cannot be licensed"} else {} end)')"
     ok "instance $id reported running"
   else
     instance_report "$env_file" "$id" \
@@ -2684,6 +2694,48 @@ CODEARTIFACT_AWS_REGION="${CODEARTIFACT_AWS_REGION:-us-east-1}"
 #
 # Generated once and never rotated here: changing it signs out every existing
 # session on the site and invalidates every refresh token.
+# Seed the encrypted secret store, once, so the deployment can be licensed.
+#
+# An unseeded store makes every licence evaluate invalid however many are
+# issued, and the server then answers 503 to everything but auth. All ten
+# containers stay healthy and the console says running, so this reads as a
+# broken product rather than an unlicensed one.
+#
+# The image does the work, because the shard it needs is baked into that bundle
+# and nobody should have to hold one. Runs after the stack is up, since it
+# needs mongodb.
+bootstrap_secret_store() {
+  local env_file=$1
+  local customer
+  customer="$(env_get "$env_file" CAYTU_ORGANIZATION_ID || true)"
+  [[ -n "$customer" ]] || customer="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  if [[ -z "$customer" ]]; then
+    warn "this host has no customer id, so the secret store cannot be seeded"
+    return 1
+  fi
+
+  # timeout runs in the container, not here. An image built before this flag
+  # existed ignores it and starts the server instead, which would hang forever.
+  local out rc=0
+  out="$(compose run --rm --no-deps -e "CAYTU_CUSTOMER_ID=$customer" \
+           backend timeout 120 node loader.js --bootstrap-store 2>&1)" || rc=$?
+
+  if (( rc == 0 )); then
+    ok "$(printf '%s' "$out" | grep -E 'secret store' | tail -1)"
+    # The backend reads the store at boot, so it has to look again now.
+    compose restart backend >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if (( rc == 124 )); then
+    warn "this backend image cannot seed its own store; rebuild it and re-run"
+  else
+    warn "could not seed the secret store, so this deployment cannot be licensed"
+    printf '%s\n' "$out" | tail -3 >&2
+  fi
+  return 1
+}
+
 ensure_deployment_secrets() {
   local env_file=$1
   local key
@@ -2787,7 +2839,10 @@ cmd_secrets() {
   local sub=${1:-}; shift || true
   case "$sub" in
     seed) secrets_seed "$@" ;;
-    *) die "usage: caytu-client secrets seed [--in FILE] [-y]" ;;
+    # Provisioning does this already. Here as a verb too, for a host stood up
+    # by hand and for repairing one that was provisioned before it existed.
+    bootstrap) bootstrap_secret_store "$(env_file_for)" ;;
+    *) die "usage: caytu-client secrets <bootstrap|seed [--in FILE] [-y]>" ;;
   esac
 }
 
