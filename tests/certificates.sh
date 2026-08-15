@@ -53,6 +53,17 @@ check "hosting we run still defaults to http-01" \
 mode byo
 check "the record's mode wins" "byo" "$(cert_mode_for "$env_file")"
 
+# A record written before the platform recorded access at all. Defaulting these
+# to http-01 is what sent a LAN box to wait on a challenge it could never get.
+printf 'CAYTU_PLACEMENT=self-hosted\n' > "$env_file"
+check "an on-premise host with no record falls back to self-signed" \
+  "self-signed" "$(cert_mode_for "$env_file")"
+printf 'CAYTU_PLACEMENT=managed\n' > "$env_file"
+check "and hosting we run still falls back to http-01" \
+  "letsencrypt-http" "$(cert_mode_for "$env_file")"
+printf 'CAYTU_PLACEMENT=self-hosted\nCAYTU_ACCESS_TLS=byo\n' > "$env_file"
+check "an explicit choice still beats the fallback" "byo" "$(cert_mode_for "$env_file")"
+
 # --- the modes that must not call out ----------------------------------------
 
 # Each of these would otherwise spend ACME_WAIT_TRIES * ACME_WAIT_SECONDS

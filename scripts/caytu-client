@@ -626,10 +626,21 @@ cert_days_left() {
 }
 
 # Which certificate mode this deployment was told to use.
+#
+# The fallback follows what the machine is, not what ours are. Defaulting every
+# host to HTTP-01 sent a LAN box with no public DNS and no inbound :80 to wait
+# on a challenge that could never arrive. The platform records this for every
+# deployment now, so the fallback only covers a record written before it did.
 cert_mode_for() {
   local env_file=$1
   local tls; tls="$(env_get "$env_file" CAYTU_ACCESS_TLS || true)"
-  printf '%s' "${tls:-letsencrypt-http}"
+  if [[ -z "$tls" ]]; then
+    case "$(env_get "$env_file" CAYTU_PLACEMENT || true)" in
+      ""|managed) tls="letsencrypt-http" ;;
+      *)          tls="self-signed" ;;
+    esac
+  fi
+  printf '%s' "$tls"
 }
 
 # Get this deployment a certificate, by whichever route its record names.
@@ -1580,6 +1591,11 @@ apply_instance_source() {
 # on its next tick, admin invite) has to reach the same answer.
 apply_instance_access() {
   local env_file=$1 record=$2
+
+  # What kind of machine this is, which decides the defaults when the record
+  # says nothing. Ours and a customer's want opposite answers.
+  local placement; placement="$(printf '%s' "$record" | jq -r '.placement // empty')"
+  [[ -n "$placement" ]] && env_upsert "$env_file" CAYTU_PLACEMENT "$placement"
 
   local field
   for field in resolution:RESOLUTION tls:TLS edge:EDGE hostPlatform:HOST_PLATFORM \
