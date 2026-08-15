@@ -82,9 +82,10 @@ check "a bare address is a fine api base" \
 
 env_file="$d/.env.onprem"
 : > "$env_file"
-full='{"access":{"resolution":"customer-dns","tls":"letsencrypt-dns","edge":"bundled-nginx","hostPlatform":"linux-docker","dnsProvider":"cloudflare","acmeEmail":"ops@acme.example"}}'
+full='{"placement":"self-hosted","access":{"resolution":"customer-dns","tls":"letsencrypt-dns","edge":"bundled-nginx","hostPlatform":"linux-docker","dnsProvider":"cloudflare","acmeEmail":"ops@acme.example"}}'
 apply_instance_access "$env_file" "$full"
 
+check "the placement is written" "self-hosted" "$(env_get "$env_file" CAYTU_PLACEMENT)"
 check "resolution is written" "customer-dns" "$(env_get "$env_file" CAYTU_ACCESS_RESOLUTION)"
 check "tls is written"        "letsencrypt-dns" "$(env_get "$env_file" CAYTU_ACCESS_TLS)"
 check "edge is written"       "bundled-nginx" "$(env_get "$env_file" CAYTU_ACCESS_EDGE)"
