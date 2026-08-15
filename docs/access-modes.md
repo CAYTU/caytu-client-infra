@@ -79,6 +79,11 @@ IP and DNS SAN, which is what lets it work when `resolution` is `ip`.
 The only ACME mode that works behind NAT. Needs credentials for the DNS provider
 holding the zone, scoped to writing TXT records on that zone and nothing else.
 
+Which of these five we build for, and in what order, is decided in
+[onprem-certificates.md](onprem-certificates.md). The short version is that
+`byo` is the normal on-premise case and DNS-01 covers a named short list of
+providers.
+
 ### edge: `iis`
 
 Windows Server fronting the stack. IIS owns `:80`/`:443`; the compose stack
