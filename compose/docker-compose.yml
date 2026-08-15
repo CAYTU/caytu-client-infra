@@ -169,10 +169,17 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-token}
+      # Valid drivers: static | jwt | vault. `allow-all` is refused in production.
+      # `static` is the default: backend, gstreamer and the browser all present
+      # SIGNALING_AUTH_TOKEN as a shared bearer token, which the signaling server
+      # looks up in the tokens file mounted below.
+      - AUTH_DRIVER=${SIGNALING_AUTH_DRIVER:-static}
+      - STATIC_TOKENS_FILE=/app/config/tokens.json
       - MONGODB_URI=${SIGNALING_MONGODB_URI:-mongodb://mongodb:27017/caytu-signaling}
       - REDIS_HOST=${SIGNALING_REDIS_HOST:-redis}
       - REDIS_PORT=${SIGNALING_REDIS_PORT:-6379}
+    volumes:
+      - ./secrets/signaling-tokens.json:/app/config/tokens.json:ro
     depends_on:
       mongodb: { condition: service_healthy }
       redis:   { condition: service_healthy }
@@ -259,6 +266,18 @@ services:
       # which inside this container is nothing, so it could not reach the secret
       # store and reported the fallback error: certificate material required.
       - MONGO_URI=${MONGO_URI:-mongodb://mongodb:27017/caytu?replicaSet=rs0&directConnection=true}
+      # The streamer's broker endpoint lives in its config (Mongo StreamerConfig
+      # doc when USE_MONGO_CONFIG=true, otherwise the YAML at CONFIG_PATH). The
+      # bundled YAML targets AWS IoT; targets that use the local mqtt-broker
+      # pull in docker-compose.self-hosted-mqtt.yml to override it.
+      - USE_MONGO_CONFIG=${USE_MONGO_CONFIG:-true}
+      - MONGO_CONFIG_NAME=${MONGO_CONFIG_NAME:-main}
+    depends_on:
+      # `required: false` so this compose still works on targets that don't
+      # start the local broker (e.g. aws-* which use IoT Core).
+      mqtt-broker:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
     logging: *default-logging
     healthcheck:

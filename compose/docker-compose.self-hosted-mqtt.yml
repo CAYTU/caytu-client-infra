@@ -1,0 +1,22 @@
+# =============================================================================
+# Self-hosted MQTT overlay
+#
+# Points mqtt-streamer at the in-stack `mqtt-broker` container by bind-mounting
+# a per-operator streamer_config.yaml over the image's bundled default (which
+# targets AWS IoT).
+#
+# Included automatically by the CLI on any target that starts the local broker
+# (local, onprem, ssh, gcp-single). Never included on aws-* — those keep the
+# image's AWS IoT-oriented config and drive the streamer from Mongo/certs
+# instead.
+#
+# The bind-mounted file is seeded from
+# compose/mqtt-streamer/streamer_config.yaml.example on first `caytu-client up`
+# and is per-operator (gitignored). Edit it in place before running against
+# real traffic.
+# =============================================================================
+
+services:
+  mqtt-streamer:
+    volumes:
+      - ./mqtt-streamer/streamer_config.yaml:/app/config/streamer_config.yaml:ro

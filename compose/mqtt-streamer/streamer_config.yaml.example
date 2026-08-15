@@ -1,0 +1,64 @@
+# mqtt-streamer configuration for on-prem deploys.
+#
+# Copied to streamer_config.yaml on first `caytu-client up` if that file is
+# missing. Edit the copy — this .example stays checked in as the template.
+#
+# The streamer reads either this file OR a MongoDB StreamerConfig document
+# (when USE_MONGO_CONFIG=true). If you seed a Mongo doc, it overrides this.
+
+# ---------------------------------------------------------------------------
+# Global MQTT broker. Points at the in-stack mosquitto by default. Every
+# device without its own mqtt block inherits these values.
+# ---------------------------------------------------------------------------
+mqtt:
+  endpoint: "mqtt-broker"
+  port: 1883
+  protocol: "mqtt"          # mqtts for TLS, mqtt for plain
+  authType: "anonymous"     # matches compose/mosquitto/mosquitto.conf
+  # For username/password, use:
+  #   authType: "username"
+  #   username: "caytu"
+  #   password: "caytu"
+
+# ---------------------------------------------------------------------------
+# Where the streamer POSTs decoded messages. The default targets the backend
+# container on the same compose network. Replace the api token with the one
+# your backend expects for ingest.
+# ---------------------------------------------------------------------------
+stream:
+  parameters:
+    endpoint: "http://backend:5000/api/ingest"
+    method: "POST"
+    headers:
+      x-api-token: "REPLACE_WITH_INGEST_API_TOKEN"
+    streaming:
+      mode: "batch"
+      batch:
+        enabled: true
+        rate: 5000
+        max_queue_size: 50000
+        high_water_mark: 40000
+        low_water_mark: 10000
+    optimization:
+      topic_filter_cache_size: 10000
+      dynamic_pool_sizing: true
+      event_driven_health: true
+
+# ---------------------------------------------------------------------------
+# Devices. The streamer refuses to start with an empty list, so this ships
+# with a stub. Replace it with the real fleet — one entry per device that
+# publishes to your on-prem broker. Devices without their own `mqtt` block
+# inherit the global broker above.
+# ---------------------------------------------------------------------------
+devices:
+  - device_id: "REPLACE_WITH_MONGO_OBJECTID"
+    stack_name: "REPLACE_ME"
+    thing_name: "REPLACE_ME"
+    topics:
+      mode: "data_all"
+      list: []
+    metadata:
+      zone: ""
+      location: ""
+      coordinates: [0, 0]
+      category: ""

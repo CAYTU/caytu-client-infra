@@ -36,12 +36,46 @@ MINIO_ROOT_PASSWORD=<strong pw>
 TURN_SECRET=<random 32 bytes>
 CAYTU_DOMAIN=10.0.1.42             # bare IP is fine; also accepts LAN hostnames
 GRAFANA_ADMIN_PASSWORD=<strong pw>
+
+# Signaling: on-prem uses the `static` auth driver — backend, gstreamer and
+# the browser all present this shared token, and the signaling server looks
+# it up in compose/secrets/signaling-tokens.json.
+SIGNALING_AUTH_DRIVER=static
+SIGNALING_AUTH_TOKEN=<openssl rand -hex 32>
 ```
 
 That single file is the whole configuration — every service reads it. Application
 secrets (JWT keys, API keys, device certs) go in the encrypted Mongo store
 instead, via `caytu-client -t onprem secrets seed --in vault.json`. See
 [secrets.md](secrets.md).
+
+## Services that start by default on `onprem`
+
+The `onprem` target activates these compose profiles:
+
+- `self-hosted` — `signaling-server` (in-stack WebRTC signaling)
+- `turn` — `coturn` (STUN/TURN for clients behind NAT)
+- `mqtt-broker` — mosquitto (local MQTT broker; AWS IoT Core is not used on-prem)
+
+The `mqtt-streamer` runs unconditionally and, out of the box, connects to the
+local `mqtt-broker` container on port 1883. Its config lives in
+[`compose/mqtt-streamer/streamer_config.yaml`](../compose/mqtt-streamer/streamer_config.yaml.example),
+seeded from the committed `.example` on first `up`. Edit it to list your real
+devices and set the ingest API token — the streamer refuses to boot with
+placeholders when it starts consuming real traffic.
+
+## Files the CLI seeds from templates on first `up`
+
+Before starting containers, `caytu-client up` copies these templates into
+place if they don't already exist. Each has `REPLACE_WITH_*` placeholders you
+must swap for real values before production use:
+
+| Seeded file | From template | What to edit |
+|---|---|---|
+| `compose/secrets/signaling-tokens.json` | `secrets/signaling-tokens.example.json` | Replace the JSON key with the value of `SIGNALING_AUTH_TOKEN` above |
+| `compose/mqtt-streamer/streamer_config.yaml` | `mqtt-streamer/streamer_config.yaml.example` | Ingest `x-api-token`, device list |
+
+Both real files are gitignored — they're per-operator secrets.
 
 Log into your registry, then start:
 
@@ -100,7 +134,7 @@ Open on the LAN interface:
 - `80/tcp` if `ssl http-only`, otherwise for HTTPS redirects
 - `443/tcp` if self-signed or bring-your-own
 - `3478/tcp+udp`, `5349/tcp+udp`, `49152-49252/udp` if `STREAMING_PROVIDER=self-hosted`
-- `1883/tcp` if using local mosquitto (`--profile mqtt-broker`)
+- `1883/tcp` for the local mosquitto broker (on by default; only needs to be LAN-reachable if devices publish from other hosts)
 
 Restrict to the LAN CIDR — no reason for these to be reachable from the general internet.
 
