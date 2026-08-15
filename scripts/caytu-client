@@ -1073,15 +1073,21 @@ enroll_host() {
   [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
   [[ -n "$host_id" ]] && env_upsert "$env_file" CAYTU_HOST_ID "$host_id"
 
-  # What the CLI reaches the platform on is not always what the containers do:
-  # in local development these are docker service names, and overwriting them
-  # with a host address sends the running stack to a port it cannot see. Filled
-  # in only when nothing is there yet.
+  # Where the deployment reports in, which is not the same question as where the
+  # CLI just talked to.
+  #
+  # In local development these are docker service names, and a host address
+  # sends the running stack to a port it cannot see, so there they stay. Nowhere
+  # else is that true, and filling them in only when empty left every other host
+  # on the template's production default: the stack reported to a platform that
+  # answers 404, so the admin account it created was never announced and the
+  # console waited forever. The identity flow was fixed the same way.
   local var
   for var in CAYTU_BILLINGS_URL CAYTU_PLATFORM_URL; do
-    if [[ -z "$(env_get "$env_file" "$var" || true)" ]]; then
-      env_upsert "$env_file" "$var" "$platform"
+    if [[ "$TARGET" == "local" && -n "$(env_get "$env_file" "$var" || true)" ]]; then
+      continue
     fi
+    env_upsert "$env_file" "$var" "$platform"
   done
 
   ok "enrolled for organization $org"
