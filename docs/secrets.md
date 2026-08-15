@@ -61,18 +61,36 @@ CA used for IoT Core and KVS are vault entries, not files. Nothing is
 bind-mounted into the containers, and there are no `AWS_IOT_CERT_PATH`-style
 variables to set.
 
-**Encryption happens outside this repo.** A separate `encrypt-secrets.sh` turns
-your plaintext values into an encrypted JSON blob. This repo never sees, stores,
-or transports plaintext — it only takes the already-encrypted output and loads it
-into Mongo.
+**Encryption happens outside this repo.** A separate `encrypt-secrets.sh` (in
+the caytu-client app repo) turns a plaintext `.env.secrets` file into an
+encrypted `vault.json`. This infra repo never sees, stores, or transports
+plaintext — it only takes the already-encrypted output and loads it into Mongo.
+
+The committed template that lists every secret name the stack looks for is
+[`compose/vault/.env.secrets.example`](../compose/vault/.env.secrets.example) —
+copy it to `compose/vault/.env.secrets`, fill in real values, then encrypt.
 
 ### Seeding
 
 ```bash
-caytu-client -t <target> secrets seed --in vault.json
+# 1) Author the plaintext (once per deployment, then edit as secrets rotate)
+cp compose/vault/.env.secrets.example compose/vault/.env.secrets
+$EDITOR compose/vault/.env.secrets
 
-# or piped, with -y since stdin is taken by the payload:
-./encrypt-secrets.sh ... | caytu-client -t aws-single secrets seed -y
+# 2) Encrypt (SECRET_STORE_KEY_B64 must equal CAYTU_SECRET_STORE_KEY in
+#    compose/.env.<target> — that's how the backend derives the same key)
+SECRET_STORE_KEY_B64=<shard> CUSTOMER_ID=<id> \
+  /path/to/caytu-client/encrypt-secrets.sh \
+    --input compose/vault/.env.secrets \
+    --out   compose/vault/vault.json
+
+# 3) Seed the encrypted blob
+caytu-client -t <target> secrets seed --in compose/vault/vault.json
+
+# or piped in one shot, with -y since stdin is taken by the payload:
+SECRET_STORE_KEY_B64=<shard> CUSTOMER_ID=<id> \
+  /path/to/caytu-client/encrypt-secrets.sh --input compose/vault/.env.secrets \
+  | caytu-client -t aws-single secrets seed -y
 ```
 
 Works on every target. Compose targets (`local`, `onprem`, `ssh`, `aws-single`,

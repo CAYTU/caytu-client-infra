@@ -88,6 +88,85 @@ caytu-client -t onprem ps
 caytu-client -t onprem logs backend
 ```
 
+## The initial admin email
+
+On first boot, if the DB has zero users, the backend creates a superAdmin from
+`INITIAL_ADMIN_EMAIL` and mails them a "set your password" link. Two things
+must be in place for that email to actually leave the host:
+
+1. **`INITIAL_ADMIN_EMAIL` set** in `compose/.env.onprem`. Empty means no
+   superAdmin gets created — nothing to send. `INITIAL_ADMIN_NAME` is
+   optional but nice.
+2. **SMTP credentials.** The backend checks two sources in order (see
+   `backend/src/services/email-service.ts`):
+   - `SystemSettings.emailProvider` in Mongo, configured later via the Space
+     admin UI. Wins when enabled, but you can only reach the UI *after* you
+     sign in, so it can't send the very first email.
+   - `EMAIL_*` env vars in `.env.onprem`, with **`EMAIL_PASSWORD` in the
+     encrypted secret store** (not in `.env`). This is the fallback that
+     covers first boot.
+
+Configure the env fallback:
+
+```bash
+# in compose/.env.onprem
+EMAIL_HOST=smtp.gmail.com
+EMAIL_PORT=587
+EMAIL_SECURE=false                     # true for implicit TLS on 465
+EMAIL_USER=<sender>@caytu.com
+EMAIL_FROM=<sender>@caytu.com
+EMAIL_FROM_NAME=Caytu Client
+```
+
+Seed the password into the encrypted store. The store takes an already-encrypted
+`vault.json`; the plaintext template you fill in first is
+[`compose/vault/.env.secrets.example`](../compose/vault/.env.secrets.example):
+
+```bash
+cd compose/vault
+cp .env.secrets.example .env.secrets
+$EDITOR .env.secrets                # fill in EMAIL_PASSWORD (and anything else)
+
+# encrypt-secrets.sh lives in the caytu-client app repo. The shard MUST match
+# CAYTU_SECRET_STORE_KEY in compose/.env.onprem — that's how the backend
+# derives the same key at runtime.
+SECRET_STORE_KEY_B64=<same value as CAYTU_SECRET_STORE_KEY> \
+CUSTOMER_ID=<your customer id> \
+  /path/to/caytu-client/encrypt-secrets.sh --input .env.secrets --out vault.json
+
+caytu-client -t onprem secrets seed --in vault.json
+caytu-client -t onprem restart backend
+```
+
+Both `.env.secrets` and `vault.json` are gitignored — the `.example` template
+is the only file that stays committed. See [secrets.md](secrets.md) for the
+full model (what lives in Mongo vs `.env`, how re-seeding behaves, how the
+anti-rollback ratchet works).
+
+### If the email never arrives
+
+The setup is designed to fail-soft — if SMTP is missing or misconfigured, the
+superAdmin is still created and the setup link is written to the backend log.
+Grab it directly:
+
+```bash
+docker compose logs backend | grep -Ei "set-password|setup initialization|claim link"
+```
+
+Open the URL, set the password, sign in. Then configure the SMTP provider
+properly in the admin UI so later emails (password resets, alerts) work.
+
+### To retry the initial-email flow
+
+The initial-admin logic runs only when the users collection is empty. If it
+ran once with SMTP misconfigured and you want another attempt after fixing
+the config, drop the collection and restart the backend:
+
+```bash
+docker compose exec mongodb mongosh caytu --eval 'db.users.deleteMany({})'
+docker compose restart backend
+```
+
 ## TLS on a fixed IP — three choices
 
 ### 1. Self-signed cert (recommended for LAN)
