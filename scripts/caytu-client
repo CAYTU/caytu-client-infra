@@ -1243,11 +1243,33 @@ enroll_host() {
   [[ -f "$env_file" ]] || cmd_init
 
   info "enrolling this host with ${platform}…"
-  local body
-  body="$(curl -fsS -X POST "${platform}/api/auth/enroll" \
+
+  # Three failures used to share one message about the code expiring. Usually
+  # the code is fine and the host is pointed at another platform, which sends
+  # you looking at the console for a problem that is not there.
+  local body status
+  body="$(curl -sS -m 20 -w '\n%{http_code}' -X POST "${platform}/api/auth/enroll" \
     -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg c "$code" --arg h "$(hostname)" '{code:$c, hostname:$h}')")" \
-    || die "enrollment refused — the code may have expired or already been used"
+    -d "$(jq -n --arg c "$code" --arg h "$(hostname)" '{code:$c, hostname:$h}')" \
+    2>/dev/null)" || body=$'\n000'
+  status="${body##*$'\n'}"
+  body="${body%$'\n'*}"
+
+  case "$status" in
+    200|201) : ;;
+    000)
+      err "could not reach the platform at ${platform}"
+      err "  Pass --platform with the address of the console that gave you the"
+      err "  code. A host keeps its own, and it is often a different one."
+      exit 1 ;;
+    400|404)
+      err "${platform} did not accept that code"
+      err "  It expired, was already used, or came from another console. A code"
+      err "  only works on the platform that issued it."
+      exit 1 ;;
+    *)
+      die "enrolment failed: HTTP $status from ${platform}" ;;
+  esac
 
   local token org
   token="$(printf '%s' "$body" | jq -r '.token // empty')"
