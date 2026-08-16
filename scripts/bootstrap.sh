@@ -247,12 +247,24 @@ ECRTIMER
     run_as caytu-client --target onprem agent up \
       || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
   else
-    # Loud, and deliberately not fatal. The machine is up and an operator can
-    # finish by hand, which beats an instance that tears itself down.
-    log "WARNING: this machine could not enrol itself."
-    log "  Check the platform is reachable and that AWS_ACCOUNT_ID and"
-    log "  AWS_IDENTITY_CERT_PEM are set there, then run:"
-    log "    caytu-client -t onprem enroll-self && caytu-client -t onprem agent up"
+    # Not fatal: the operator can finish by hand. EC2 can retry the identity
+    # flow; a customer's machine has no identity document, so retrying it there
+    # is a circle.
+    log "WARNING: this machine did not enrol itself."
+    if curl -fsS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+         -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' >/dev/null 2>&1; then
+      log "  This looks like EC2, so the identity flow should work. Check the"
+      log "  platform is reachable and that AWS_ACCOUNT_ID and"
+      log "  AWS_IDENTITY_CERT_PEM are set there, then run:"
+      log "    caytu-client -t onprem enroll-self && caytu-client -t onprem agent up"
+    else
+      log "  This is not an EC2 machine, so it has no identity document to"
+      log "  present and enroll-self cannot work here. Create a code in the"
+      log "  console under Billings > Instances, then run the two commands it"
+      log "  shows you:"
+      log "    caytu-client -t onprem enroll <CODE> --platform <your platform url>"
+      log "    caytu-client -t onprem instance agent"
+    fi
   fi
 else
   log "done. remaining steps (from your workstation):"
