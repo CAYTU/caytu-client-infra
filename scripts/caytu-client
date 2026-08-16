@@ -129,6 +129,42 @@ env_file_for() {
   printf '%s/.env.%s' "$COMPOSE_DIR" "$t"
 }
 
+# Which targets are actually set up on this machine.
+configured_targets() {
+  local f name
+  for f in "$COMPOSE_DIR"/.env.*; do
+    [[ -f "$f" ]] || continue
+    name="${f##*/.env.}"
+    [[ "$name" == "example" ]] && continue
+    printf '%s\n' "$name"
+  done
+}
+
+# Work out which target this command means.
+#
+# This defaulted to "local", so on a customer machine every command without -t
+# quietly read the dev env file and talked to localhost. The failures land far
+# from the cause: enrol writes one file, provision reads another.
+#
+# An on-premise host only ever configures one target, so there is nothing to
+# ask. Only a machine with several, which means one of ours, has to say.
+resolve_target() {
+  [[ -n "$TARGET" ]] && return 0
+
+  local -a found=()
+  mapfile -t found < <(configured_targets)
+
+  case "${#found[@]}" in
+    0) TARGET="onprem" ;;
+    1) TARGET="${found[0]}" ;;
+    *)
+      err "this machine has several targets set up: ${found[*]}"
+      err "  Say which one, for example: caytu-client -t ${found[0]} ${*:-<command>}"
+      err "  Or set CAYTU_TARGET once for the session."
+      exit 1 ;;
+  esac
+}
+
 # Compose overlay set. Monitoring + backup are appended when their toggles are on.
 compose_files_for() {
   local t=${1:-$TARGET}
@@ -2936,8 +2972,7 @@ main() {
 
   [[ $# -eq 0 ]] && { cmd_help; exit 0; }
 
-  # Default target: local
-  TARGET="${TARGET:-local}"
+  resolve_target "$@"
 
   local verb=$1; shift || true
   case "$verb" in
