@@ -1523,14 +1523,20 @@ ecr_login_if_needed() {
 
   local region="${registry#*.dkr.ecr.}"; region="${region%%.amazonaws.com}"
 
-  if aws ecr get-login-password --region "$region" 2>/dev/null \
+  local why; why="$(mktemp)"
+  if aws ecr get-login-password --region "$region" 2>"$why" \
        | docker login --username AWS --password-stdin "$registry" >/dev/null 2>&1; then
+    rm -f "$why"
     return 0
   fi
 
-  # Not fatal here. The pull that follows fails with a message naming the image,
-  # which says more than a login failure would.
-  warn "could not log in to $registry; the image pull will probably be denied"
+  # Say why. The pull that follows always blames an expired token, even when
+  # there were no credentials at all, which sends you refreshing a token that
+  # was never there.
+  warn "could not log in to $registry, so the pull will be denied:"
+  warn "  $(grep -m1 . "$why" 2>/dev/null || echo "docker login refused the token")"
+  warn "  Set AWS_PROFILE to one that can read ECR, then run this again."
+  rm -f "$why"
   return 0
 }
 
