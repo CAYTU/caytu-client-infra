@@ -75,9 +75,11 @@ server {
         proxy_request_buffering off;
     }
 
-    location ~ ^/signaling(/|$)(.*) {
-        set $sig_path /$2;
-        proxy_pass http://signaling$sig_path;
+    # WebRTC signaling — WebSocket upgrade at /signaling/<channelId>.
+    # Path is forwarded unchanged: the upstream upgrade handler checks
+    # pathname.startsWith("/signaling") and refuses anything else.
+    location ~ ^/signaling(/|$) {
+        proxy_pass http://signaling$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -88,6 +90,18 @@ server {
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
         proxy_buffering off;
+    }
+
+    # REST channel management on the signaling server (mounted at /channels
+    # at the root, not under /signaling). Without this block, POST /channels
+    # fell through to the frontend which 308-redirected trailing slashes.
+    location ~ ^/channels(/|$) {
+        proxy_pass http://signaling$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location ~ ^/mqtt-api(/|$)(.*) {

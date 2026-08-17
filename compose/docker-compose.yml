@@ -229,8 +229,12 @@ services:
       - SIGNALING_MODE=${STREAMING_PROVIDER:-self-hosted}
       - SIGNALING_SERVER_URL=${SIGNALING_SERVER_INTERNAL_URL:-http://signaling-server:3001}
       - SIGNALING_AUTH_TOKEN=${SIGNALING_AUTH_TOKEN:-}
-      - STUN_URLS=${STUN_URLS:-stun:coturn:3478}
-      - TURN_URLS=${TURN_URLS:-turn:coturn:3478}
+      # Default to CAYTU_DOMAIN so the URLs are reachable from the browser
+      # (backend hands these to clients verbatim as ICE server entries). The
+      # gstreamer container can reach the host IP through docker's bridge, so
+      # the same URL works for both server-side and client-side ICE.
+      - STUN_URLS=${STUN_URLS:-stun:${CAYTU_DOMAIN}:3478}
+      - TURN_URLS=${TURN_URLS:-turn:${CAYTU_DOMAIN}:3478,turn:${CAYTU_DOMAIN}:3478?transport=tcp}
       - TURN_SECRET=${TURN_SECRET:-}
       - RECORDINGS_DIR=/tmp/recordings
       - LOG_LEVEL=${LOG_LEVEL:-info}
@@ -393,8 +397,9 @@ services:
       # Written by the host agent on an install-license command; empty means
       # "whatever the platform issues this organization".
       - CAYTU_LICENSE_ID=${CAYTU_LICENSE_ID:-}
-      - STUN_URLS=${STUN_URLS:-stun:coturn:3478}
-      - TURN_URLS=${TURN_URLS:-turn:coturn:3478}
+      # Same substitution as gstreamer-recorder above — see the note there.
+      - STUN_URLS=${STUN_URLS:-stun:${CAYTU_DOMAIN}:3478}
+      - TURN_URLS=${TURN_URLS:-turn:${CAYTU_DOMAIN}:3478,turn:${CAYTU_DOMAIN}:3478?transport=tcp}
       - TURN_SECRET=${TURN_SECRET:-}
     depends_on:
       mongodb:            { condition: service_healthy }
