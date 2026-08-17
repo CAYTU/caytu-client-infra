@@ -37,18 +37,20 @@ services:
     ports:
       - "${MQTT_BROKER_HOST_PORT:-1885}:1885"
 
-  # STUN/TURN can't be proxied through nginx (UDP-heavy stateful protocol), so
-  # coturn has to publish its own ports directly on the host. The relay range
-  # (49152-49252) mirrors min-port/max-port in coturn.conf — change both if
-  # you widen it. aws-* deployments include this overlay too but never start
-  # coturn (profile `turn` is off), so this stanza is a harmless no-op there.
+  # STUN/TURN can't be proxied through nginx (UDP-heavy stateful protocol) and
+  # can't run behind docker's bridge NAT when the peer is *also* on this host:
+  # both endpoints allocate on the same coturn and the return path collapses
+  # into docker's SNAT, so relayed frames never reach the browser. Running on
+  # the host network puts coturn directly on the LAN IP — same listener and
+  # relay addresses no matter which side of docker the peer sits on.
+  # aws-* deployments include this overlay too but never start coturn (profile
+  # `turn` is off), so this stanza is a harmless no-op there.
   coturn:
-    ports:
-      - "3478:3478"
-      - "3478:3478/udp"
-      - "5349:5349"
-      - "5349:5349/udp"
-      - "49152-49252:49152-49252/udp"
+    network_mode: host
+    # `networks:` is invalid alongside network_mode: host. Compose merges the
+    # base file's `networks: [caytu]` in — override it with an empty list so
+    # the merge produces a host-only service.
+    networks: !reset null
 
   nginx:
     image: nginx:${NGINX_VERSION:-alpine}
