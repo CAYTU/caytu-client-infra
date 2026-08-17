@@ -41,6 +41,8 @@
 #   ssl http-only                     switch nginx to HTTP-only (no TLS)
 #   ssl renew                         renew Let's Encrypt cert + reload nginx
 #   ssl status [domain]               show issuer and days until expiry
+#   secrets bootstrap                 seed a new encrypted secret store, so this
+#                                     deployment can be licensed
 #   secrets seed [--in FILE] [-y]     upsert the encrypted secret store into MongoDB
 #                                     (reads stdin when --in is omitted)
 #   codeartifact-login [--profile N]  refresh the CodeArtifact token in .env.<target>
@@ -125,6 +127,42 @@ TARGET="${CAYTU_TARGET:-}"
 env_file_for() {
   local t=${1:-$TARGET}
   printf '%s/.env.%s' "$COMPOSE_DIR" "$t"
+}
+
+# Which targets are actually set up on this machine.
+configured_targets() {
+  local f name
+  for f in "$COMPOSE_DIR"/.env.*; do
+    [[ -f "$f" ]] || continue
+    name="${f##*/.env.}"
+    [[ "$name" == "example" ]] && continue
+    printf '%s\n' "$name"
+  done
+}
+
+# Work out which target this command means.
+#
+# This defaulted to "local", so on a customer machine every command without -t
+# quietly read the dev env file and talked to localhost. The failures land far
+# from the cause: enrol writes one file, provision reads another.
+#
+# An on-premise host only ever configures one target, so there is nothing to
+# ask. Only a machine with several, which means one of ours, has to say.
+resolve_target() {
+  [[ -n "$TARGET" ]] && return 0
+
+  local -a found=()
+  mapfile -t found < <(configured_targets)
+
+  case "${#found[@]}" in
+    0) TARGET="onprem" ;;
+    1) TARGET="${found[0]}" ;;
+    *)
+      err "this machine has several targets set up: ${found[*]}"
+      err "  Say which one, for example: caytu-client -t ${found[0]} ${*:-<command>}"
+      err "  Or set CAYTU_TARGET once for the session."
+      exit 1 ;;
+  esac
 }
 
 # Compose overlay set. Monitoring + backup are appended when their toggles are on.
@@ -485,24 +523,16 @@ acme_reaches_us() {
   [[ "$got" == "$token" ]]
 }
 
-# Get a certificate for this deployment, and serve it.
+# Get a certificate for this deployment over HTTP-01, and serve it.
 #
 # Runs after the stack is up, because Let's Encrypt validates over HTTP-01 and
 # that means nginx has to be answering on port 80 first. Failure is not fatal:
 # the deployment stays on plain HTTP, which is worse than TLS and much better
 # than not serving at all.
-hosted_issue_certificate() {
-  local env_file=$1 url=$2
-  local host="${url#*://}"; host="${host%%/*}"
-  [[ -n "$host" ]] || return 1
+cert_letsencrypt_http() {
+  local env_file=$1 host=$2
   # A bare IP cannot have one.
   [[ "$host" =~ ^[0-9.]+$ ]] && return 1
-
-  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
-    _nginx_use_tls "$host"
-    compose restart nginx >/dev/null 2>&1 || true
-    return 0
-  fi
 
   local email
   email="$(env_get "$env_file" CAYTU_LETSENCRYPT_EMAIL || true)"
@@ -537,9 +567,6 @@ hosted_issue_certificate() {
        certbot/certbot certonly --webroot -w /var/www/certbot -n \
        --agree-tos --no-eff-email --email "$email" \
        "${acme_server[@]}" -d "$host" >/dev/null 2>&1; then
-    _nginx_use_tls "$host"
-    compose restart nginx >/dev/null 2>&1 || true
-    ok "$host is served over TLS"
     return 0
   fi
 
@@ -547,10 +574,194 @@ hosted_issue_certificate() {
   return 1
 }
 
-hosted_prepare_nginx() {
+# Generate a certificate this machine signs itself, for $1.
+#
+# The address goes in as both an IP and a DNS SAN. openssl works out which
+# applies, and covering both is what lets the same certificate serve a site
+# reached by bare address, where no public CA would issue anything.
+cert_self_signed() {
+  local host=$1
+  require_cmd openssl
+
+  local san="DNS:${host}"
+  [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && san="IP:${host},DNS:${host}"
+
+  local dst; dst="$(_ssl_cert_dir_local "$host")"
+  mkdir -p "$dst" || return 1
+  openssl req -x509 -nodes -newkey rsa:2048 \
+    -keyout "$dst/privkey.pem" -out "$dst/fullchain.pem" \
+    -days 3650 -subj "/CN=${host}" \
+    -addext "subjectAltName=${san}" \
+    -addext "keyUsage=digitalSignature,keyEncipherment" \
+    -addext "extendedKeyUsage=serverAuth" 2>/dev/null || return 1
+  chmod 600 "$dst/privkey.pem" 2>/dev/null || true
+}
+
+# Whether this certificate and key can actually serve $3.
+#
+# nginx refuses to start on a mismatched pair, so installing one takes the site
+# down rather than failing where it was typed. Checked here instead, where the
+# operator is still looking at the terminal.
+cert_pair_ok() {
+  local cert=$1 key=$2 host=$3
+  require_cmd openssl
+
+  local cmod kmod
+  cmod="$(openssl x509 -noout -modulus -in "$cert" 2>/dev/null | openssl md5)"
+  kmod="$(openssl rsa  -noout -modulus -in "$key"  2>/dev/null | openssl md5)"
+  if [[ -z "$cmod" || "$cmod" != "$kmod" ]]; then
+    err "that key does not belong to that certificate"
+    err "  nginx would refuse to start and the site would stop being served."
+    return 1
+  fi
+
+  if ! openssl x509 -checkend 0 -noout -in "$cert" >/dev/null 2>&1; then
+    err "that certificate has already expired"
+    return 1
+  fi
+
+  # A name mismatch is the operator's call: a wildcard, a SAN list we parse
+  # badly, or a deliberate choice are all plausible, and refusing would be worse
+  # than saying so.
+  if ! cert_covers_host "$cert" "$host"; then
+    warn "that certificate does not appear to cover $host"
+    warn "browsers will refuse it unless the name matches"
+  fi
+
+  local days; days="$(cert_days_left "$cert")"
+  [[ -n "$days" ]] && (( days < 30 )) && warn "it expires in $days days"
+  return 0
+}
+
+# Whether $1 names $2, in its subject or its SANs. Wildcards count for one label.
+cert_covers_host() {
+  local cert=$1 host=$2 names
+  names="$(openssl x509 -noout -text -in "$cert" 2>/dev/null \
+    | grep -oE '(DNS|IP Address):[^,]*' | cut -d: -f2- | tr -d ' ')"
+  names+=$'\n'"$(openssl x509 -noout -subject -in "$cert" 2>/dev/null \
+    | grep -oE 'CN *= *[^,/]*' | cut -d= -f2- | tr -d ' ')"
+
+  local n
+  while read -r n; do
+    [[ -z "$n" ]] && continue
+    [[ "$n" == "$host" ]] && return 0
+    # *.acme.internal covers host.acme.internal, and nothing deeper.
+    if [[ "$n" == \*.* && "$host" == *.* ]]; then
+      [[ "${n#\*.}" == "${host#*.}" ]] && return 0
+    fi
+  done <<< "$names"
+  return 1
+}
+
+# Days until $1 expires. Prints nothing when it cannot be read, so callers can
+# tell "no certificate" from "expiring".
+cert_days_left() {
+  local cert=$1 end exp
+  end="$(openssl x509 -enddate -noout -in "$cert" 2>/dev/null | cut -d= -f2)"
+  [[ -n "$end" ]] || return 0
+  exp="$(date -d "$end" +%s 2>/dev/null)" || return 0
+  echo $(( (exp - $(date +%s)) / 86400 ))
+}
+
+# Which certificate mode this deployment was told to use.
+#
+# The fallback follows what the machine is, not what ours are. Defaulting every
+# host to HTTP-01 sent a LAN box with no public DNS and no inbound :80 to wait
+# on a challenge that could never arrive. The platform records this for every
+# deployment now, so the fallback only covers a record written before it did.
+cert_mode_for() {
+  local env_file=$1
+  local tls; tls="$(env_get "$env_file" CAYTU_ACCESS_TLS || true)"
+  if [[ -z "$tls" ]]; then
+    case "$(env_get "$env_file" CAYTU_PLACEMENT || true)" in
+      ""|managed) tls="letsencrypt-http" ;;
+      *)          tls="self-signed" ;;
+    esac
+  fi
+  printf '%s' "$tls"
+}
+
+# Get this deployment a certificate, by whichever route its record names.
+#
+# Attempting HTTP-01 for everyone is how a site that chose its own certificate
+# spent five minutes waiting for a challenge it never wanted, then reported
+# itself on plain HTTP. Each mode fails differently and none of them is fatal:
+# serving unencrypted beats serving nothing.
+issue_certificate() {
+  local env_file=$1 url=$2
+  local host="${url#*://}"; host="${host%%/*}"
+  [[ -n "$host" ]] || return 1
+
+  # Something in front holds the certificate. Ours would never be presented.
+  case "$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)" in
+    iis|external-proxy) return 1 ;;
+  esac
+
+  # Already there, whatever put it there. Covers a re-provision and a renewal.
+  if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    _nginx_use_tls "$host"
+    compose restart nginx >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  local mode; mode="$(cert_mode_for "$env_file")"
+  case "$mode" in
+    none)
+      return 1 ;;
+    letsencrypt-http)
+      cert_letsencrypt_http "$env_file" "$host" || return 1 ;;
+    self-signed)
+      info "generating a self-signed certificate for $host…"
+      cert_self_signed "$host" || { warn "could not generate one; $host stays on HTTP"; return 1; }
+      warn "browsers will warn until $COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem"
+      warn "is imported into each client's trust store" ;;
+    byo)
+      # Nothing to do but say where the files go. The operator puts them there,
+      # possibly days later, and the agent picks them up on its next pass.
+      warn "this deployment brings its own certificate, and none is installed yet."
+      warn "put fullchain.pem and privkey.pem in"
+      warn "  $COMPOSE_DIR/certbot/conf/live/$host/"
+      warn "or run: caytu-client -t $TARGET ssl bring-your-own $host <cert> <key>"
+      return 1 ;;
+    letsencrypt-dns)
+      # Deliberately not attempted. See docs/onprem-certificates.md: this needs
+      # a provider integration per DNS host, and pretending otherwise would burn
+      # a rate limit to fail.
+      warn "a DNS-01 certificate for $host is not issued automatically yet."
+      warn "install one with: caytu-client -t $TARGET ssl bring-your-own $host <cert> <key>"
+      return 1 ;;
+    *)
+      warn "this deployment names a certificate mode ('$mode') this host does not understand"
+      return 1 ;;
+  esac
+
+  _nginx_use_tls "$host"
+  compose restart nginx >/dev/null 2>&1 || true
+  ok "$host is served over TLS"
+}
+
+# Make nginx startable, and pointed at the right name, before it starts.
+#
+# The shipped config names a placeholder domain and a certificate that does not
+# exist, so nginx crash-looped and the deployment served nothing while still
+# reporting itself running.
+prepare_nginx() {
   local env_file=$1 url=$2
   local host="${url#*://}"; host="${host%%/*}"
   [[ -n "$host" ]] || return 0
+
+  # Something else owns the ports and terminates TLS. We serve plain HTTP on
+  # loopback and let it proxy in, which also means it never has to know that
+  # /api/config goes to the frontend rather than the backend.
+  local edge; edge="$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
+  case "$edge" in
+    iis|external-proxy)
+      env_upsert "$env_file" NGINX_HTTP_BIND "127.0.0.1:${NGINX_LOOPBACK_HTTP:-8080}"
+      env_upsert "$env_file" NGINX_HTTPS_BIND "127.0.0.1:${NGINX_LOOPBACK_HTTPS:-8443}"
+      _nginx_use_http_only || return 0
+      ok "nginx is on 127.0.0.1:${NGINX_LOOPBACK_HTTP:-8080}; point your $edge there"
+      return 0 ;;
+  esac
 
   if [[ -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
     _nginx_use_tls "$host"
@@ -559,7 +770,12 @@ hosted_prepare_nginx() {
   fi
 
   _nginx_use_http_only || return 0
-  warn "no certificate for $host yet; nginx is serving plain HTTP"
+  # Plain HTTP is the chosen answer here, not a step on the way to one.
+  if [[ "$(cert_mode_for "$env_file")" == "none" ]]; then
+    warn "this deployment serves plain HTTP by choice; passwords cross the network in clear"
+  else
+    warn "no certificate for $host yet; nginx is serving plain HTTP"
+  fi
 }
 
 _ssl_pin_nginx_remote() {
@@ -570,6 +786,17 @@ _ssl_pin_nginx_remote() {
     -e 's|/etc/letsencrypt/live/yourdomain.com/|/etc/letsencrypt/live/$host/|g' \
     $rdir/compose/nginx/conf.d/default.conf && \
     rm -f $rdir/compose/nginx/conf.d/default.conf.bak"
+}
+
+# Put the TLS config back before pinning it. Installing a certificate while
+# nginx is on the HTTP-only config used to sed a file with nothing to change,
+# so the site kept serving plain HTTP and nothing said why.
+_ssl_restore_tls_remote() {
+  local host=$1 rdir; rdir="$(ssh_remote_dir)"
+  local rconf="$rdir/compose/nginx/conf.d/default.conf"
+  # shellcheck disable=SC2029
+  ssh_run "test -f $rconf.tls && cp $rconf.tls $rconf || true"
+  _ssl_pin_nginx_remote "$host"
 }
 
 # Days until the remote cert for $1 expires. Prints nothing when there is no
@@ -685,14 +912,14 @@ cmd_ssl() {
         onprem)
           local dst; dst="$(_ssl_cert_dir_local "$host")"
           mkdir -p "$dst" && cp "$tmp"/*.pem "$dst/" && chmod 600 "$dst/privkey.pem"
-          _ssl_pin_nginx_local "$host"
+          _nginx_use_tls "$host"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
           ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
           scp $(ssh_opts | tr '\n' ' ') "$tmp/fullchain.pem" "$tmp/privkey.pem" \
             "$(ssh_target):$rdir/compose/certbot/conf/live/$host/"
-          _ssl_pin_nginx_remote "$host"
+          _ssl_restore_tls_remote "$host"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
@@ -704,6 +931,7 @@ cmd_ssl() {
       local host=${1:-}; local cert=${2:-}; local key=${3:-}
       [[ -n "$host" && -f "$cert" && -f "$key" ]] || \
         die "usage: caytu-client ssl bring-your-own <host> <fullchain.pem> <privkey.pem>"
+      cert_pair_ok "$cert" "$key" "$host" || exit 1
       case "$TARGET" in
         onprem)
           local dst; dst="$(_ssl_cert_dir_local "$host")"
@@ -711,14 +939,14 @@ cmd_ssl() {
           cp "$cert" "$dst/fullchain.pem"
           cp "$key"  "$dst/privkey.pem"
           chmod 600 "$dst/privkey.pem"
-          _ssl_pin_nginx_local "$host"
+          _nginx_use_tls "$host"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
           ssh_run "mkdir -p $rdir/compose/certbot/conf/live/$host"
           scp $(ssh_opts | tr '\n' ' ') "$cert" "$(ssh_target):$rdir/compose/certbot/conf/live/$host/fullchain.pem"
           scp $(ssh_opts | tr '\n' ' ') "$key"  "$(ssh_target):$rdir/compose/certbot/conf/live/$host/privkey.pem"
-          _ssl_pin_nginx_remote "$host"
+          _ssl_restore_tls_remote "$host"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
         *) die "ssl only applies to onprem/remote targets" ;;
@@ -737,12 +965,18 @@ cmd_ssl() {
 
       case "$TARGET" in
         onprem)
-          mv "$COMPOSE_DIR/nginx/conf.d/default.conf" "$COMPOSE_DIR/nginx/conf.d/default.conf.disabled" 2>/dev/null || true
-          cp "$src" "$COMPOSE_DIR/nginx/conf.d/default.conf"
+          # The shared switch, so a later 'ssl self-signed' finds the TLS config
+          # where it expects it. This used to keep its own .disabled copy that
+          # nothing ever read, so switching back left nginx on plain HTTP with a
+          # certificate installed and no sign anything was wrong.
+          _nginx_use_http_only || die "missing $src"
           compose restart nginx || compose up -d nginx ;;
         ssh|aws-single|gcp-single)
           local rdir; rdir="$(ssh_remote_dir)"
-          scp $(ssh_opts | tr '\n' ' ') "$src" "$(ssh_target):$rdir/compose/nginx/conf.d/default.conf"
+          local rconf="$rdir/compose/nginx/conf.d/default.conf"
+          # shellcheck disable=SC2029
+          ssh_run "test -f $rconf.tls || cp $rconf $rconf.tls"
+          scp $(ssh_opts | tr '\n' ' ') "$src" "$(ssh_target):$rconf"
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
@@ -922,8 +1156,20 @@ not_enrolled() {
 # The friendly hostname needs a record and a certificate, and neither exists in
 # the first minutes of a deployment's life, so the console showed an address
 # that resolved nowhere and had nothing else to offer.
+
+# The address that actually carries traffic off this box, not loopback.
+primary_ip() {
+  local ip
+  ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
+  [[ -z "$ip" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  printf '%s' "$ip"
+}
+
 direct_url() {
   local ip; ip="$(imds_get /latest/meta-data/public-ipv4)"
+  # Off EC2 there is no metadata service, and a LAN address is still the answer
+  # to "where does this machine answer without DNS".
+  [[ -n "$ip" ]] || ip="$(primary_ip)"
   [[ -n "$ip" ]] || return 0
   printf 'http://%s' "$ip"
 }
@@ -962,12 +1208,10 @@ host_profile() {
     port_in_use "$p" && busy="${busy}${busy:+,}$p"
   done
 
-  local hostname_s fqdn primary_ip
+  local hostname_s fqdn ip
   hostname_s="$(hostname 2>/dev/null || echo unknown)"
   fqdn="$(hostname -f 2>/dev/null || echo "$hostname_s")"
-  # The address that actually carries traffic off this box, not loopback.
-  primary_ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
-  [[ -z "$primary_ip" ]] && primary_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  ip="$(primary_ip)"
 
   local hosts_path="/etc/hosts"
   [[ "$os" == "windows" ]] && hosts_path='C:\Windows\System32\drivers\etc\hosts'
@@ -981,7 +1225,7 @@ host_profile() {
     --arg dockerVersion "$docker_version" --arg composeVersion "$compose_version" \
     --argjson dockerRunning "$docker_ok" \
     --arg busyPorts "$busy" --arg hostname "$hostname_s" --arg fqdn "$fqdn" \
-    --arg primaryIp "$primary_ip" --arg hostsPath "$hosts_path" \
+    --arg primaryIp "$ip" --arg hostsPath "$hosts_path" \
     --arg memGb "$mem_gb" --arg diskGb "$disk_gb" \
     '{
        os: $os, arch: $arch, kernel: $kernel, distro: $distro,
@@ -1063,15 +1307,21 @@ enroll_host() {
   [[ -n "$expires" ]] && env_upsert "$env_file" CAYTU_TOKEN_EXPIRES_AT "$expires"
   [[ -n "$host_id" ]] && env_upsert "$env_file" CAYTU_HOST_ID "$host_id"
 
-  # What the CLI reaches the platform on is not always what the containers do:
-  # in local development these are docker service names, and overwriting them
-  # with a host address sends the running stack to a port it cannot see. Filled
-  # in only when nothing is there yet.
+  # Where the deployment reports in, which is not the same question as where the
+  # CLI just talked to.
+  #
+  # In local development these are docker service names, and a host address
+  # sends the running stack to a port it cannot see, so there they stay. Nowhere
+  # else is that true, and filling them in only when empty left every other host
+  # on the template's production default: the stack reported to a platform that
+  # answers 404, so the admin account it created was never announced and the
+  # console waited forever. The identity flow was fixed the same way.
   local var
   for var in CAYTU_BILLINGS_URL CAYTU_PLATFORM_URL; do
-    if [[ -z "$(env_get "$env_file" "$var" || true)" ]]; then
-      env_upsert "$env_file" "$var" "$platform"
+    if [[ "$TARGET" == "local" && -n "$(env_get "$env_file" "$var" || true)" ]]; then
+      continue
     fi
+    env_upsert "$env_file" "$var" "$platform"
   done
 
   ok "enrolled for organization $org"
@@ -1089,12 +1339,37 @@ enroll_host() {
 #
 # The scheme follows whether a certificate exists, so it never claims https
 # before there is one.
-api_base_for() {
-  local domain=$1
-  [[ -n "$domain" && "$domain" != "example.com" ]] || return 0
 
-  local scheme="https"
-  [[ -f "$COMPOSE_DIR/certbot/conf/live/$domain/fullchain.pem" ]] || scheme="http"
+# Whether this deployment is served over TLS, from what the record says rather
+# than from what we hope.
+#
+# A hosted machine terminates its own TLS, so the certificate file is the whole
+# answer. On-premise it is not: an external proxy or IIS holds the certificate
+# somewhere we cannot see, and a site that chose plain HTTP has no certificate
+# anywhere by design. Guessing https in either case gives the console a link
+# that cannot connect, and gives the browser an API base it cannot reach.
+deployment_scheme() {
+  local host=$1 tls=${2:-} edge=${3:-}
+
+  # Their choice, and the one case where no certificate is a decision.
+  [[ "$tls" == "none" ]] && { printf 'http'; return 0; }
+
+  # Something in front of us terminates it, so nothing lands in our cert dir.
+  case "$edge" in
+    iis|external-proxy) printf 'https'; return 0 ;;
+  esac
+
+  if [[ -n "$host" && -f "$COMPOSE_DIR/certbot/conf/live/$host/fullchain.pem" ]]; then
+    printf 'https'
+  else
+    printf 'http'
+  fi
+}
+
+api_base_for() {
+  local domain=$1 scheme=${2:-}
+  [[ -n "$domain" && "$domain" != "example.com" ]] || return 0
+  [[ -n "$scheme" ]] || scheme="$(deployment_scheme "$domain")"
   printf '%s://%s' "$scheme" "$domain"
 }
 
@@ -1103,13 +1378,21 @@ deployment_url_for() {
   local url; url="$(env_get "$env_file" CAYTU_DEPLOYMENT_URL || true)"
   if [[ -z "$url" ]]; then
     local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
-    [[ -n "$domain" ]] && url="https://$domain"
+    [[ -n "$domain" ]] && url="$(api_base_for "$domain" "$(access_scheme "$env_file" "$domain")")"
   fi
   if [[ -z "$url" && "$TARGET" == "local" ]]; then
     local port; port="$(env_get "$env_file" FRONTEND_HOST_PORT || true)"
     url="http://localhost:${port:-3100}"
   fi
   printf '%s' "${url%/}"
+}
+
+# deployment_scheme, using the access choices provisioning wrote here.
+access_scheme() {
+  local env_file=$1 host=$2
+  deployment_scheme "$host" \
+    "$(env_get "$env_file" CAYTU_ACCESS_TLS || true)" \
+    "$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
 }
 
 # --- admin ------------------------------------------------------------------
@@ -1276,14 +1559,20 @@ ecr_login_if_needed() {
 
   local region="${registry#*.dkr.ecr.}"; region="${region%%.amazonaws.com}"
 
-  if aws ecr get-login-password --region "$region" 2>/dev/null \
+  local why; why="$(mktemp)"
+  if aws ecr get-login-password --region "$region" 2>"$why" \
        | docker login --username AWS --password-stdin "$registry" >/dev/null 2>&1; then
+    rm -f "$why"
     return 0
   fi
 
-  # Not fatal here. The pull that follows fails with a message naming the image,
-  # which says more than a login failure would.
-  warn "could not log in to $registry; the image pull will probably be denied"
+  # Say why. The pull that follows always blames an expired token, even when
+  # there were no credentials at all, which sends you refreshing a token that
+  # was never there.
+  warn "could not log in to $registry, so the pull will be denied:"
+  warn "  $(grep -m1 . "$why" 2>/dev/null || echo "docker login refused the token")"
+  warn "  Set AWS_PROFILE to one that can read ECR, then run this again."
+  rm -f "$why"
   return 0
 }
 
@@ -1342,6 +1631,57 @@ apply_instance_source() {
   esac
 }
 
+
+# Bring the four access choices onto the host.
+#
+# The record has carried them for a while and nothing here ever read them, so
+# the console described how a deployment was reached and the machine was
+# configured separately by hand. Written into the env file rather than kept in
+# a variable, because everything after provisioning (the ssl verbs, the agent
+# on its next tick, admin invite) has to reach the same answer.
+apply_instance_access() {
+  local env_file=$1 record=$2
+
+  # What kind of machine this is, which decides the defaults when the record
+  # says nothing. Ours and a customer's want opposite answers.
+  local placement; placement="$(printf '%s' "$record" | jq -r '.placement // empty')"
+  [[ -n "$placement" ]] && env_upsert "$env_file" CAYTU_PLACEMENT "$placement"
+
+  local field
+  for field in resolution:RESOLUTION tls:TLS edge:EDGE hostPlatform:HOST_PLATFORM \
+               dnsProvider:DNS_PROVIDER; do
+    local value
+    value="$(printf '%s' "$record" | jq -r ".access.${field%%:*} // empty")"
+    [[ -n "$value" ]] && env_upsert "$env_file" "CAYTU_ACCESS_${field##*:}" "$value"
+  done
+
+  # The address Let's Encrypt wants is already read from here, so the record
+  # feeds the variable that exists rather than a second one beside it.
+  local acme; acme="$(printf '%s' "$record" | jq -r '.access.acmeEmail // empty')"
+  [[ -n "$acme" ]] && env_upsert "$env_file" CAYTU_LETSENCRYPT_EMAIL "$acme"
+}
+
+# The name clients use to reach this deployment.
+#
+# Ours is derived, because we create the record for it. Anyone else's is theirs
+# to tell us, except a site reached by bare IP, where the machine is the only
+# thing that knows its own address.
+instance_hostname() {
+  local record=$1 placement=$2 subdomain=$3
+
+  if [[ "$placement" == "managed" ]]; then
+    printf '%s.caytu.link' "$subdomain"
+    return 0
+  fi
+
+  local host; host="$(printf '%s' "$record" | jq -r '.access.hostname // empty')"
+  if [[ -z "$host" ]] \
+     && [[ "$(printf '%s' "$record" | jq -r '.access.resolution // empty')" == "ip" ]]; then
+    host="$(primary_ip)"
+  fi
+  printf '%s' "$host"
+}
+
 instance_provision() {
   require_cmd curl jq
   local env_file; env_file="$(env_file_for)"
@@ -1373,16 +1713,18 @@ instance_provision() {
     '.instances[]? | select(.id == $id or ._id == $id)')"
   [[ -n "$record" ]] || die "no instance $id visible to this token"
 
-  local subdomain org admin_email admin_name
+  local subdomain org admin_email admin_name placement
   subdomain="$(printf '%s' "$record" | jq -r '.subdomain // empty')"
   org="$(printf '%s' "$record" | jq -r '.organizationId // empty')"
   admin_email="$(printf '%s' "$record" | jq -r '.adminEmail // empty')"
   admin_name="$(printf '%s' "$record" | jq -r '.adminName // empty')"
+  placement="$(printf '%s' "$record" | jq -r '.placement // "managed"')"
 
   [[ -n "$subdomain" ]] || die "that instance has no subdomain"
   [[ -n "$admin_email" ]] || die "that instance names no administrator — nobody could sign in to the result"
 
-  ok "instance \"$(printf '%s' "$record" | jq -r '.name // "?"')\" → ${subdomain}.caytu.link, admin ${admin_email}"
+  local domain; domain="$(instance_hostname "$record" "$placement" "$subdomain")"
+  ok "instance \"$(printf '%s' "$record" | jq -r '.name // "?"')\" → ${domain:-no address yet}, admin ${admin_email}"
 
   # The administrator has to be in place before the stack starts: the client
   # bootstraps its first account from INITIAL_ADMIN_EMAIL on boot.
@@ -1391,23 +1733,28 @@ instance_provision() {
   remember_instance "$env_file" "$id"
 
   apply_instance_source "$env_file" "$record"
-  # Only for hosting we run, where we own the DNS. On a customer's own machine
-  # <subdomain>.caytu.link resolves nowhere, and writing it here is how an
-  # administrator ends up with an invite email pointing at a dead name.
-  local placement; placement="$(printf '%s' "$record" | jq -r '.placement // "managed"')"
-  if [[ "$placement" == "managed" ]]; then
-    env_upsert "$env_file" CAYTU_DOMAIN "${subdomain}.caytu.link"
+  apply_instance_access "$env_file" "$record"
+
+  # The name this deployment answers on. <subdomain>.caytu.link is only ours to
+  # write for hosting we run: on a customer's own machine it resolves nowhere,
+  # and writing it there is how an administrator ends up with an invite link
+  # pointing at a dead name.
+  if [[ -n "$domain" ]]; then
+    env_upsert "$env_file" CAYTU_DOMAIN "$domain"
+  else
+    domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
+    [[ "$domain" == "example.com" ]] && domain=""
   fi
 
   # Where the browser and the frontend's server side send API calls.
   #
   # Both ship empty, so the browser had no address to post to and the request
   # never left it: the reset-password form answered "an error occurred" with
-  # nothing reaching nginx at all. The public one goes through nginx, which
-  # proxies /api/ to the backend. The internal one skips nginx, since the
-  # frontend's server side sits on the same network.
-  local domain; domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
-  local api_base; api_base="$(api_base_for "$domain")"
+  # nothing reaching nginx at all. This used to be written for hosting we run
+  # and nothing else, so every on-premise site got the same silence. The public
+  # one goes through nginx, which proxies /api/ to the backend. The internal one
+  # skips nginx, since the frontend's server side sits on the same network.
+  local api_base; api_base="$(api_base_for "$domain" "$(access_scheme "$env_file" "$domain")")"
   [[ -n "$api_base" ]] && env_upsert "$env_file" NEXT_PUBLIC_API_URL "$api_base"
   [[ -n "$(env_get "$env_file" CLIENT_BACKEND_URL || true)" ]] \
     || env_upsert "$env_file" CLIENT_BACKEND_URL "http://backend:5000"
@@ -1416,7 +1763,8 @@ instance_provision() {
   local deployment_url; deployment_url="$(deployment_url_for "$env_file")"
   if [[ -z "$deployment_url" ]]; then
     warn "we do not know how people reach this host, so the administrator's invite link"
-    warn "would point nowhere. Give the instance a domain in the console and re-run."
+    warn "would point nowhere. Set the hostname on the instance's access settings in"
+    warn "the console, or choose 'ip' if this site is reached by address, and re-run."
   fi
 
   env_upsert "$env_file" INITIAL_ADMIN_EMAIL "$admin_email"
@@ -1447,22 +1795,33 @@ instance_provision() {
   local reporting_to; reporting_to="$(instance_platform_url "$env_file")"
   [[ -n "$reporting_to" ]] && env_upsert "$env_file" CAYTU_BILLINGS_URL "$reporting_to"
 
-  hosted_prepare_nginx "$env_file" "$deployment_url"
+  prepare_nginx "$env_file" "$deployment_url"
 
   # Report the scheme actually being served. Saying https while nginx listens
-  # on 80 alone gives the console a link that cannot work.
-  if [[ "${HOSTED_TLS:-1}" == "0" ]]; then
-    deployment_url="${deployment_url/#https:/http:}"
-  fi
+  # on 80 alone gives the console a link that cannot work. Except behind IIS or
+  # a customer proxy, where our nginx serving plain HTTP on loopback says
+  # nothing about what the browser gets.
+  local edge_now; edge_now="$(env_get "$env_file" CAYTU_ACCESS_EDGE || true)"
+  case "$edge_now" in
+    iis|external-proxy) : ;;
+    *) [[ "${HOSTED_TLS:-1}" == "0" ]] && deployment_url="${deployment_url/#https:/http:}" ;;
+  esac
 
   info "starting the stack…"
   if cmd_up $build; then
     # Now, not before: HTTP-01 needs nginx already answering on port 80. If it
     # works the scheme below becomes https, and if not the deployment keeps
     # serving plain HTTP rather than nothing.
-    if hosted_issue_certificate "$env_file" "$deployment_url"; then
+    if issue_certificate "$env_file" "$deployment_url"; then
       deployment_url="${deployment_url/#http:/https:}"
     fi
+
+    # After the stack, because it needs mongodb. A deployment that cannot be
+    # licensed still runs and can still be logged into, so this does not fail
+    # the rollout, but the console is told rather than left to infer it from
+    # ten healthy containers serving 503.
+    local seeded=""
+    if bootstrap_secret_store "$env_file"; then seeded=1; fi
 
     # Deliberately not claiming adminProvisioned here. A stack that starts is
     # not proof the named account exists: the client only bootstraps an initial
@@ -1471,10 +1830,11 @@ instance_provision() {
     # deployment reports that flag once it is actually true.
     instance_report "$env_file" "$id" \
       "$(jq -n --arg u "$deployment_url" --arg d "$(direct_url)" \
-            --argjson h "$(host_profile)" \
+            --argjson h "$(host_profile)" --arg s "$seeded" \
         '{status:"running", provisioningPercent:100, hostProfile:$h}
          + (if $u == "" then {} else {publicUrl:$u} end)
-         + (if $d == "" then {} else {directUrl:$d} end)')"
+         + (if $d == "" then {} else {directUrl:$d} end)
+         + (if $s == "" then {lastError:"the secret store is not seeded, so this deployment cannot be licensed"} else {} end)')"
     ok "instance $id reported running"
   else
     instance_report "$env_file" "$id" \
@@ -2382,6 +2742,48 @@ CODEARTIFACT_AWS_REGION="${CODEARTIFACT_AWS_REGION:-us-east-1}"
 #
 # Generated once and never rotated here: changing it signs out every existing
 # session on the site and invalidates every refresh token.
+# Seed the encrypted secret store, once, so the deployment can be licensed.
+#
+# An unseeded store makes every licence evaluate invalid however many are
+# issued, and the server then answers 503 to everything but auth. All ten
+# containers stay healthy and the console says running, so this reads as a
+# broken product rather than an unlicensed one.
+#
+# The image does the work, because the shard it needs is baked into that bundle
+# and nobody should have to hold one. Runs after the stack is up, since it
+# needs mongodb.
+bootstrap_secret_store() {
+  local env_file=$1
+  local customer
+  customer="$(env_get "$env_file" CAYTU_ORGANIZATION_ID || true)"
+  [[ -n "$customer" ]] || customer="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+  if [[ -z "$customer" ]]; then
+    warn "this host has no customer id, so the secret store cannot be seeded"
+    return 1
+  fi
+
+  # timeout runs in the container, not here. An image built before this flag
+  # existed ignores it and starts the server instead, which would hang forever.
+  local out rc=0
+  out="$(compose run --rm --no-deps -e "CAYTU_CUSTOMER_ID=$customer" \
+           backend timeout 120 node loader.js --bootstrap-store 2>&1)" || rc=$?
+
+  if (( rc == 0 )); then
+    ok "$(printf '%s' "$out" | grep -E 'secret store' | tail -1)"
+    # The backend reads the store at boot, so it has to look again now.
+    compose restart backend >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  if (( rc == 124 )); then
+    warn "this backend image cannot seed its own store; rebuild it and re-run"
+  else
+    warn "could not seed the secret store, so this deployment cannot be licensed"
+    printf '%s\n' "$out" | tail -3 >&2
+  fi
+  return 1
+}
+
 ensure_deployment_secrets() {
   local env_file=$1
   local key
@@ -2485,7 +2887,10 @@ cmd_secrets() {
   local sub=${1:-}; shift || true
   case "$sub" in
     seed) secrets_seed "$@" ;;
-    *) die "usage: caytu-client secrets seed [--in FILE] [-y]" ;;
+    # Provisioning does this already. Here as a verb too, for a host stood up
+    # by hand and for repairing one that was provisioned before it existed.
+    bootstrap) bootstrap_secret_store "$(env_file_for)" ;;
+    *) die "usage: caytu-client secrets <bootstrap|seed [--in FILE] [-y]>" ;;
   esac
 }
 
@@ -2573,8 +2978,7 @@ main() {
 
   [[ $# -eq 0 ]] && { cmd_help; exit 0; }
 
-  # Default target: local
-  TARGET="${TARGET:-local}"
+  resolve_target "$@"
 
   local verb=$1; shift || true
   case "$verb" in
