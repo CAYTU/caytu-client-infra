@@ -45,3 +45,6 @@ vault*.json
 .vscode/
 *.swp
 *.swo
+
+# The agent saves the TLS config here while it serves plain HTTP.
+compose/nginx/conf.d/default.conf.tls
