@@ -156,7 +156,23 @@ services:
     restart: unless-stopped
     volumes:
       - ./coturn.conf:/etc/coturn/turnserver.conf:ro
-    command: ["-c", "/etc/coturn/turnserver.conf"]
+    # CLI flags override the values baked into coturn.conf so operators can
+    # rotate the TURN secret and change the advertised IP through .env alone —
+    # no rebuild, no config-file edit. The conf file still holds every OTHER
+    # setting (ports, realm, allowed peer ranges, …); only auth secret and
+    # external IP are dynamic per deployment.
+    #
+    # TURN_SECRET is required — coturn cannot authenticate clients without it.
+    # COTURN_EXTERNAL_IP is what coturn advertises to peers during ICE; without
+    # it coturn hands out its container-bridge IP (172.x.x.x), which no browser
+    # on the LAN can reach. Falls back to CAYTU_DOMAIN, which is fine when it's
+    # a bare IP. Set COTURN_EXTERNAL_IP explicitly when CAYTU_DOMAIN is a
+    # hostname (turnserver's --external-ip wants an address, not a name).
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      - "--static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set in .env for coturn to authenticate WebRTC clients}"
+      - "--external-ip=${COTURN_EXTERNAL_IP:-${CAYTU_DOMAIN}}"
     logging: *default-logging
     networks: [caytu]
 

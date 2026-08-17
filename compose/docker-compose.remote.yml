@@ -30,6 +30,26 @@ services:
     volumes:
       - gstreamer-recordings:/tmp/recordings
 
+  # The one internal service that DOES publish a host port: devices publishing
+  # from other LAN hosts need to reach the broker directly. Open 1885/tcp on
+  # the firewall to the LAN CIDR only.
+  mqtt-broker:
+    ports:
+      - "${MQTT_BROKER_HOST_PORT:-1885}:1885"
+
+  # STUN/TURN can't be proxied through nginx (UDP-heavy stateful protocol), so
+  # coturn has to publish its own ports directly on the host. The relay range
+  # (49152-49252) mirrors min-port/max-port in coturn.conf — change both if
+  # you widen it. aws-* deployments include this overlay too but never start
+  # coturn (profile `turn` is off), so this stanza is a harmless no-op there.
+  coturn:
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "5349:5349"
+      - "5349:5349/udp"
+      - "49152-49252:49152-49252/udp"
+
   nginx:
     image: nginx:${NGINX_VERSION:-alpine}
     ports:
