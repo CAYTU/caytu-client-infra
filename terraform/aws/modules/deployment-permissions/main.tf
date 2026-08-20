@@ -134,9 +134,13 @@ data "aws_iam_policy_document" "provisioner" {
   dynamic "statement" {
     for_each = var.boundary_arn != "" ? [1] : []
     content {
+      # CreateRole only. That is where the boundary is set, and a policy
+      # attached later is still capped by it, so guarding the attach actions
+      # buys nothing and risks denying a legitimate call when the condition key
+      # is absent.
       sid       = "TheBoundaryIsNotOptional"
       effect    = "Deny"
-      actions   = ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"]
+      actions   = ["iam:CreateRole"]
       resources = [local.role_arn_pattern]
 
       condition {
