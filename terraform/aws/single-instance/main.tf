@@ -37,18 +37,19 @@ locals {
 # SSH key pair
 # -----------------------------------------------------------------------------
 resource "tls_private_key" "generated" {
-  count     = var.ssh_public_key == "" ? 1 : 0
+  count     = var.create_ssh_key_pair && var.ssh_public_key == "" ? 1 : 0
   algorithm = "ED25519"
 }
 
 resource "local_sensitive_file" "generated_key" {
-  count           = var.ssh_public_key == "" ? 1 : 0
+  count           = var.create_ssh_key_pair && var.ssh_public_key == "" ? 1 : 0
   content         = tls_private_key.generated[0].private_key_openssh
   filename        = var.ssh_key_output_path
   file_permission = "0600"
 }
 
 resource "aws_key_pair" "this" {
+  count      = var.create_ssh_key_pair ? 1 : 0
   key_name   = "${var.name_prefix}-${var.environment}"
   public_key = var.ssh_public_key != "" ? var.ssh_public_key : tls_private_key.generated[0].public_key_openssh
 }
@@ -174,8 +175,9 @@ data "aws_iam_policy_document" "instance_assume" {
 }
 
 resource "aws_iam_role" "instance" {
-  name               = "${var.name_prefix}-${var.environment}-instance"
-  assume_role_policy = data.aws_iam_policy_document.instance_assume.json
+  name                 = "${var.name_prefix}-${var.environment}-instance"
+  assume_role_policy   = data.aws_iam_policy_document.instance_assume.json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
 }
 
 resource "aws_iam_role_policy_attachment" "ssm" {
@@ -264,7 +266,7 @@ resource "aws_iam_instance_profile" "instance" {
 resource "aws_instance" "this" {
   ami           = data.aws_ami.ubuntu.id
   instance_type = var.instance_type
-  key_name      = aws_key_pair.this.key_name
+  key_name      = var.create_ssh_key_pair ? aws_key_pair.this[0].key_name : null
   subnet_id     = local.subnet_id
 
   vpc_security_group_ids = [aws_security_group.this.id]
@@ -318,11 +320,11 @@ resource "aws_instance" "this" {
   tags = {
     Name = "${var.name_prefix}-${var.environment}"
   }
-  
+
   lifecycle {
     ignore_changes = [
-      ami,          # don't churn the box when Canonical publishes a new AMI
-      user_data,    # bootstrap runs once; changes shouldn't recreate
+      ami,       # don't churn the box when Canonical publishes a new AMI
+      user_data, # bootstrap runs once; changes shouldn't recreate
     ]
   }
 }

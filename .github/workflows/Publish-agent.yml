@@ -23,6 +23,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   AWS_REGION: us-east-1
@@ -37,11 +38,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This role writes one S3 prefix and nothing else, so a compromised run
+      # here cannot reach EC2 or IAM the way a shared account key could.
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_AGENT_PUBLISH_ROLE_ARN }}
+          role-session-name: publish-agent
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Build the tarball

@@ -22,6 +22,22 @@ on:
         description: "AWS region the machine was built in"
         required: true
         default: "us-east-1"
+      target_account_id:
+        description: "AWS account the machine lives in. Empty means our own."
+        required: false
+        default: ""
+      target_role_arn:
+        description: "Role to assume in that account. Required when target_account_id is set."
+        required: false
+        default: ""
+      target_external_id:
+        description: "External id that account's trust policy demands."
+        required: false
+        default: ""
+      target_permissions_boundary:
+        description: "Boundary that account requires on every role we create."
+        required: false
+        default: ""
       subdomain:
         description: "Hostname label, for the run name only"
         required: false
@@ -29,6 +45,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   TF_DIR: terraform/aws/single-instance
@@ -47,9 +64,21 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_PROVISIONING_ROLE_ARN }}
+          role-session-name: destroy-${{ github.event.inputs.instance_id }}
           aws-region: ${{ github.event.inputs.region }}
+
+      # The state lives in our bucket, the machine may not. Getting this wrong
+      # is a destroy that reports success against an empty account while the
+      # customer's machine keeps running.
+      - name: Work out whose account this is
+        id: target
+        uses: ./.github/actions/target-account
+        with:
+          target_account_id: ${{ github.event.inputs.target_account_id }}
+          role_arn: ${{ github.event.inputs.target_role_arn }}
+          external_id: ${{ github.event.inputs.target_external_id }}
+          permissions_boundary: ${{ github.event.inputs.target_permissions_boundary }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -86,9 +115,11 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         env:
           REGION: ${{ github.event.inputs.region }}
+          ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
+          ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
         run: |
           set -euo pipefail
-          # Only the two that decide *where* and *as whom*. Every other variable
+          # Only the ones that decide *where* and *as whom*. Every other variable
           # has a default, and none of them affect what gets destroyed: terraform
           # removes what the state lists, and the rest only ever fed resource
           # names and tags. Passing the provision's values here would mean
@@ -96,7 +127,9 @@ jobs:
           # like a successful destroy that left the machine running.
           terraform destroy -input=false -auto-approve \
             -var "aws_profile=" \
-            -var "region=${REGION}"
+            -var "region=${REGION}" \
+            -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
+            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}"
 
       - name: Confirm nothing is left
         # Runs even when the destroy failed, which is exactly when it is worth

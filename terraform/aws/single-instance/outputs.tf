@@ -29,12 +29,12 @@ output "security_group_id" {
 
 output "key_name" {
   description = "AWS key pair name"
-  value       = aws_key_pair.this.key_name
+  value       = var.create_ssh_key_pair ? aws_key_pair.this[0].key_name : ""
 }
 
 output "ssh_key_path" {
   description = "Local path to the generated SSH private key (empty if operator supplied ssh_public_key)"
-  value       = var.ssh_public_key == "" ? var.ssh_key_output_path : ""
+  value       = var.create_ssh_key_pair && var.ssh_public_key == "" ? var.ssh_key_output_path : ""
 }
 
 output "ssh_user" {
