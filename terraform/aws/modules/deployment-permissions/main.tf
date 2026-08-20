@@ -1,3 +1,10 @@
+locals {
+  role_arn_pattern             = "arn:${var.partition}:iam::${var.account_id}:role/${var.resource_prefix}*"
+  instance_profile_arn_pattern = "arn:${var.partition}:iam::${var.account_id}:instance-profile/${var.resource_prefix}*"
+  policy_arn_pattern           = "arn:${var.partition}:iam::${var.account_id}:policy/${var.resource_prefix}*"
+  bucket_arn_pattern           = "arn:${var.partition}:s3:::${var.resource_prefix}*"
+}
+
 # What Caytu may do in this account.
 #
 # Derived from terraform/aws/single-instance, so it is the set that stack
@@ -124,16 +131,19 @@ data "aws_iam_policy_document" "provisioner" {
 
   # Every role it creates carries the boundary, or the call is refused. This is
   # what keeps CreateRole from being a way out of this policy.
-  statement {
-    sid       = "TheBoundaryIsNotOptional"
-    effect    = "Deny"
-    actions   = ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"]
-    resources = [local.role_arn_pattern]
+  dynamic "statement" {
+    for_each = var.boundary_arn != "" ? [1] : []
+    content {
+      sid       = "TheBoundaryIsNotOptional"
+      effect    = "Deny"
+      actions   = ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"]
+      resources = [local.role_arn_pattern]
 
-    condition {
-      test     = "StringNotEquals"
-      variable = "iam:PermissionsBoundary"
-      values   = [aws_iam_policy.boundary.arn]
+      condition {
+        test     = "StringNotEquals"
+        variable = "iam:PermissionsBoundary"
+        values   = [var.boundary_arn]
+      }
     }
   }
 
@@ -176,7 +186,7 @@ data "aws_iam_policy_document" "provisioner" {
     sid       = "ReadManagedPolicies"
     effect    = "Allow"
     actions   = ["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"]
-    resources = ["arn:${local.partition}:iam::aws:policy/*", aws_iam_policy.boundary.arn]
+    resources = compact(["arn:${var.partition}:iam::aws:policy/*", var.boundary_arn])
   }
 
   # Handing a role to EC2 and to IoT, and to nothing else.
@@ -211,7 +221,7 @@ data "aws_iam_policy_document" "provisioner" {
       "ecr:UntagResource",
       "ecr:ListTagsForResource",
     ]
-    resources = ["arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/${local.prefix}*"]
+    resources = ["arn:${var.partition}:ecr:${var.region}:${var.account_id}:repository/${var.resource_prefix}*"]
   }
 
   statement {
@@ -272,8 +282,8 @@ data "aws_iam_policy_document" "provisioner" {
       "iot:ListTagsForResource",
     ]
     resources = [
-      "arn:${local.partition}:iot:${var.region}:${local.account_id}:policy/${local.prefix}*",
-      "arn:${local.partition}:iot:${var.region}:${local.account_id}:rolealias/${local.prefix}*",
+      "arn:${var.partition}:iot:${var.region}:${var.account_id}:policy/${var.resource_prefix}*",
+      "arn:${var.partition}:iot:${var.region}:${var.account_id}:rolealias/${var.resource_prefix}*",
     ]
   }
 
@@ -296,7 +306,7 @@ data "aws_iam_policy_document" "provisioner" {
       sid       = "DnsRecords"
       effect    = "Allow"
       actions   = ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets", "route53:GetHostedZone"]
-      resources = length(var.route53_zone_ids) > 0 ? [for z in var.route53_zone_ids : "arn:${local.partition}:route53:::hostedzone/${z}"] : ["arn:${local.partition}:route53:::hostedzone/*"]
+      resources = length(var.route53_zone_ids) > 0 ? [for z in var.route53_zone_ids : "arn:${var.partition}:route53:::hostedzone/${z}"] : ["arn:${var.partition}:route53:::hostedzone/*"]
     }
   }
 
@@ -311,8 +321,3 @@ data "aws_iam_policy_document" "provisioner" {
   }
 }
 
-resource "aws_iam_policy" "provisioner" {
-  name        = var.role_name
-  description = "Exactly what Caytu's single-instance Terraform needs in this account."
-  policy      = data.aws_iam_policy_document.provisioner.json
-}
