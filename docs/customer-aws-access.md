@@ -1,121 +1,53 @@
-# Giving Caytu access to your AWS account
+# Customer AWS access
 
-You are about to run a Caytu deployment in your own AWS account. Caytu builds
-and maintains the machine; you own the account and the bill.
+A customer running a deployment in their own AWS account has to let our
+pipeline in. This is how that happens, and what each piece is for.
 
-This is the one thing we need from you, and it takes about ten minutes. At the
-end you paste four values into the Caytu console and you are done.
+## What the customer does
 
-We never receive a key, a password, or a console login.
+One CloudFormation stack, from the console, in the region the deployment will
+run in. Nothing else: no repository to clone, no Terraform to install, and no
+ARN to edit by hand, because CloudFormation fills in the account and the region
+itself.
 
-## Why a role and not a key
+They read [the guide the console links to](../../Caytu-Infra/web-v2/src/features/billings/pages/aws-access-guide-page.tsx),
+which is served publicly at `/docs/aws-access` because their cloud team has no
+Caytu login. It hands them
+[`cloudformation/caytu-provisioner-access.yaml`](../cloudformation/caytu-provisioner-access.yaml)
+to download, walks the five console steps, and shows the full template inline
+so their security team can read it without going anywhere else.
 
-An access key is a password that works until somebody remembers to delete it. A
-role is different: our pipeline asks AWS for a session each time it runs, the
-session lasts one hour, and you can revoke it in one click by deleting the role.
-Nothing of yours ever sits in our systems.
+They send back four values: account number, region, role ARN, and permissions
+boundary ARN. The fifth value, the external id, goes the other way: the console
+generates it and they paste it into the stack.
 
-## What you create
+## Why the external id comes from us
 
-One role, and one permissions boundary.
+It is what stops anyone else assuming that role, so leaving customers to invent
+one means some of them will pick something weak or reuse one. Generating it is
+cheap and it is our failure if it is bad.
 
-The **role** is what our pipeline assumes. Its trust policy names exactly one
-identity on our side and demands a shared value called an external id, so no
-other AWS customer can use it, and nothing else in our account can either.
+It is not a credential on its own. The trust policy names exactly one principal,
+our provisioning role, and only a run of our own pipeline can assume that. The
+external id closes the confused-deputy case and nothing else.
 
-The **permissions boundary** is the ceiling. Our pipeline has to create one IAM
-role, because the EC2 machine needs an identity to pull images and to be
-reachable through Session Manager. Creating roles is the only permission on the
-list that could otherwise be used to widen access, so the policy refuses to
-create a role unless this boundary is attached to it. The boundary allows the
-machine to pull images, use Session Manager, read and write its own storage, and
-talk to IoT Core and Kinesis Video. It denies all of `iam:*`, which closes that
-door for good.
+## Where the permissions actually live
 
-## Three limits, all at once
+[`terraform/aws/modules/deployment-permissions`](../terraform/aws/modules/deployment-permissions)
+is the single definition, used by our own pipeline role and by the customer
+role. The CloudFormation template is generated from it. Two hand-maintained
+copies would drift, and the drift would only show up as a failed apply on a
+customer's machine.
 
-Everything we can do in your account is bounded three ways:
+[`terraform/aws/customer-onboarding`](../terraform/aws/customer-onboarding) is
+the same thing as a Terraform module. It stays for a customer whose platform
+team would rather run Terraform than click through a console, and as the thing
+the template is checked against.
 
-**One region.** Every call outside the region you choose is refused, including
-by us.
+## After a customer is onboarded
 
-**One name prefix.** We can only create, read or delete resources whose name
-starts with `caytu-`. Anything else you run is invisible to us. We cannot list
-your buckets, read your databases, or see your other instances.
-
-**The boundary above.** Any role we create is capped by it, and we are not
-allowed to remove or replace it.
-
-## Run it
-
-You need Terraform 1.6 or newer, and credentials for the account with permission
-to create IAM roles.
-
-```bash
-git clone <the repository Caytu shared with you>
-cd terraform/aws/customer-onboarding
-
-cp example.tfvars terraform.tfvars
-```
-
-Edit two values in `terraform.tfvars`:
-
-```hcl
-# Where the deployment will run.
-region = "eu-west-3"
-
-# The Caytu identity allowed to assume the role. Caytu gives you this.
-caytu_principal_arns = ["arn:aws:iam::688544396352:role/caytu-client-infra-provisioning"]
-```
-
-Then:
-
-```bash
-terraform init
-terraform plan      # read it: four resources, all IAM, nothing else
-terraform apply
-```
-
-## What to send back
-
-```bash
-terraform output what_to_send_caytu
-terraform output -raw external_id
-```
-
-Four values go into the Caytu console:
-
-| Value | What it is |
-|---|---|
-| `account_id` | Your AWS account number |
-| `region` | The region you chose above |
-| `provisioner_role_arn` | The role we assume |
-| `external_id` | The value your trust policy demands from us |
-| `permissions_boundary_arn` | The ceiling on any role we create |
-
-The external id is the one worth sending privately rather than in the same email
-as the rest.
-
-## What we build once you have
-
-One EC2 machine and a fixed public address, a security group, an identity for
-the machine, the container registries for the application, a bucket for backups,
-and an IoT policy so your devices can connect. Every one of them is named
-`caytu-...`, so you can find them all in one filter and see nothing of ours
-mixed into the rest of your account.
-
-## Checking on us
-
-Everything we do is a normal AWS API call from a named role, so it all lands in
-CloudTrail under your account. Filter on the role name to see every action we
-have ever taken.
-
-## Turning it off
-
-```bash
-terraform destroy
-```
-
-The role is gone and we can no longer reach the account. The deployment itself
-keeps running: ask Caytu to tear it down first if you want it removed, or delete
-the `caytu-` resources yourself afterwards.
+Add their account to
+[`terraform/aws/distribution`](../terraform/aws/distribution) and apply, so
+their machine can pull our images and fetch the host agent. Nothing works until
+that is done, and the failure looks like an image pull error on a machine that
+otherwise came up fine.
