@@ -41,9 +41,14 @@ on:
         description: "Left empty to use the default for the architecture"
         required: false
         default: ""
+      target_account_id:
+        description: "AWS account to provision into. Empty means our own, which is the Caytu-hosted case."
+        required: false
+        default: ""
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   TF_DIR: terraform/aws/single-instance
@@ -64,12 +69,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # OIDC, not a stored key. The token is minted for this run and expires
+      # with it, so there is no credential left to leak between provisions.
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_PROVISIONING_ROLE_ARN }}
+          role-session-name: provision-${{ github.event.inputs.subdomain }}
           aws-region: ${{ github.event.inputs.region }}
+
+      # Terraform steps into the customer account itself, through the provider.
+      - name: Work out whose account this is
+        id: target
+        uses: ./.github/actions/target-account
+        with:
+          target_account_id: ${{ github.event.inputs.target_account_id }}
+          accounts_json: ${{ secrets.CUSTOMER_PROVISIONER_ACCOUNTS }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -104,6 +119,10 @@ jobs:
           INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
+          ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+          PERMISSIONS_BOUNDARY: ${{ steps.target.outputs.permissions_boundary }}
+          CREATE_SSH_KEY_PAIR: ${{ steps.target.outputs.create_ssh_key_pair }}
         run: |
           set -euo pipefail
           # aws_profile empty on purpose: a runner has environment credentials
@@ -121,8 +140,14 @@ jobs:
             extra+=(-var "instance_type=${INSTANCE_TYPE}")
           fi
 
+          # Empty on the hosted path, which leaves the provider using this
+          # run's own credentials exactly as before.
           terraform plan -input=false -out=tfplan \
             -var "aws_profile=" \
+            -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
+            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}" \
+            -var "iam_permissions_boundary=${PERMISSIONS_BOUNDARY}" \
+            -var "create_ssh_key_pair=${CREATE_SSH_KEY_PAIR}" \
             -var "region=${REGION}" \
             -var "environment=production" \
             -var "name_prefix=caytu-${SUBDOMAIN}" \
