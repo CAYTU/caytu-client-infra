@@ -32,6 +32,10 @@ on:
         description: "AWS region the machine is in"
         required: true
         default: "us-east-1"
+      target_account_id:
+        description: "AWS account the machine lives in. Empty means our own."
+        required: false
+        default: ""
       subdomain:
         description: "Hostname label, for the run name only"
         required: false
@@ -39,6 +43,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
   TF_DIR: terraform/aws/single-instance
@@ -57,9 +62,16 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ vars.AWS_PROVISIONING_ROLE_ARN }}
+          role-session-name: power-${{ github.event.inputs.instance_id }}
           aws-region: ${{ github.event.inputs.region }}
+
+      - name: Work out whose account this is
+        id: target
+        uses: ./.github/actions/target-account
+        with:
+          target_account_id: ${{ github.event.inputs.target_account_id }}
+          accounts_json: ${{ secrets.CUSTOMER_PROVISIONER_ACCOUNTS }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -91,6 +103,18 @@ jobs:
           fi
           echo "ec2=$ec2" >> "$GITHUB_OUTPUT"
           echo "machine: $ec2"
+
+      # After the state read, not before it. The state bucket is ours and the
+      # machine may not be, so hopping too early loses access to the state.
+      - name: Step into the customer account
+        if: steps.target.outputs.assume_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.target.outputs.assume_role_arn }}
+          role-external-id: ${{ steps.target.outputs.external_id }}
+          role-session-name: power-${{ github.event.inputs.instance_id }}
+          role-chaining: true
+          aws-region: ${{ github.event.inputs.region }}
 
       - name: ${{ github.event.inputs.action }}
         env:
