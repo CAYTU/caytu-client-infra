@@ -40,12 +40,40 @@ provider "aws" {
   # ~/.aws/credentials that does not exist on a runner.
   profile = var.aws_profile != "" ? var.aws_profile : null
 
+  # Present only when the machine belongs in someone else's account. Without
+  # it this is the Caytu-hosted path, unchanged.
+  dynamic "assume_role" {
+    for_each = var.assume_role_arn != "" ? [1] : []
+    content {
+      role_arn     = var.assume_role_arn
+      external_id  = var.assume_role_external_id != "" ? var.assume_role_external_id : null
+      session_name = "caytu-provision-${var.name_prefix}"
+    }
+  }
+
   default_tags {
     tags = {
       Project     = "caytu-client"
       ManagedBy   = "terraform"
       Deployment  = "single-instance"
       Environment = var.environment
+    }
+  }
+}
+
+# Route 53 separately, because the name and the machine do not have to live in
+# the same account. A caytu.link record stays ours to write even when the EC2
+# instance is provisioned in a customer account through assume_role above.
+provider "aws" {
+  alias   = "dns"
+  region  = var.dns_region
+  profile = var.aws_profile != "" ? var.aws_profile : null
+
+  dynamic "assume_role" {
+    for_each = var.dns_assume_role_arn != "" ? [1] : []
+    content {
+      role_arn     = var.dns_assume_role_arn
+      session_name = "caytu-dns-${var.name_prefix}"
     }
   }
 }
