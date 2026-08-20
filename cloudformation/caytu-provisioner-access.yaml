@@ -1,0 +1,478 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Lets Caytu build and maintain one caytu-client deployment in this account.
+  Creates a role Caytu assumes and the permissions boundary that caps it.
+  Nothing else, and no application resources.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: From the Caytu console }
+        Parameters: [ExternalId, CaytuPrincipalArn]
+
+Parameters:
+  ExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: >
+      Copy this from the Caytu console. It is what stops any other caller
+      using this role.
+
+  CaytuPrincipalArn:
+    Type: String
+    Default: "arn:aws:iam::688544396352:role/caytu-client-infra-provisioning"
+    Description: >
+      The one Caytu identity allowed to assume the role. Leave as shown unless
+      Caytu tells you otherwise.
+
+  RoleName:
+    Type: String
+    Default: CaytuProvisioner
+
+Resources:
+  # The ceiling on every role Caytu creates here. The policy below refuses
+  # CreateRole unless this is attached, so it cannot be worked around.
+  CaytuBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "${RoleName}Boundary"
+      Description: Ceiling for every role the Caytu provisioner creates here.
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "PullImages",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:ListImages",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:GetAuthorizationToken",
+                "ecr:DescribeRepositories",
+                "ecr:DescribeImages",
+                "ecr:BatchGetImage",
+                "ecr:BatchCheckLayerAvailability"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "SessionManager",
+              "Effect": "Allow",
+              "Action": [
+                "ssmmessages:OpenDataChannel",
+                "ssmmessages:OpenControlChannel",
+                "ssmmessages:CreateDataChannel",
+                "ssmmessages:CreateControlChannel",
+                "ssm:UpdateInstanceInformation",
+                "ssm:UpdateInstanceAssociationStatus",
+                "ssm:UpdateAssociationStatus",
+                "ssm:PutInventory",
+                "ssm:PutConfigurePackageResult",
+                "ssm:PutComplianceItems",
+                "ssm:ListInstanceAssociations",
+                "ssm:GetManifest",
+                "ssm:GetDocument",
+                "ssm:GetDeployablePatchSnapshotForInstance",
+                "ssm:DescribeInstanceProperties",
+                "ssm:DescribeDocumentParameters",
+                "ssm:DescribeDocument",
+                "ec2messages:SendReply",
+                "ec2messages:GetMessages",
+                "ec2messages:GetEndpoint",
+                "ec2messages:FailMessage",
+                "ec2messages:DeleteMessage",
+                "ec2messages:AcknowledgeMessage"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "AgentAndBackups",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:ListMultipartUploadParts",
+                "s3:ListBucket",
+                "s3:GetObjectVersion",
+                "s3:GetObject",
+                "s3:DeleteObjectVersion",
+                "s3:DeleteObject",
+                "s3:AbortMultipartUpload"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "DeviceMessagingAndVideo",
+              "Effect": "Allow",
+              "Action": [
+                "kinesisvideo:ListSignalingChannels",
+                "kinesisvideo:GetSignalingChannelEndpoint",
+                "kinesisvideo:GetIceServerConfig",
+                "kinesisvideo:DescribeSignalingChannel",
+                "kinesisvideo:DeleteSignalingChannel",
+                "kinesisvideo:CreateSignalingChannel",
+                "kinesisvideo:ConnectAsViewer",
+                "kinesisvideo:ConnectAsMaster",
+                "iot:Subscribe",
+                "iot:Receive",
+                "iot:Publish",
+                "iot:ListThings",
+                "iot:DescribeThing",
+                "iot:DescribeEndpoint",
+                "iot:CreateThing",
+                "iot:Connect",
+                "iot:AssumeRoleWithCertificate"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ReadEncryptedVolumesAndObjects",
+              "Effect": "Allow",
+              "Action": [
+                "kms:GenerateDataKeyWithoutPlaintext",
+                "kms:GenerateDataKey",
+                "kms:DescribeKey",
+                "kms:Decrypt"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "OwnLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:PutLogEvents",
+                "logs:DescribeLogStreams",
+                "logs:CreateLogStream"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "NeverIdentityOrBilling",
+              "Effect": "Deny",
+              "Action": [
+                "sts:AssumeRole",
+                "organizations:*",
+                "iam:*",
+                "billing:*",
+                "aws-portal:*",
+                "account:*"
+              ],
+              "Resource": "*"
+            }
+          ]
+        }
+
+  CaytuProvisionerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Assumed by Caytu to build and maintain the caytu-client deployment.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Two conditions, not one. The account alone would let anything in
+          # Caytu's account assume this; the external id is what stops that.
+          - Effect: Allow
+            Principal:
+              AWS: !Ref CaytuPrincipalArn
+            Action: [sts:AssumeRole, sts:TagSession]
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: !Ref RoleName
+          PolicyDocument: !Sub |
+            {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "WhoAmI",
+                  "Effect": "Allow",
+                  "Action": "sts:GetCallerIdentity",
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "InspectTheAccount",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:GetEbsEncryptionByDefault",
+                    "ec2:GetEbsDefaultKmsKeyId",
+                    "ec2:Describe*"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "${AWS::Region}"
+                    }
+                  }
+                },
+                {
+                  "Sid": "RunTheMachine",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+                    "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+                    "ec2:UnmonitorInstances",
+                    "ec2:TerminateInstances",
+                    "ec2:StopInstances",
+                    "ec2:StartInstances",
+                    "ec2:RunInstances",
+                    "ec2:RevokeSecurityGroupIngress",
+                    "ec2:RevokeSecurityGroupEgress",
+                    "ec2:ReleaseAddress",
+                    "ec2:MonitorInstances",
+                    "ec2:ModifyVolume",
+                    "ec2:ModifySecurityGroupRules",
+                    "ec2:ModifyInstanceMetadataOptions",
+                    "ec2:ModifyInstanceAttribute",
+                    "ec2:ImportKeyPair",
+                    "ec2:DisassociateAddress",
+                    "ec2:DetachVolume",
+                    "ec2:DeleteVolume",
+                    "ec2:DeleteTags",
+                    "ec2:DeleteSecurityGroup",
+                    "ec2:DeleteKeyPair",
+                    "ec2:CreateVolume",
+                    "ec2:CreateTags",
+                    "ec2:CreateSecurityGroup",
+                    "ec2:CreateKeyPair",
+                    "ec2:AuthorizeSecurityGroupIngress",
+                    "ec2:AuthorizeSecurityGroupEgress",
+                    "ec2:AttachVolume",
+                    "ec2:AssociateAddress",
+                    "ec2:AllocateAddress"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "${AWS::Region}"
+                    }
+                  }
+                },
+                {
+                  "Sid": "EncryptTheRootVolume",
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:ReEncryptTo",
+                    "kms:ReEncryptFrom",
+                    "kms:GenerateDataKeyWithoutPlaintext",
+                    "kms:DescribeKey",
+                    "kms:Decrypt",
+                    "kms:CreateGrant"
+                  ],
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": [
+                        "ec2.${AWS::Region}.amazonaws.com",
+                        "s3.${AWS::Region}.amazonaws.com"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "ManageOurOwnRoles",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:UpdateAssumeRolePolicy",
+                    "iam:UntagRole",
+                    "iam:TagRole",
+                    "iam:PutRolePolicy",
+                    "iam:ListRoleTags",
+                    "iam:ListRolePolicies",
+                    "iam:ListInstanceProfilesForRole",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:GetRolePolicy",
+                    "iam:GetRole",
+                    "iam:DetachRolePolicy",
+                    "iam:DeleteRolePolicy",
+                    "iam:DeleteRole",
+                    "iam:CreateRole",
+                    "iam:AttachRolePolicy"
+                  ],
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*"
+                },
+                {
+                  "Sid": "TheBoundaryIsNotOptional",
+                  "Effect": "Deny",
+                  "Action": "iam:CreateRole",
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+                  "Condition": {
+                    "StringNotEquals": {
+                      "iam:PermissionsBoundary": "${CaytuBoundary}"
+                    }
+                  }
+                },
+                {
+                  "Sid": "ManageOurOwnInstanceProfiles",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:UntagInstanceProfile",
+                    "iam:TagInstanceProfile",
+                    "iam:RemoveRoleFromInstanceProfile",
+                    "iam:GetInstanceProfile",
+                    "iam:DeleteInstanceProfile",
+                    "iam:CreateInstanceProfile",
+                    "iam:AddRoleToInstanceProfile"
+                  ],
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:instance-profile/caytu-*"
+                },
+                {
+                  "Sid": "ManageOurOwnPolicies",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:UntagPolicy",
+                    "iam:TagPolicy",
+                    "iam:ListPolicyVersions",
+                    "iam:ListEntitiesForPolicy",
+                    "iam:GetPolicyVersion",
+                    "iam:GetPolicy",
+                    "iam:DeletePolicyVersion",
+                    "iam:DeletePolicy",
+                    "iam:CreatePolicyVersion",
+                    "iam:CreatePolicy"
+                  ],
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:policy/caytu-*"
+                },
+                {
+                  "Sid": "ReadManagedPolicies",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iam:ListPolicyVersions",
+                    "iam:GetPolicyVersion",
+                    "iam:GetPolicy"
+                  ],
+                  "Resource": [
+                    "arn:aws:iam::aws:policy/*",
+                    "${CaytuBoundary}"
+                  ]
+                },
+                {
+                  "Sid": "AttachRolesToServices",
+                  "Effect": "Allow",
+                  "Action": "iam:PassRole",
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+                  "Condition": {
+                    "StringEquals": {
+                      "iam:PassedToService": [
+                        "ec2.amazonaws.com",
+                        "credentials.iot.amazonaws.com"
+                      ]
+                    }
+                  }
+                },
+                {
+                  "Sid": "OurRegistry",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:UntagResource",
+                    "ecr:TagResource",
+                    "ecr:SetRepositoryPolicy",
+                    "ecr:PutLifecyclePolicy",
+                    "ecr:PutImageScanningConfiguration",
+                    "ecr:ListTagsForResource",
+                    "ecr:GetRepositoryPolicy",
+                    "ecr:GetLifecyclePolicy",
+                    "ecr:DescribeRepositories",
+                    "ecr:DeleteRepositoryPolicy",
+                    "ecr:DeleteRepository",
+                    "ecr:DeleteLifecyclePolicy",
+                    "ecr:CreateRepository"
+                  ],
+                  "Resource": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/caytu-*"
+                },
+                {
+                  "Sid": "DescribeRegistry",
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:GetAuthorizationToken",
+                    "ecr:DescribeRegistry"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Sid": "BackupBucket",
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:PutLifecycleConfiguration",
+                    "s3:PutEncryptionConfiguration",
+                    "s3:PutBucketVersioning",
+                    "s3:PutBucketTagging",
+                    "s3:PutBucketPublicAccessBlock",
+                    "s3:PutBucketPolicy",
+                    "s3:ListBucket",
+                    "s3:GetReplicationConfiguration",
+                    "s3:GetLifecycleConfiguration",
+                    "s3:GetEncryptionConfiguration",
+                    "s3:GetBucketWebsite",
+                    "s3:GetBucketVersioning",
+                    "s3:GetBucketTagging",
+                    "s3:GetBucketRequestPayment",
+                    "s3:GetBucketPublicAccessBlock",
+                    "s3:GetBucketPolicy",
+                    "s3:GetBucketObjectLockConfiguration",
+                    "s3:GetBucketLogging",
+                    "s3:GetBucketLocation",
+                    "s3:GetBucketCORS",
+                    "s3:GetBucketAcl",
+                    "s3:GetAccelerateConfiguration",
+                    "s3:DeleteBucketPolicy",
+                    "s3:DeleteBucket",
+                    "s3:CreateBucket"
+                  ],
+                  "Resource": [
+                    "arn:aws:s3:::caytu-*/*",
+                    "arn:aws:s3:::caytu-*"
+                  ]
+                },
+                {
+                  "Sid": "DeviceAuth",
+                  "Effect": "Allow",
+                  "Action": [
+                    "iot:UpdateRoleAlias",
+                    "iot:UntagResource",
+                    "iot:TagResource",
+                    "iot:ListTagsForResource",
+                    "iot:ListPolicyVersions",
+                    "iot:GetPolicy",
+                    "iot:DescribeRoleAlias",
+                    "iot:DeleteRoleAlias",
+                    "iot:DeletePolicyVersion",
+                    "iot:DeletePolicy",
+                    "iot:CreateRoleAlias",
+                    "iot:CreatePolicy"
+                  ],
+                  "Resource": [
+                    "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:rolealias/caytu-*",
+                    "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:policy/caytu-*"
+                  ]
+                },
+                {
+                  "Sid": "IotEndpoint",
+                  "Effect": "Allow",
+                  "Action": "iot:DescribeEndpoint",
+                  "Resource": "*",
+                  "Condition": {
+                    "StringEquals": {
+                      "aws:RequestedRegion": "${AWS::Region}"
+                    }
+                  }
+                }
+              ]
+            }
+
+Outputs:
+  AwsAccountNumber:
+    Description: Paste into the Caytu console.
+    Value: !Ref AWS::AccountId
+  Region:
+    Description: The only region this access is valid in.
+    Value: !Ref AWS::Region
+  RoleArn:
+    Description: Paste into the Caytu console.
+    Value: !GetAtt CaytuProvisionerRole.Arn
+  PermissionsBoundaryArn:
+    Description: Paste into the Caytu console.
+    Value: !Ref CaytuBoundary

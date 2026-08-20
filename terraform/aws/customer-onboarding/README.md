@@ -1,10 +1,17 @@
 # Giving Caytu access to your AWS account
 
-Run this once, in the account where the deployment will live. It creates one
-role Caytu can assume and one permissions boundary that caps what that role can
-ever do. It creates nothing else, and it does not deploy the application.
+The Terraform form of the access a customer grants us. Most customers never see
+this: the console hands them
+[a CloudFormation template](../../../cloudformation/caytu-provisioner-access.yaml)
+instead, generated from the same permission set, because asking a cloud team to
+clone a private repository and install Terraform is friction we do not need.
 
-You keep the account. Caytu never receives a key, a password, or a console
+This stays for two reasons. A customer whose platform team would rather run
+Terraform can, and it is what the generated template is checked against.
+
+It creates one role Caytu can assume and one permissions boundary that caps what
+that role can ever do. Nothing else, and it does not deploy the application. You
+keep the account, and Caytu never receives a key, a password, or a console
 login.
 
 ## What you need
