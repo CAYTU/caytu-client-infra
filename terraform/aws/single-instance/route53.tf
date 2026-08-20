@@ -8,20 +8,26 @@
 #                     output) before the record resolves anywhere.
 #
 # With enable_route53 = false this file creates nothing at all.
+#
+# Everything here runs through the aws.dns provider, not the default one. The
+# machine can sit in a customer account while the caytu.link record stays ours
+# to write.
 
 locals {
   route53_enabled = var.enable_route53 && var.domain_name != ""
 }
 
 data "aws_route53_zone" "this" {
+  provider     = aws.dns
   count        = local.route53_enabled && !var.create_route53_zone ? 1 : 0
   name         = var.route53_zone_name
   private_zone = false
 }
 
 resource "aws_route53_zone" "this" {
-  count = local.route53_enabled && var.create_route53_zone ? 1 : 0
-  name  = var.route53_zone_name
+  provider = aws.dns
+  count    = local.route53_enabled && var.create_route53_zone ? 1 : 0
+  name     = var.route53_zone_name
 }
 
 locals {
@@ -33,6 +39,7 @@ locals {
 # A plain A record, not an alias — alias targets only work for AWS-managed
 # endpoints (ALB, CloudFront, S3 website), not a raw EIP on an EC2 instance.
 resource "aws_route53_record" "a" {
+  provider        = aws.dns
   count           = local.route53_enabled ? 1 : 0
   zone_id         = local.route53_zone_id
   name            = var.domain_name

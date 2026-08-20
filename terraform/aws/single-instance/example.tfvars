@@ -47,3 +47,19 @@ backup_bucket_lifecycle_days = 90
 # --- IoT ----------------------------------------------------------------------
 enable_iot                   = true
 iot_role_alias_ttl_seconds   = 3600
+
+# --- Deploying into an account we do not own ----------------------------------
+# All empty on a Caytu-hosted apply, which is the default behaviour.
+# The customer creates these by running terraform/aws/customer-onboarding once.
+assume_role_arn          = ""
+assume_role_external_id  = ""
+iam_permissions_boundary = ""
+
+# No SSH key at all. Session Manager is already on the instance role, and a
+# generated key would otherwise sit in Terraform state forever.
+create_ssh_key_pair = true
+
+# Route 53 runs through its own provider, so the name can stay in Caytu's
+# account while the machine lives in the customer's.
+dns_assume_role_arn = ""
+dns_region          = "us-east-1"
