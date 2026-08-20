@@ -15,11 +15,26 @@ locals {
   external_id = var.external_id != "" ? var.external_id : random_password.external_id[0].result
 
   prefix = var.resource_prefix
+}
 
-  role_arn_pattern             = "arn:${local.partition}:iam::${local.account_id}:role/${local.prefix}*"
-  instance_profile_arn_pattern = "arn:${local.partition}:iam::${local.account_id}:instance-profile/${local.prefix}*"
-  policy_arn_pattern           = "arn:${local.partition}:iam::${local.account_id}:policy/${local.prefix}*"
-  bucket_arn_pattern           = "arn:${local.partition}:s3:::${local.prefix}*"
+# Shared with our own pipeline role, so the two can never disagree about what
+# provisioning actually needs.
+module "permissions" {
+  source = "../modules/deployment-permissions"
+
+  account_id       = local.account_id
+  partition        = local.partition
+  region           = var.region
+  resource_prefix  = local.prefix
+  boundary_arn     = aws_iam_policy.boundary.arn
+  allow_route53    = var.allow_route53
+  route53_zone_ids = var.route53_zone_ids
+}
+
+resource "aws_iam_policy" "provisioner" {
+  name        = var.role_name
+  description = "Exactly what Caytu's single-instance Terraform needs in this account."
+  policy      = module.permissions.policy_json
 }
 
 # Two conditions, not one. The account alone lets any principal in Caytu's
