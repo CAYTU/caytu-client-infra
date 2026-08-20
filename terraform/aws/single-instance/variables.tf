@@ -231,3 +231,49 @@ variable "caytu_platform_url" {
   type        = string
   default     = ""
 }
+
+# -----------------------------------------------------------------------------
+# Deploying into an account we do not own
+# -----------------------------------------------------------------------------
+# All three default to empty so a Caytu-hosted apply behaves exactly as before.
+
+variable "assume_role_arn" {
+  description = "Role to assume in the target account. Empty runs with the caller's own credentials, which is the Caytu-hosted case."
+  type        = string
+  default     = ""
+}
+
+variable "assume_role_external_id" {
+  description = "External id the target account requires. Only meaningful with assume_role_arn."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "iam_permissions_boundary" {
+  description = "Boundary to attach to every role created here. The customer account refuses CreateRole without it."
+  type        = string
+  default     = ""
+}
+
+variable "create_ssh_key_pair" {
+  description = "Generate and register an SSH key. Off means the box is reachable through Session Manager only, and no private key lands in state."
+  type        = bool
+  default     = true
+}
+
+# -----------------------------------------------------------------------------
+# DNS, which may live in a different account than the machine
+# -----------------------------------------------------------------------------
+
+variable "dns_assume_role_arn" {
+  description = "Role to assume for Route 53 only. Empty means the zone is reachable with the caller's own credentials."
+  type        = string
+  default     = ""
+}
+
+variable "dns_region" {
+  description = "Region used for the Route 53 provider. Route 53 is global; this only picks an endpoint."
+  type        = string
+  default     = "us-east-1"
+}
