@@ -45,6 +45,18 @@ on:
         description: "AWS account to provision into. Empty means our own, which is the Caytu-hosted case."
         required: false
         default: ""
+      target_role_arn:
+        description: "Role to assume in that account. Required when target_account_id is set."
+        required: false
+        default: ""
+      target_external_id:
+        description: "External id that account's trust policy demands."
+        required: false
+        default: ""
+      target_permissions_boundary:
+        description: "Boundary that account requires on every role we create."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -84,7 +96,9 @@ jobs:
         uses: ./.github/actions/target-account
         with:
           target_account_id: ${{ github.event.inputs.target_account_id }}
-          accounts_json: ${{ secrets.CUSTOMER_PROVISIONER_ACCOUNTS }}
+          role_arn: ${{ github.event.inputs.target_role_arn }}
+          external_id: ${{ github.event.inputs.target_external_id }}
+          permissions_boundary: ${{ github.event.inputs.target_permissions_boundary }}
 
       - uses: hashicorp/setup-terraform@v3
         with:

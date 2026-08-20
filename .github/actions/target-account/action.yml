@@ -1,16 +1,24 @@
 name: Work out whose account this is
 description: >
-  Turn a target AWS account id into the role to assume there. One secret holds
-  every customer, so onboarding one does not mean inventing a secret name that
-  somebody has to remember to create.
+  Turn the access the platform holds for a deployment into the values Terraform
+  and the AWS CLI need. Empty target means our own account, which is every
+  Caytu-hosted deployment.
 
 inputs:
   target_account_id:
-    description: "AWS account to act in. Empty means our own, which is the Caytu-hosted case."
+    description: "AWS account to act in. Empty means our own."
     required: false
     default: ""
-  accounts_json:
-    description: 'JSON: {"<account id>": {"role_arn": "...", "external_id": "...", "permissions_boundary": "..."}}'
+  role_arn:
+    description: "Role to assume there. Recorded when the deployment was created."
+    required: false
+    default: ""
+  external_id:
+    description: "Value that account's trust policy demands. Masked before anything can print it."
+    required: false
+    default: ""
+  permissions_boundary:
+    description: "Boundary that account requires on every role we create."
     required: false
     default: ""
 
@@ -19,10 +27,10 @@ outputs:
     description: "Empty on the hosted path."
     value: ${{ steps.resolve.outputs.assume_role_arn }}
   external_id:
-    description: "Masked in the log. Empty on the hosted path."
     value: ${{ steps.resolve.outputs.external_id }}
+    description: "Empty on the hosted path."
   permissions_boundary:
-    description: "Required on every role we create in a customer account."
+    description: "Empty on the hosted path."
     value: ${{ steps.resolve.outputs.permissions_boundary }}
   create_ssh_key_pair:
     description: "False for a customer account, where Session Manager is the way in."
@@ -35,9 +43,14 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target_account_id }}
-        ACCOUNTS: ${{ inputs.accounts_json }}
+        ROLE: ${{ inputs.role_arn }}
+        EXT: ${{ inputs.external_id }}
+        BOUNDARY: ${{ inputs.permissions_boundary }}
       run: |
         set -euo pipefail
+
+        # Masked first, before any check below can echo it into the log.
+        [ -n "$EXT" ] && echo "::add-mask::$EXT"
 
         if [ -z "$TARGET" ]; then
           echo "Caytu-hosted: acting in our own account."
@@ -50,34 +63,25 @@ runs:
           exit 0
         fi
 
-        test -n "$ACCOUNTS" || {
-          echo "::error::target account is $TARGET but no customer accounts are configured, so there is no role to assume."
-          exit 1
-        }
+        # All three, or the apply gets partway and fails on CreateRole.
+        for pair in "role_arn:$ROLE" "external_id:$EXT" "permissions_boundary:$BOUNDARY"; do
+          if [ -z "${pair#*:}" ]; then
+            echo "::error::account $TARGET was requested but ${pair%%:*} is empty. Re-check the access recorded on the deployment."
+            exit 1
+          fi
+        done
 
-        entry="$(printf '%s' "$ACCOUNTS" | jq -c --arg a "$TARGET" '.[$a] // empty')"
-        test -n "$entry" || {
-          echo "::error::account $TARGET is not configured. Onboard it first."
-          exit 1
-        }
-
-        role="$(printf '%s' "$entry" | jq -r '.role_arn // ""')"
-        ext="$(printf '%s' "$entry" | jq -r '.external_id // ""')"
-        boundary="$(printf '%s' "$entry" | jq -r '.permissions_boundary // ""')"
-
-        # Masked before any later step can echo it.
-        [ -n "$ext" ] && echo "::add-mask::$ext"
-
-        test -n "$role" || { echo "::error::account $TARGET has no role_arn recorded."; exit 1; }
-        test -n "$boundary" || {
-          echo "::error::account $TARGET has no permissions_boundary recorded. An apply there would be refused on CreateRole."
-          exit 1
-        }
+        # A role in a different account than the one asked for would provision
+        # somewhere nobody agreed to.
+        case "$ROLE" in
+          arn:aws*:iam::"$TARGET":role/*) ;;
+          *) echo "::error::the role is not in account $TARGET"; exit 1 ;;
+        esac
 
         {
-          echo "assume_role_arn=$role"
-          echo "external_id=$ext"
-          echo "permissions_boundary=$boundary"
+          echo "assume_role_arn=$ROLE"
+          echo "external_id=$EXT"
+          echo "permissions_boundary=$BOUNDARY"
           echo "create_ssh_key_pair=false"
         } >> "$GITHUB_OUTPUT"
-        echo "Acting in $TARGET via $role"
+        echo "Acting in $TARGET"
