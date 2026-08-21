@@ -13,9 +13,14 @@ variable "partition" {
   default = "aws"
 }
 
-variable "region" {
-  description = "The one region this permission set is valid in."
-  type        = string
+variable "regions" {
+  description = "Regions this permission set is valid in. A customer role gets one; our own pipeline needs every region we provision in."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.regions) > 0
+    error_message = "At least one region, or the role can do nothing anywhere."
+  }
 }
 
 variable "resource_prefix" {

@@ -34,7 +34,7 @@ data "aws_iam_policy_document" "provisioner" {
     condition {
       test     = "StringEquals"
       variable = "aws:RequestedRegion"
-      values   = [var.region]
+      values   = var.regions
     }
   }
 
@@ -79,7 +79,7 @@ data "aws_iam_policy_document" "provisioner" {
     condition {
       test     = "StringEquals"
       variable = "aws:RequestedRegion"
-      values   = [var.region]
+      values   = var.regions
     }
   }
 
@@ -101,7 +101,9 @@ data "aws_iam_policy_document" "provisioner" {
     condition {
       test     = "StringEquals"
       variable = "kms:ViaService"
-      values   = ["ec2.${var.region}.amazonaws.com", "s3.${var.region}.amazonaws.com"]
+      values = flatten([
+        for r in var.regions : ["ec2.${r}.amazonaws.com", "s3.${r}.amazonaws.com"]
+      ])
     }
   }
 
@@ -225,7 +227,10 @@ data "aws_iam_policy_document" "provisioner" {
       "ecr:UntagResource",
       "ecr:ListTagsForResource",
     ]
-    resources = ["arn:${var.partition}:ecr:${var.region}:${var.account_id}:repository/${var.resource_prefix}*"]
+    resources = [
+      for r in var.regions :
+      "arn:${var.partition}:ecr:${r}:${var.account_id}:repository/${var.resource_prefix}*"
+    ]
   }
 
   statement {
@@ -285,10 +290,12 @@ data "aws_iam_policy_document" "provisioner" {
       "iot:UntagResource",
       "iot:ListTagsForResource",
     ]
-    resources = [
-      "arn:${var.partition}:iot:${var.region}:${var.account_id}:policy/${var.resource_prefix}*",
-      "arn:${var.partition}:iot:${var.region}:${var.account_id}:rolealias/${var.resource_prefix}*",
-    ]
+    resources = flatten([
+      for r in var.regions : [
+        "arn:${var.partition}:iot:${r}:${var.account_id}:policy/${var.resource_prefix}*",
+        "arn:${var.partition}:iot:${r}:${var.account_id}:rolealias/${var.resource_prefix}*",
+      ]
+    ])
   }
 
   statement {
@@ -300,7 +307,7 @@ data "aws_iam_policy_document" "provisioner" {
     condition {
       test     = "StringEquals"
       variable = "aws:RequestedRegion"
-      values   = [var.region]
+      values   = var.regions
     }
   }
 

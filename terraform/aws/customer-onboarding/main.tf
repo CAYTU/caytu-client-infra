@@ -24,7 +24,7 @@ module "permissions" {
 
   account_id       = local.account_id
   partition        = local.partition
-  region           = var.region
+  regions          = [var.region]
   resource_prefix  = local.prefix
   boundary_arn     = aws_iam_policy.boundary.arn
   allow_route53    = var.allow_route53
