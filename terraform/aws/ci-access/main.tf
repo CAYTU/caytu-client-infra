@@ -8,7 +8,19 @@ locals {
   # Already present in the account, created for the other repository.
   oidc_provider_arn = "arn:${local.partition}:iam::${local.account_id}:oidc-provider/token.actions.githubusercontent.com"
 
-  subs = [for r in var.allowed_refs : "repo:${var.github_repository}:${r}"]
+  # Both forms. Which one a repository issues is a GitHub-side setting we do
+  # not control, and it can change under us, so trust either rather than
+  # discovering the difference as a failed deploy.
+  repo_forms = compact([
+    var.github_repository,
+    var.github_repository_immutable,
+  ])
+
+  subs = flatten([
+    for form in local.repo_forms : [
+      for r in var.allowed_refs : "repo:${form}:${r}"
+    ]
+  ])
 }
 
 data "aws_iam_policy_document" "github_assume" {
@@ -52,7 +64,7 @@ module "deployment" {
 
   account_id       = local.account_id
   partition        = local.partition
-  region           = var.region
+  regions          = var.deployment_regions
   resource_prefix  = var.resource_prefix
   boundary_arn     = ""
   allow_route53    = true
