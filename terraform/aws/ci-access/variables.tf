@@ -1,6 +1,13 @@
 variable "region" {
-  type    = string
-  default = "us-east-1"
+  description = "Region for this module's own provider and for the state lock table."
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "deployment_regions" {
+  description = "Every region we may provision a deployment in. A region left out here is denied at apply time, part way through building a machine."
+  type        = list(string)
+  default     = ["us-east-1", "eu-west-3"]
 }
 
 variable "aws_profile" {
@@ -12,6 +19,23 @@ variable "github_repository" {
   description = "Repository allowed to assume these roles, owner/name."
   type        = string
   default     = "CAYTU/caytu-client-infra"
+}
+
+variable "github_repository_immutable" {
+  description = <<-EOT
+    The same repository in the form GitHub actually puts in the token, with the
+    owner and repository ids embedded. GitHub issues this rather than the plain
+    name, so a trust policy matching only the plain form is refused with
+    "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+
+    Read it from:
+      gh api /repos/<owner>/<repo>/actions/oidc/customization/sub
+
+    Empty falls back to the plain name alone, which is what a repository still
+    issuing the old form needs.
+  EOT
+  type        = string
+  default     = "CAYTU@90842686/caytu-client-infra@1308651827"
 }
 
 variable "allowed_refs" {
