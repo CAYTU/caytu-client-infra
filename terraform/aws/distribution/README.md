@@ -1,52 +1,47 @@
 # Distribution access
 
-Runs in Caytu's account. It decides who may pull our images and who may fetch
-the host agent. Nothing here provisions a deployment.
+Runs in Caytu's account. It decides what in our artifact bucket is public and
+what is not. It no longer decides who may pull our images: provisioning does
+that now.
 
-Two things it fixes.
+## What it fixes
 
-**The agent tarball was public.** The bucket serves an apt repository and an
-installer, which are meant to be public, and one statement granted
-`s3:GetObject` on the whole bucket to everyone. That made `agent/latest.tar.gz`
-downloadable with no credentials, and that tarball is `scripts/` and `compose/`
-from this private repository. This splits the statement by prefix: the apt
-repository and installer stay public, the agent prefix is readable only by our
-own account and by accounts we name.
+The bucket serves an apt repository and an installer, which are meant to be
+public, and one statement granted `s3:GetObject` on the whole bucket to
+everyone. That made `agent/latest.tar.gz` downloadable with no credentials, and
+that tarball is `scripts/` and `compose/` from this private repository. This
+splits the statement by prefix and adds an explicit deny for anonymous callers
+on the agent prefix.
 
-**Customer accounts could not pull images.** A machine in another account
-already carries ECR read permission through its instance role, but our
-repositories never said that account may pull. This adds a repository policy per
-repository. Nothing is copied and no image leaves our registry.
+## Per-customer grants are not here
 
-## Adding a customer
+Onboarding a customer used to mean editing a variable and running an apply on
+somebody's laptop, which does not survive a second customer. Provisioning does
+it instead: `Provision.yml` runs
+[`scripts/grant-customer-artifacts.sh`](../../../scripts/grant-customer-artifacts.sh)
+with our own credentials before it steps into the customer account.
 
-```hcl
-customer_accounts = [
-  { account_id = "111122223333", label = "joj" },
-]
-```
+So this module reads the live policy and **keeps every `Customer<account>`
+statement it finds**. Rebuilding the policy from only what this module knows
+would revoke every customer the next time anyone applied it.
 
-Then:
+## Migrating off the old version
 
-```bash
-terraform init
-terraform plan -var-file=terraform.tfvars
-terraform apply
-```
-
-Only a role named `caytu-*` in that account is granted, which is what
-`terraform/aws/customer-onboarding` creates. Their other principals get nothing.
-
-## First apply
-
-The bucket policy already exists and is not in state, so the first plan shows it
-as created. Applying replaces the live policy in one call. Read the rendered
-statements before applying, and check afterwards that the apt repository still
-serves:
+An earlier version managed the ECR repository policies here. Provisioning owns
+them now, so release them rather than letting Terraform delete them. Deleting
+them revokes every customer's pull access, and the failure appears later as a
+machine that builds fine and then cannot start a single container.
 
 ```bash
-curl -sI https://caytu-cli.s3.amazonaws.com/install.sh | head -1
-curl -sI https://caytu-cli.s3.amazonaws.com/agent/latest.tar.gz | head -1
+for r in backend frontend mqtt-streamer gstreamer-recorder signaling-server; do
+  terraform state rm "aws_ecr_repository_policy.pull[\"caytu-client-$r\"]"
+done
+terraform plan   # expect no changes
 ```
 
-The first should be 200 and the second 403.
+## Checking it
+
+```bash
+curl -sI https://caytu-cli.s3.amazonaws.com/install.sh | head -1          # 200
+curl -sI https://caytu-cli.s3.amazonaws.com/agent/latest.tar.gz | head -1 # 403
+```

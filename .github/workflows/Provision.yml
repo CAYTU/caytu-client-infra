@@ -100,6 +100,13 @@ jobs:
           external_id: ${{ github.event.inputs.target_external_id }}
           permissions_boundary: ${{ github.event.inputs.target_permissions_boundary }}
 
+      # Before terraform, and with our own credentials rather than theirs: this
+      # grants in our account, not in the customer's. Onboarding used to be two
+      # terraform applies run by hand, which does not survive a second customer.
+      - name: Let that account reach our images and the agent
+        if: github.event.inputs.target_account_id != ''
+        run: ./scripts/grant-customer-artifacts.sh "${{ github.event.inputs.target_account_id }}"
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false

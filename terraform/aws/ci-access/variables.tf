@@ -79,7 +79,17 @@ variable "hosted_dns_zone_ids" {
 }
 
 variable "customer_role_arns" {
-  description = "Provisioner roles in customer accounts this pipeline may assume."
+  description = <<-EOT
+    Roles in customer accounts this pipeline may assume.
+
+    A pattern rather than a list, because the list is not the security boundary
+    and keeping it accurate meant an apply per customer. What actually gates
+    this is on their side: their trust policy names our exact role and demands
+    an external id only we hold, so a role we are not meant to touch cannot be
+    assumed whatever this says.
+
+    Narrow it to explicit arns if you would rather have both.
+  EOT
   type        = list(string)
-  default     = []
+  default     = ["arn:aws:iam::*:role/CaytuProvisioner"]
 }
