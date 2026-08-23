@@ -314,9 +314,16 @@ data "aws_iam_policy_document" "provisioner" {
   dynamic "statement" {
     for_each = var.allow_route53 ? [1] : []
     content {
-      sid       = "DnsRecords"
-      effect    = "Allow"
-      actions   = ["route53:ChangeResourceRecordSets", "route53:ListResourceRecordSets", "route53:GetHostedZone"]
+      sid    = "DnsRecords"
+      effect = "Allow"
+      # ListTagsForResource because the aws_route53_zone data source reads the
+      # zone's tags on every plan, not just its records.
+      actions = [
+        "route53:ChangeResourceRecordSets",
+        "route53:ListResourceRecordSets",
+        "route53:GetHostedZone",
+        "route53:ListTagsForResource",
+      ]
       resources = length(var.route53_zone_ids) > 0 ? [for z in var.route53_zone_ids : "arn:${var.partition}:route53:::hostedzone/${z}"] : ["arn:${var.partition}:route53:::hostedzone/*"]
     }
   }
