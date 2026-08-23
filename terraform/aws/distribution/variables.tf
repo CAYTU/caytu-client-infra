@@ -9,16 +9,6 @@ variable "aws_profile" {
   default     = ""
 }
 
-variable "customer_accounts" {
-  description = "Accounts allowed to pull images and fetch the agent. One entry per customer deployment account."
-  type = list(object({
-    account_id      = string
-    label           = string
-    resource_prefix = optional(string, "caytu-")
-  }))
-  default = []
-}
-
 variable "image_repositories" {
   description = "Repositories a deployment pulls from."
   type        = list(string)

@@ -7,12 +7,25 @@
 
 data "aws_caller_identity" "current" {}
 
+# Read before write. Provisioning adds a Customer<account> statement for every
+# customer it onboards, so a policy built only from what this module knows
+# would revoke every one of them the next time somebody ran an apply here.
+data "aws_s3_bucket_policy" "current" {
+  bucket = var.agent_bucket
+}
+
 locals {
-  bucket_arn   = "arn:aws:s3:::${var.agent_bucket}"
-  agent_arn    = "${local.bucket_arn}/${var.agent_prefix}/*"
-  own_account  = data.aws_caller_identity.current.account_id
-  public_arns  = [for o in var.public_objects : "${local.bucket_arn}/${o}"]
-  reader_accts = [for c in var.customer_accounts : c.account_id]
+  bucket_arn  = "arn:aws:s3:::${var.agent_bucket}"
+  agent_arn   = "${local.bucket_arn}/${var.agent_prefix}/*"
+  own_account = data.aws_caller_identity.current.account_id
+  public_arns = [for o in var.public_objects : "${local.bucket_arn}/${o}"]
+
+  # Kept verbatim rather than rebuilt, because this module does not know which
+  # customers exist. Provisioning does.
+  customer_statements = [
+    for st in jsondecode(data.aws_s3_bucket_policy.current.policy).Statement :
+    st if startswith(try(st.Sid, ""), "Customer")
+  ]
 }
 
 data "aws_iam_policy_document" "agent_bucket" {
@@ -41,28 +54,6 @@ data "aws_iam_policy_document" "agent_bucket" {
     }
   }
 
-  # A customer account may read the agent, but only through a role we created
-  # there. Their other principals get nothing.
-  dynamic "statement" {
-    for_each = { for c in var.customer_accounts : c.account_id => c }
-    content {
-      sid       = "Customer${replace(statement.value.label, "/[^0-9A-Za-z]/", "")}"
-      effect    = "Allow"
-      actions   = ["s3:GetObject"]
-      resources = [local.agent_arn]
-
-      principals {
-        type        = "AWS"
-        identifiers = ["arn:aws:iam::${statement.value.account_id}:root"]
-      }
-
-      condition {
-        test     = "ArnLike"
-        variable = "aws:PrincipalArn"
-        values   = ["arn:aws:iam::${statement.value.account_id}:role/${statement.value.resource_prefix}*"]
-      }
-    }
-  }
 
   # Belt and braces. If a future statement widens the bucket again, the agent
   # prefix still refuses anonymous callers.
@@ -89,5 +80,12 @@ data "aws_iam_policy_document" "agent_bucket" {
 
 resource "aws_s3_bucket_policy" "agent" {
   bucket = var.agent_bucket
-  policy = data.aws_iam_policy_document.agent_bucket.json
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      jsondecode(data.aws_iam_policy_document.agent_bucket.json).Statement,
+      local.customer_statements,
+    )
+  })
 }

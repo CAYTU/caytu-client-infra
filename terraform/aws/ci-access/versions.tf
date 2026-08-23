@@ -5,7 +5,11 @@ terraform {
   # to outlive whatever checkout somebody happened to apply from. Supplied at
   # init:
   #
-  #   terraform init -backend-config="bucket=<state bucket>" \
+  # The backend authenticates on its own and never reads var.aws_profile, so
+  # the profile has to be in the environment or init fails before it starts:
+  #
+  #   AWS_PROFILE=<profile> terraform init \
+  #     -backend-config="bucket=<state bucket>" \
   #     -backend-config="key=ci-access/terraform.tfstate" \
   #     -backend-config="region=us-east-1" -backend-config="encrypt=true"
   backend "s3" {}
