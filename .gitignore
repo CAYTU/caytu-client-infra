@@ -32,6 +32,9 @@ vault*.json
 **/.terraform.lock.hcl
 **/terraform.tfstate
 **/terraform.tfstate.backup
+# Terraform names a migration backup terraform.tfstate.<epoch>.backup, which
+# the line above does not match. Five of them were committed before this.
+**/terraform.tfstate.*.backup
 **/*.tfvars
 !**/example.tfvars
 
