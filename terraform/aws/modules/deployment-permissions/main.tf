@@ -133,6 +133,26 @@ data "aws_iam_policy_document" "provisioner" {
 
   # Every role it creates carries the boundary, or the call is refused. This is
   # what keeps CreateRole from being a way out of this policy.
+  # In a customer account the boundary closes this. In our own there is no
+  # boundary, and the pipeline role is itself named caytu-*, so ManageOurOwnRoles
+  # would otherwise let a run rewrite the policy that constrains it.
+  dynamic "statement" {
+    for_each = length(var.protected_role_arns) > 0 ? [1] : []
+    content {
+      sid       = "NeverRewriteOurselves"
+      effect    = "Deny"
+      resources = var.protected_role_arns
+      actions = [
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:DeleteRole",
+      ]
+    }
+  }
+
   dynamic "statement" {
     for_each = var.boundary_arn != "" ? [1] : []
     content {

@@ -46,3 +46,9 @@ variable "route53_zone_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "protected_role_arns" {
+  description = "Roles this permission set must never be able to rewrite, typically the role it is attached to. Empty in a customer account, where the boundary already closes it."
+  type        = list(string)
+  default     = []
+}

@@ -62,12 +62,16 @@ resource "aws_iam_role" "provisioning" {
 module "deployment" {
   source = "../modules/deployment-permissions"
 
-  account_id       = local.account_id
-  partition        = local.partition
-  regions          = var.deployment_regions
-  resource_prefix  = var.resource_prefix
-  boundary_arn     = ""
-  allow_route53    = true
+  account_id      = local.account_id
+  partition       = local.partition
+  regions         = var.deployment_regions
+  resource_prefix = var.resource_prefix
+  boundary_arn    = ""
+  allow_route53   = true
+  # Its own arn, so a provisioning run cannot widen the policy it runs under.
+  protected_role_arns = [
+    "arn:${local.partition}:iam::${local.account_id}:role/caytu-client-infra-provisioning",
+  ]
   route53_zone_ids = var.hosted_dns_zone_ids
 }
 
@@ -156,4 +160,87 @@ resource "aws_iam_role_policy" "agent_publish" {
   name   = "publish"
   role   = aws_iam_role.agent_publish.id
   policy = data.aws_iam_policy_document.agent_publish.json
+}
+
+# -----------------------------------------------------------------------------
+# Applying this module
+# -----------------------------------------------------------------------------
+# Every change to what provisioning may do used to mean somebody running
+# terraform on a laptop, and forgetting meant the next provision failed on a
+# permission that was already merged. This role lets the workflow do it.
+#
+# Deliberately not the provisioning role: that one is denied from rewriting
+# itself, which is the point of the deny above.
+resource "aws_iam_role" "ci_access" {
+  name               = "caytu-client-infra-ci-access"
+  description        = "Assumed by Apply-ci-access.yml to manage the two CI roles."
+  assume_role_policy = data.aws_iam_policy_document.github_assume.json
+}
+
+data "aws_iam_policy_document" "ci_access" {
+  statement {
+    sid    = "ManageTheCiRoles"
+    effect = "Allow"
+    actions = [
+      "iam:GetRole",
+      "iam:CreateRole",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:ListRoleTags",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:GetRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:ListRolePolicies",
+      "iam:ListAttachedRolePolicies",
+    ]
+    resources = [
+      aws_iam_role.provisioning.arn,
+      aws_iam_role.agent_publish.arn,
+    ]
+  }
+
+  # Same reasoning as the deny in the module: a role that can rewrite its own
+  # trust policy is a role with no limits at all.
+  statement {
+    sid       = "NeverRewriteOurselves"
+    effect    = "Deny"
+    actions   = ["iam:*"]
+    resources = [aws_iam_role.ci_access.arn]
+  }
+
+  statement {
+    sid       = "ReadTheState"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket", "s3:GetBucketLocation"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}"]
+  }
+
+  statement {
+    sid       = "WriteOurOwnState"
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["arn:${local.partition}:s3:::${var.state_bucket}/ci-access/*"]
+  }
+
+  statement {
+    sid       = "ReadWhatWeAttach"
+    effect    = "Allow"
+    actions   = ["iam:GetPolicy", "iam:GetPolicyVersion", "iam:ListPolicyVersions"]
+    resources = ["arn:${local.partition}:iam::aws:policy/*"]
+  }
+
+  statement {
+    sid       = "WhoAmI"
+    effect    = "Allow"
+    actions   = ["sts:GetCallerIdentity"]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "ci_access" {
+  name   = "apply"
+  role   = aws_iam_role.ci_access.id
+  policy = data.aws_iam_policy_document.ci_access.json
 }
