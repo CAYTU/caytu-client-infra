@@ -93,3 +93,17 @@ variable "customer_role_arns" {
   type        = list(string)
   default     = ["arn:aws:iam::*:role/CaytuProvisioner"]
 }
+
+variable "ci_access_allowed_refs" {
+  description = <<-EOT
+    Refs that may assume the applying role. Includes pull_request, because the
+    plan on a pull request is the whole point of reviewing a permission change
+    and a pull request's subject is not the branch's.
+
+    That does mean a pull request can obtain this role, so the workflow only
+    ever plans on one. Opening a pull request here already requires push access,
+    which is what makes that acceptable; it would not be on a public repository.
+  EOT
+  type        = list(string)
+  default     = ["ref:refs/heads/main", "pull_request"]
+}
