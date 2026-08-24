@@ -364,6 +364,12 @@ Resources:
                   }
                 },
                 {
+                  "Sid": "AttachTheDeviceCredentialRole",
+                  "Effect": "Allow",
+                  "Action": "iam:PassRole",
+                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*-iot-kvs"
+                },
+                {
                   "Sid": "OurRegistry",
                   "Effect": "Allow",
                   "Action": [
