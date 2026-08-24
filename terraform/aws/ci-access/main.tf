@@ -171,10 +171,39 @@ resource "aws_iam_role_policy" "agent_publish" {
 #
 # Deliberately not the provisioning role: that one is denied from rewriting
 # itself, which is the point of the deny above.
+# Its own trust document rather than the shared one, because it is the only
+# role a pull request may assume.
+data "aws_iam_policy_document" "ci_access_assume" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [local.oidc_provider_arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values = flatten([
+        for form in local.repo_forms : [
+          for r in var.ci_access_allowed_refs : "repo:${form}:${r}"
+        ]
+      ])
+    }
+  }
+}
+
 resource "aws_iam_role" "ci_access" {
   name               = "caytu-client-infra-ci-access"
   description        = "Assumed by Apply-ci-access.yml to manage the two CI roles."
-  assume_role_policy = data.aws_iam_policy_document.github_assume.json
+  assume_role_policy = data.aws_iam_policy_document.ci_access_assume.json
 }
 
 data "aws_iam_policy_document" "ci_access" {
@@ -198,15 +227,25 @@ data "aws_iam_policy_document" "ci_access" {
     resources = [
       aws_iam_role.provisioning.arn,
       aws_iam_role.agent_publish.arn,
+      aws_iam_role.ci_access.arn,
     ]
   }
 
   # Same reasoning as the deny in the module: a role that can rewrite its own
   # trust policy is a role with no limits at all.
+  # Writes only. Denying iam:* would deny reading it too, and terraform has to
+  # refresh the very role it manages.
   statement {
-    sid       = "NeverRewriteOurselves"
-    effect    = "Deny"
-    actions   = ["iam:*"]
+    sid    = "NeverRewriteOurselves"
+    effect = "Deny"
+    actions = [
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:DeleteRole",
+    ]
     resources = [aws_iam_role.ci_access.arn]
   }
 
