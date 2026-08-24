@@ -111,9 +111,12 @@ data "aws_iam_policy_document" "pipeline" {
   dynamic "statement" {
     for_each = length(var.customer_role_arns) > 0 ? [1] : []
     content {
-      sid       = "EnterCustomerAccounts"
-      effect    = "Allow"
-      actions   = ["sts:AssumeRole"]
+      sid    = "EnterCustomerAccounts"
+      effect = "Allow"
+      # TagSession because configure-aws-credentials tags the session it opens,
+      # so stopping or starting a customer's machine failed on a permission the
+      # terraform provider never needed. Their trust policy already expects it.
+      actions   = ["sts:AssumeRole", "sts:TagSession"]
       resources = var.customer_role_arns
     }
   }
