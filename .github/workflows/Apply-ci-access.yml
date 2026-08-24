@@ -47,9 +47,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The role this workflow assumes is created by this workflow's own
+      # terraform, so the very first apply is by hand. Until then, say so
+      # rather than failing on "could not load credentials", which reads like a
+      # broken workflow rather than one nobody has bootstrapped yet.
+      - name: Has this been bootstrapped
+        id: preflight
+        env:
+          ROLE: ${{ vars.AWS_CI_ACCESS_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ROLE" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Not bootstrapped yet"
+            echo
+            echo "\`AWS_CI_ACCESS_ROLE_ARN\` is not set, so there is no role to assume."
+            echo "Apply \`terraform/aws/ci-access\` once by hand, then set the variable"
+            echo "from its \`ci_access_role_arn\` output. This workflow takes over after that."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Merging the change is fine; running it against nothing is not.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "::error::AWS_CI_ACCESS_ROLE_ARN is not set, so the pipeline's permissions were not applied."
+            exit 1
+          fi
+          echo "::warning::Not bootstrapped yet, so there is nothing to plan against."
+
       # Not the provisioning role: that one is denied from rewriting itself, so
       # it could not apply this even though it manages other caytu-* roles.
       - name: Configure AWS Credentials
+        if: steps.preflight.outputs.ready == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_CI_ACCESS_ROLE_ARN }}
@@ -57,10 +88,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: hashicorp/setup-terraform@v3
+        if: steps.preflight.outputs.ready == 'true'
         with:
           terraform_wrapper: false
 
       - name: Init
+        if: steps.preflight.outputs.ready == 'true'
         working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
@@ -75,6 +108,7 @@ jobs:
             -backend-config="encrypt=true"
 
       - name: Plan
+        if: steps.preflight.outputs.ready == 'true'
         id: plan
         working-directory: ${{ env.TF_DIR }}
         run: |
