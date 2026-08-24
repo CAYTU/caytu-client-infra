@@ -229,6 +229,19 @@ data "aws_iam_policy_document" "provisioner" {
     }
   }
 
+  # iot:CreateRoleAlias does not set iam:PassedToService, so the statement above
+  # cannot match it and provisioning failed on the last resource it creates,
+  # after the machine was already running. Scoped by role name instead, which is
+  # the control that was doing the work anyway.
+  statement {
+    sid     = "AttachTheDeviceCredentialRole"
+    effect  = "Allow"
+    actions = ["iam:PassRole"]
+    resources = [
+      "arn:${var.partition}:iam::${var.account_id}:role/${var.resource_prefix}*-iot-kvs",
+    ]
+  }
+
   statement {
     sid    = "OurRegistry"
     effect = "Allow"
