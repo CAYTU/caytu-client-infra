@@ -1,0 +1,105 @@
+name: Apply the pipeline's own permissions
+
+# Push what provisioning is allowed to do, when it changes.
+#
+# This used to be a terraform apply somebody ran by hand after merging, and the
+# failure mode is quiet: the permission is merged, everyone assumes it is live,
+# and the next provision dies on an access denied for an action that has been
+# in the repository for days. It happened twice in one afternoon.
+#
+# Plans on a pull request so the change is readable in review, applies on main.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/aws/ci-access/**"
+      - "terraform/aws/modules/deployment-permissions/**"
+      - ".github/workflows/Apply-ci-access.yml"
+  pull_request:
+    paths:
+      - "terraform/aws/ci-access/**"
+      - "terraform/aws/modules/deployment-permissions/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  # One at a time. Two runs writing the same state is how state gets corrupted.
+  group: ci-access
+  cancel-in-progress: false
+
+env:
+  TF_DIR: terraform/aws/ci-access
+  AWS_REGION: us-east-1
+
+jobs:
+  apply:
+    name: ${{ github.event_name == 'pull_request' && 'Plan' || 'Apply' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      HOSTED_ZONE_IDS: ${{ vars.HOSTED_DNS_ZONE_IDS }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not the provisioning role: that one is denied from rewriting itself, so
+      # it could not apply this even though it manages other caytu-* roles.
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_CI_ACCESS_ROLE_ARN }}
+          role-session-name: apply-ci-access
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET" || {
+            echo "::error::TF_STATE_BUCKET is not set. Applying against local state would fork the roles from what the account actually has."
+            exit 1
+          }
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=ci-access/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true"
+
+      - name: Plan
+        id: plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          # Empty is valid: it only means hosted deployments get no DNS record.
+          # Passed through the environment rather than interpolated, so a value
+          # cannot end the command and start another one.
+          zones="${HOSTED_ZONE_IDS:-[]}"
+
+          terraform plan -input=false -out=tfplan -no-color \
+            -var "aws_profile=" \
+            -var "region=${AWS_REGION}" \
+            -var "state_bucket=${TF_STATE_BUCKET}" \
+            -var "hosted_dns_zone_ids=${zones}" \
+            | tee plan.txt
+
+          {
+            echo "### Pipeline permissions"
+            echo
+            echo '```'
+            grep -E "^(Plan:|No changes)" plan.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply
+        if: github.event_name != 'pull_request'
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
