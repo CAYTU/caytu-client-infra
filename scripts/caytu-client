@@ -1547,28 +1547,21 @@ imds_get() {
   curl -fsS -m 5 "${hdr[@]}" "$base$path" 2>/dev/null || true
 }
 
-# Which ECR this machine pulls from, read off the machine itself.
+# Where our images actually live.
 #
-# Asked of the instance rather than configured: a hosted machine runs in the
-# account and region that built it, so anything we could write down here would
-# only be a chance to be wrong.
-ecr_registry_here() {
-  local doc account region
-  # Metadata, not the AWS CLI: the agent runs in a docker:cli container that has
-  # no aws and cannot usefully get one, since alpine's aws-cli is broken on this
-  # image. The identity document carries both values and needs only curl.
-  doc="$(imds_get /latest/dynamic/instance-identity/document)"
-  [[ -n "$doc" ]] || return 0
-
-  account="$(printf '%s' "$doc" | jq -r '.accountId // empty' 2>/dev/null || true)"
-  region="$(printf '%s' "$doc" | jq -r '.region // empty' 2>/dev/null || true)"
-
-  # Not an EC2 machine, or metadata is off. A customer running our images on
-  # their own hardware is legitimate, so this stays quiet.
-  [[ -n "$account" && -n "$region" ]] || return 0
-
+# Not the machine's own account. That held while every machine we built ran in
+# our account, and stopped holding the moment one ran in a customer's: the
+# registry resolved to their account, whose repositories exist and are empty, so
+# every pull failed on a manifest that was never pushed there. It is not the
+# machine's region either, because ECR is regional and our images are in one.
+#
+# Overridable for a fork or a mirror, but the default is the answer.
+caytu_registry() {
+  local account="${CAYTU_IMAGE_ACCOUNT:-688544396352}"
+  local region="${CAYTU_IMAGE_REGION:-us-east-1}"
   printf '%s.dkr.ecr.%s.amazonaws.com' "$account" "$region"
 }
+
 
 # Log in to ECR, using the instance's own role.
 #
@@ -1616,8 +1609,7 @@ apply_instance_source() {
       # Ours. The repository names are the compose defaults already, but the
       # default registry is the bare string "caytu-client", which docker reads
       # as a Docker Hub organisation, so every pull was denied. Derived from the
-      # machine rather than configured, so it cannot drift from where it runs.
-      local ours; ours="$(ecr_registry_here)"
+      local ours; ours="$(caytu_registry)"
       [[ -n "$ours" ]] && env_upsert "$env_file" IMAGE_REGISTRY "$ours"
       [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
       ok "images: ${ours:-Caytu registry}${tag:+, pinned to $tag}"
