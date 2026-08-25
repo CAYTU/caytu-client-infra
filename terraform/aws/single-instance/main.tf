@@ -299,6 +299,12 @@ resource "aws_instance" "this" {
   # Carrying it also removes a boot-time network dependency and pins the script
   # to the commit that provisioned the machine, rather than whatever `main`
   # happened to say at the moment it booted.
+  # Compressed, because plain base64 of this script is 16,888 bytes against a
+  # 16,384 limit and terraform refuses the whole configuration rather than just
+  # the plan: adding ten lines to bootstrap.sh broke destroy as well as
+  # provision, on machines that were already running. Gzipped it is about 6,000,
+  # which leaves room to grow.
+  #
   # base64 rather than a nested heredoc. Terraform strips the indentation of a
   # <<- block based on its least-indented line, so embedding the script raw makes
   # both the shebang and the inner terminator depend on how a 7,000-line file
@@ -306,8 +312,8 @@ resource "aws_instance" "this" {
   user_data = <<-EOF
     #!/bin/bash
     set -e
-    echo '${base64encode(file("${path.module}/../../../scripts/bootstrap.sh"))}' \
-      | base64 -d > /tmp/caytu-bootstrap.sh
+    echo '${base64gzip(file("${path.module}/../../../scripts/bootstrap.sh"))}' \
+      | base64 -d | gunzip > /tmp/caytu-bootstrap.sh
     chmod +x /tmp/caytu-bootstrap.sh
     DEPLOY_USER=ubuntu \
       CAYTU_INSTANCE_ID='${var.caytu_instance_id}' \
