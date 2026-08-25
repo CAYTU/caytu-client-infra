@@ -186,8 +186,20 @@ ENVEOF
       http://169.254.169.254/latest/api/token \
       -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null || true)"
 
+  # Ours, not this machine's. The account read above is where the machine runs,
+  # which is our account for hosting we run and the customer's for a deployment
+  # in theirs. Logging in there authenticated against repositories that exist
+  # and are empty, while compose pulled from ours with no credentials at all,
+  # so every pull failed and the rest reported a cancelled context.
+  #
+  # The region is ours for the same reason: ECR is regional and the images are
+  # in one region, whatever region the machine sits in.
+  image_account="${CAYTU_IMAGE_ACCOUNT:-688544396352}"
+  image_region="${CAYTU_IMAGE_REGION:-us-east-1}"
+
   if [[ -n "$account" && -n "$region" ]]; then
-    registry="$account.dkr.ecr.$region.amazonaws.com"
+    registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
+    region="$image_region"
 
     cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
 #!/bin/bash
