@@ -1557,9 +1557,27 @@ report_step() {
 # short enough to sit on a record.
 compose_failure_reason() {
   local log=$1
+  local noise='context canceled|Error response from daemon: [Cc]ancel'
+  local errors='error|denied|not found|no such|manifest|unauthorized|cannot|failed|unable'
+
+  # In the order compose printed them, deduplicated without reordering. Sorting
+  # here is what hid the real failure behind three services reporting
+  # "context canceled", which is only ever what the others say once one of them
+  # has already gone wrong.
+  local pick
+  pick() {
+    grep -aiE "$1" "$log" 2>/dev/null \
+      | grep -avE '^[[:space:]]*$' \
+      | awk '!seen[$0]++' \
+      | head -3 | tr '\n' ' ' | cut -c1-280
+  }
+
   local why
-  why="$(grep -aiE "error|denied|not found|no such|manifest unknown|unauthorized|cannot|failed" "$log" 2>/dev/null \
-    | grep -avE '^[[:space:]]*$' | sort -u | head -3 | tr '\n' ' ' | cut -c1-280)"
+  # A real error first. Cancellations only if that is genuinely all there was.
+  why="$(grep -aivE "$noise" "$log" 2>/dev/null | grep -aiE "$errors" \
+        | grep -avE '^[[:space:]]*$' | awk '!seen[$0]++' | head -3 \
+        | tr '\n' ' ' | cut -c1-280)"
+  [[ -n "$why" ]] || why="$(pick "$errors")"
   [[ -n "$why" ]] || why="$(tail -3 "$log" 2>/dev/null | tr '\n' ' ' | cut -c1-280)"
   printf '%s' "${why:-the stack did not come up and said nothing}"
 }
