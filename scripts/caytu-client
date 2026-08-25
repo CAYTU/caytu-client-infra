@@ -1533,6 +1533,37 @@ instance_report() {
     || warn "could not report instance state (continuing)"
 }
 
+# Say what this host is doing, as it does it.
+#
+# The platform keeps these on the record, so a rollout that failed an hour ago
+# can still be read. Both failures that cost a day of testing needed an SSM
+# session to diagnose, and neither had to: the host knew exactly what went
+# wrong and threw it away.
+#
+# Never fatal and never noisy. A step that cannot be reported is not a reason
+# to stop provisioning, and the caller has already printed it locally.
+report_step() {
+  local env_file=$1 id=$2 phase=$3 message=$4 ok=${5:-true}
+  [[ -n "$id" ]] || return 0
+  instance_report "$env_file" "$id" \
+    "$(jq -n --arg p "$phase" --arg m "$message" --argjson o "$ok" \
+      '{step:{phase:$p, message:$m, ok:$o}}')" || true
+}
+
+# The part of a failed rollout worth reading.
+#
+# Compose says exactly what went wrong and we reported "the stack did not come
+# up on the host", which is true and useless. Errors only, deduplicated, and
+# short enough to sit on a record.
+compose_failure_reason() {
+  local log=$1
+  local why
+  why="$(grep -aiE "error|denied|not found|no such|manifest unknown|unauthorized|cannot|failed" "$log" 2>/dev/null \
+    | grep -avE '^[[:space:]]*$' | sort -u | head -3 | tr '\n' ' ' | cut -c1-280)"
+  [[ -n "$why" ]] || why="$(tail -3 "$log" 2>/dev/null | tr '\n' ' ' | cut -c1-280)"
+  printf '%s' "${why:-the stack did not come up and said nothing}"
+}
+
 # Read one value from instance metadata. IMDSv2 first, since newer instances
 # refuse the unauthenticated read; empty when this is not an EC2 machine.
 imds_get() {
@@ -1608,7 +1639,7 @@ apply_instance_source() {
     caytu)
       # Ours. The repository names are the compose defaults already, but the
       # default registry is the bare string "caytu-client", which docker reads
-      # as a Docker Hub organisation, so every pull was denied. Derived from the
+      # as a Docker Hub organisation, so every pull was denied.
       local ours; ours="$(caytu_registry)"
       [[ -n "$ours" ]] && env_upsert "$env_file" IMAGE_REGISTRY "$ours"
       [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
@@ -1746,6 +1777,7 @@ instance_provision() {
   env_upsert "$env_file" CAYTU_INSTANCE_ID "$id"
   remember_instance "$env_file" "$id"
 
+  report_step "$env_file" "$id" "config" "writing the image source and access settings"
   apply_instance_source "$env_file" "$record"
   apply_instance_access "$env_file" "$record"
 
@@ -1809,6 +1841,7 @@ instance_provision() {
   local reporting_to; reporting_to="$(instance_platform_url "$env_file")"
   [[ -n "$reporting_to" ]] && env_upsert "$env_file" CAYTU_BILLINGS_URL "$reporting_to"
 
+  report_step "$env_file" "$id" "edge" "configuring nginx"
   prepare_nginx "$env_file" "$deployment_url"
 
   # Report the scheme actually being served. Saying https while nginx listens
@@ -1821,11 +1854,20 @@ instance_provision() {
     *) [[ "${HOSTED_TLS:-1}" == "0" ]] && deployment_url="${deployment_url/#https:/http:}" ;;
   esac
 
+  report_step "$env_file" "$id" "images" "pulling from $(env_get "$env_file" IMAGE_REGISTRY || echo "the default registry")"
+
   info "starting the stack…"
-  if cmd_up $build; then
+  report_step "$env_file" "$id" "stack" "starting the containers"
+
+  # Captured rather than streamed to the terminal alone. Nobody is watching this
+  # terminal: it runs from cloud-init on a machine with no shell open.
+  local up_log; up_log="$(mktemp)"
+  if cmd_up $build 2>&1 | tee "$up_log"; [[ ${PIPESTATUS[0]} -eq 0 ]]; then
+    rm -f "$up_log"
     # Now, not before: HTTP-01 needs nginx already answering on port 80. If it
     # works the scheme below becomes https, and if not the deployment keeps
     # serving plain HTTP rather than nothing.
+    report_step "$env_file" "$id" "certificate" "asking Let's Encrypt for a certificate"
     if issue_certificate "$env_file" "$deployment_url"; then
       deployment_url="${deployment_url/#http:/https:}"
     fi
@@ -1835,6 +1877,7 @@ instance_provision() {
     # the rollout, but the console is told rather than left to infer it from
     # ten healthy containers serving 503.
     local seeded=""
+    report_step "$env_file" "$id" "secrets" "seeding the secret store"
     if bootstrap_secret_store "$env_file"; then seeded=1; fi
 
     # Deliberately not claiming adminProvisioned here. A stack that starts is
@@ -1851,8 +1894,12 @@ instance_provision() {
          + (if $s == "" then {lastError:"the secret store is not seeded, so this deployment cannot be licensed"} else {} end)')"
     ok "instance $id reported running"
   else
+    local why; why="$(compose_failure_reason "$up_log")"
+    rm -f "$up_log"
+    err "the stack did not come up: $why"
     instance_report "$env_file" "$id" \
-      '{"status":"failed","lastError":"the stack did not come up on the host"}'
+      "$(jq -n --arg e "the stack did not come up: $why" \
+        '{status:"failed", lastError:$e, step:{phase:"stack", message:$e, ok:false}}')"
     die "the stack did not come up; reported failed"
   fi
 }
