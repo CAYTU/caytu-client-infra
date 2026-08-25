@@ -128,6 +128,12 @@ jobs:
           role-external-id: ${{ steps.target.outputs.external_id }}
           role-session-name: power-${{ github.event.inputs.instance_id }}
           role-chaining: true
+          # No session tags. They buy nothing on an assume we control both ends
+          # of, and asking for them means sts:TagSession has to be granted on
+          # our side and on every customer's trust policy forever. A stack whose
+          # trust predates that requirement cannot be stopped at all, which is
+          # exactly what happened.
+          role-skip-session-tagging: true
           aws-region: ${{ github.event.inputs.region }}
 
       - name: ${{ github.event.inputs.action }}
