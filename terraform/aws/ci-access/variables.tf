@@ -5,9 +5,24 @@ variable "region" {
 }
 
 variable "deployment_regions" {
-  description = "Every region we may provision a deployment in. A region left out here is denied at apply time, part way through building a machine."
+  description = <<-EOT
+    Every region we may provision a deployment in.
+
+    Must match InstanceRegion in the platform's billings schema. A region the
+    wizard offers and this list omits is denied at apply time, part way through
+    building a machine, which is the failure this list exists to prevent.
+
+    af-south-1 is opt-in and has to be enabled on the account before an apply
+    there can work.
+  EOT
   type        = list(string)
-  default     = ["us-east-1", "eu-west-3"]
+  default = [
+    "us-east-1",
+    "us-east-2",
+    "eu-west-3",
+    "eu-central-1",
+    "af-south-1",
+  ]
 }
 
 variable "aws_profile" {
