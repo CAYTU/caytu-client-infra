@@ -1617,26 +1617,63 @@ caytu_registry() {
 # No credential is stored anywhere: the role grants pull, and the token it
 # returns lasts twelve hours, which is why this runs before every rollout
 # rather than once at boot.
+# Ask the platform for a registry password.
+#
+# For a host with no AWS identity: a server on a LAN, or a laptop. The token it
+# got at enrolment is what authenticates this, so revoking the host stops it.
+registry_login_via_platform() {
+  local env_file=$1 registry=$2
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || return 1
+
+  local body
+  body="$(curl -fsS -m 20 \
+    "$(instance_platform_url "$env_file")/api/billings/instances/registry-credentials" \
+    -H "Authorization: Bearer $token" 2>/dev/null)" || return 1
+
+  local user pass host
+  user="$(printf '%s' "$body" | jq -r '.username // empty')"
+  pass="$(printf '%s' "$body" | jq -r '.password // empty')"
+  host="$(printf '%s' "$body" | jq -r '.registry // empty')"
+  [[ -n "$user" && -n "$pass" ]] || return 1
+
+  # Ours, not whatever the caller guessed, so one place decides the registry.
+  [[ -n "$host" ]] && registry="$host"
+
+  printf '%s' "$pass" \
+    | docker login --username "$user" --password-stdin "$registry" >/dev/null 2>&1
+}
+
 ecr_login_if_needed() {
   local registry=$1
   [[ "$registry" == *.dkr.ecr.*.amazonaws.com ]] || return 0
 
   local region="${registry#*.dkr.ecr.}"; region="${region%%.amazonaws.com}"
+  local env_file; env_file="$(env_file_for)"
 
+  # The machine's own role first. A hosted machine and one we build in a
+  # customer's account both have one, and it needs no round trip.
   local why; why="$(mktemp)"
   if aws ecr get-login-password --region "$region" 2>"$why" \
        | docker login --username AWS --password-stdin "$registry" >/dev/null 2>&1; then
     rm -f "$why"
     return 0
   fi
+  rm -f "$why"
+
+  # Otherwise trade the enrolment token for one. This is the only path that
+  # works on a customer's own hardware, where holding an AWS credential is not
+  # something we would ask for.
+  if registry_login_via_platform "$env_file" "$registry"; then
+    ok "logged in to $registry using this deployment's own credential"
+    return 0
+  fi
 
   # Say why. The pull that follows always blames an expired token, even when
-  # there were no credentials at all, which sends you refreshing a token that
-  # was never there.
+  # there were no credentials at all.
   warn "could not log in to $registry, so the pull will be denied:"
-  warn "  $(grep -m1 . "$why" 2>/dev/null || echo "docker login refused the token")"
-  warn "  Set AWS_PROFILE to one that can read ECR, then run this again."
-  rm -f "$why"
+  warn "  no AWS identity on this host, and the platform did not issue one"
+  warn "  Check this host is enrolled, or set AWS_PROFILE to one that can read ECR."
   return 0
 }
 
