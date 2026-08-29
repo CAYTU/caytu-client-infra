@@ -1077,11 +1077,54 @@ port_in_use() {
 # The templates ship with REPLACE_WITH_* placeholders on purpose. We warn
 # loudly the first time we install one; the operator is expected to edit
 # it before running against real traffic.
+# Write the signalling tokens file from the token the env file already holds.
+#
+# Two copies of one secret that a human keeps in step is a drift waiting to
+# happen. This makes the env file the only place it is written.
+seed_signaling_tokens() {
+  local env_file dst token
+  env_file="$(env_file_for)"
+  dst="$COMPOSE_DIR/secrets/signaling-tokens.json"
+
+  [[ -f "$env_file" ]] || return 0
+  token="$(env_get "$env_file" SIGNALING_AUTH_TOKEN || true)"
+
+  # Nothing to write. Leave whatever is there rather than replacing a file an
+  # operator may have filled in by hand.
+  if [[ -z "$token" || "$token" == REPLACE_WITH_* ]]; then
+    [[ -f "$dst" ]] && return 0
+    cp "$COMPOSE_DIR/secrets/signaling-tokens.example.json" "$dst" 2>/dev/null || return 0
+    warn "SIGNALING_AUTH_TOKEN is not set, so $dst still holds a placeholder"
+    return 0
+  fi
+
+  # Already correct, so do not rewrite it on every up.
+  if [[ -f "$dst" ]] && grep -qF "\"$token\"" "$dst" 2>/dev/null; then
+    return 0
+  fi
+
+  mkdir -p "$COMPOSE_DIR/secrets"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --arg t "$token" \
+      '{($t): {id: "caytu-backend", username: "caytu-backend", policies: ["signaling:*"]}}' \
+      > "$dst"
+  else
+    printf '{\n  "%s": {\n    "id": "caytu-backend",\n    "username": "caytu-backend",\n    "policies": ["signaling:*"]\n  }\n}\n' "$token" > "$dst"
+  fi
+  chmod 600 "$dst" 2>/dev/null || true
+}
+
 preflight_bind_mount_files() {
   local seeded=0
   local pair
+  # The signaling tokens file is not copied like the others. It holds one
+  # value that has to equal SIGNALING_AUTH_TOKEN in the env file, and copying
+  # the template installs a REPLACE_WITH_ placeholder that never will. On a
+  # deployment nobody logs into, that means signalling refuses every peer and
+  # the failure looks like a video problem rather than a config one.
+  seed_signaling_tokens || true
+
   for pair in \
-      "secrets/signaling-tokens.example.json:secrets/signaling-tokens.json" \
       "mqtt-streamer/streamer_config.yaml.example:mqtt-streamer/streamer_config.yaml"; do
     local src="$COMPOSE_DIR/${pair%%:*}"
     local dst="$COMPOSE_DIR/${pair##*:}"
