@@ -63,6 +63,9 @@ concurrency:
 env:
   TF_DIR: terraform/aws/managed-cluster
   OVERLAY: kubernetes/overlays/aws-eks
+  # Where the images actually are. Same pair bootstrap.sh and the agent use.
+  CAYTU_IMAGE_ACCOUNT: "688544396352"
+  CAYTU_IMAGE_REGION: us-east-1
 
 jobs:
   provision:
@@ -99,6 +102,14 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+
+      # kubectl and helm are on the runner image; kustomize is not.
+      - name: Install kustomize
+        run: |
+          set -euo pipefail
+          curl -sSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+          kustomize version
 
       - name: Init, with this deployment's own state
         working-directory: ${{ env.TF_DIR }}
@@ -167,7 +178,10 @@ jobs:
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
         run: |
           set -euo pipefail
-          registry="$(terraform output -raw ecr_registry 2>/dev/null || true)"
+          # Ours, never the cluster's. terraform output ecr_registry reports
+          # whichever account this applied into, and a customer's registry is
+          # empty, so every pod would sit in ImagePullBackOff.
+          registry="${CAYTU_IMAGE_ACCOUNT}.dkr.ecr.${CAYTU_IMAGE_REGION}.amazonaws.com"
           # Whichever it is: the one that was passed in, or the one just created.
           CERT_ARN="$(terraform output -raw certificate_arn)"
           test -n "$CERT_ARN" || {
