@@ -1726,6 +1726,38 @@ ecr_login_if_needed() {
 # ran whatever IMAGE_TAG happened to say in its own env file. A fork published
 # under another name had nowhere to be declared, and pinning a site to a
 # known-good version meant editing a file on the box.
+# Collect this deployment's own secret-store shard from the platform.
+#
+# Without one the client derives its key from a shard baked into the image,
+# which every deployment built from that image shares. Asked for over the
+# machine's own token rather than passed through provisioning, so key material
+# never lands in a workflow log.
+#
+# Quiet when the platform has none: older records have no shard and the baked
+# one still works.
+fetch_secret_shard() {
+  local env_file=$1 id=$2
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || return 0
+
+  # Already set, and not the placeholder. Re-provisioning must not change the
+  # key a store was sealed with.
+  local existing; existing="$(env_get "$env_file" CAYTU_SECRET_STORE_KEY || true)"
+  [[ -n "$existing" ]] && return 0
+
+  local body
+  body="$(curl -fsS -m 20 \
+    "$(instance_platform_url "$env_file")/api/billings/instances/$id/secret-shard" \
+    -H "Authorization: Bearer $token" 2>/dev/null || true)"
+
+  local shard
+  shard="$(printf '%s' "$body" | jq -r '.shard // empty' 2>/dev/null || true)"
+  [[ -n "$shard" ]] || return 0
+
+  env_upsert "$env_file" CAYTU_SECRET_STORE_KEY "$shard"
+  chmod 600 "$env_file" 2>/dev/null || true
+}
+
 apply_instance_source() {
   local env_file=$1 record=$2
   local mode; mode="$(printf '%s' "$record" | jq -r '.source.mode // empty')"
@@ -1874,6 +1906,8 @@ instance_provision() {
   env_upsert "$env_file" CAYTU_ORGANIZATION_ID "$org"
   env_upsert "$env_file" CAYTU_INSTANCE_ID "$id"
   remember_instance "$env_file" "$id"
+
+  fetch_secret_shard "$env_file" "$id"
 
   report_step "$env_file" "$id" "config" "writing the image source and access settings"
   apply_instance_source "$env_file" "$record"
