@@ -58,3 +58,9 @@ variable "include_cluster" {
   type        = bool
   default     = false
 }
+
+variable "self_role_name" {
+  description = "Name of the role this permission set is attached to, so it can read itself. Empty leaves that out."
+  type        = string
+  default     = ""
+}

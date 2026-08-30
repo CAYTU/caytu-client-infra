@@ -430,6 +430,12 @@ Resources:
                     }
                   },
                   {
+                    "Sid": "ReadOurOwnRole",
+                    "Effect": "Allow",
+                    "Action": "iam:GetRole",
+                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/CaytuProvisioner"
+                  },
+                  {
                     "Sid": "ClusterLogs",
                     "Effect": "Allow",
                     "Action": [

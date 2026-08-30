@@ -30,6 +30,7 @@ module "permissions" {
   allow_route53    = var.allow_route53
   route53_zone_ids = var.route53_zone_ids
   include_cluster  = var.include_cluster
+  self_role_name   = var.role_name
 }
 
 resource "aws_iam_policy" "provisioner" {
