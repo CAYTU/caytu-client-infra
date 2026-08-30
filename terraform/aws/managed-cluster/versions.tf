@@ -20,13 +20,19 @@ terraform {
     }
   }
 
-  # backend "s3" {
-  #   bucket         = "caytu-client-tf-state"
-  #   key            = "aws-managed-cluster/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "caytu-client-tf-lock"
-  #   encrypt        = true
-  # }
+  # Empty on purpose. Every setting is passed at init, because the key is per
+  # deployment:
+  #
+  #   terraform init -backend-config="key=instances/<deployment-id>/cluster.tfstate"
+  #
+  # There is no local-state fallback: with this block present `init` fails until
+  # a backend is given. That is the intent, and it matters more here than
+  # anywhere else. A cluster whose state was written to a runner's disk cannot
+  # be changed or destroyed afterwards, and it keeps billing.
+  #
+  # It was commented out, which meant the workflow's own guard against exactly
+  # this passed while `init` quietly used local state.
+  backend "s3" {}
 }
 
 provider "aws" {

@@ -1,6 +1,37 @@
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
+# Asked of the region rather than written down. The list was pinned to
+# us-east-1a/b/c and nothing overrode it, so a cluster in Frankfurt or Cape Town
+# would have tried to build subnets in zones that region does not have.
+data "aws_availability_zones" "available" {
+  state = "available"
+
+  # Local zones and Wavelength zones are in the same list and cannot run EKS
+  # nodes, so a region with one would otherwise hand us an unusable zone.
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+locals {
+  # Three where a region has three, fewer where it does not. `slice` past the
+  # end is an error, not a shorter list.
+  discovered_azs = slice(
+    data.aws_availability_zones.available.names,
+    0,
+    min(3, length(data.aws_availability_zones.available.names))
+  )
+  availability_zones = length(var.availability_zones) > 0 ? var.availability_zones : local.discovered_azs
+
+  # The module pairs subnets to zones by position, so the lists have to be the
+  # same length or it fails with an index error rather than anything readable.
+  az_count        = length(local.availability_zones)
+  public_subnets  = slice(var.public_subnet_cidrs, 0, min(local.az_count, length(var.public_subnet_cidrs)))
+  private_subnets = slice(var.private_subnet_cidrs, 0, min(local.az_count, length(var.private_subnet_cidrs)))
+}
+
 # -----------------------------------------------------------------------------
 # VPC via the community module
 # -----------------------------------------------------------------------------
@@ -11,9 +42,9 @@ module "vpc" {
   name = "${var.name_prefix}-${var.environment}"
   cidr = var.vpc_cidr
 
-  azs             = var.availability_zones
-  public_subnets  = var.public_subnet_cidrs
-  private_subnets = var.private_subnet_cidrs
+  azs             = local.availability_zones
+  public_subnets  = local.public_subnets
+  private_subnets = local.private_subnets
 
   enable_nat_gateway   = true
   single_nat_gateway   = true # one NAT keeps costs down for staging; set false for prod
