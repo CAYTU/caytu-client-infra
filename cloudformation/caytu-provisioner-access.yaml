@@ -9,7 +9,7 @@ Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
       - Label: { default: From the Caytu console }
-        Parameters: [ExternalId, CaytuPrincipalArn]
+        Parameters: [ExternalId, CaytuPrincipalArn, Topology]
 
 Parameters:
   ExternalId:
@@ -31,6 +31,18 @@ Parameters:
     Type: String
     Default: CaytuProvisioner
 
+  Topology:
+    Type: String
+    Default: single-instance
+    AllowedValues: [single-instance, cluster]
+    Description: >
+      Pick what the Caytu console told you. A cluster needs its own network, an
+      identity provider and a key, so it grants more than one machine does.
+      Choosing cluster here does not create one.
+
+Conditions:
+  WantsCluster: !Equals [!Ref Topology, cluster]
+
 Resources:
   # The ceiling on every role Caytu creates here. The policy below refuses
   # CreateRole unless this is attached, so it cannot be worked around.
@@ -39,129 +51,176 @@ Resources:
     Properties:
       ManagedPolicyName: !Sub "${RoleName}Boundary"
       Description: Ceiling for every role the Caytu provisioner creates here.
-      PolicyDocument: !Sub |
-        {
-          "Version": "2012-10-17",
-          "Statement": [
+      # The cluster statements are spliced in only for a cluster stack. Without
+      # them the managed policies EKS attaches to its own node role would be
+      # capped to nothing here and the nodes would never join.
+      PolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              ${ClusterCeiling}
+              {
+                "Sid": "PullImages",
+                "Effect": "Allow",
+                "Action": [
+                  "ecr:ListImages",
+                  "ecr:GetDownloadUrlForLayer",
+                  "ecr:GetAuthorizationToken",
+                  "ecr:DescribeRepositories",
+                  "ecr:DescribeImages",
+                  "ecr:BatchGetImage",
+                  "ecr:BatchCheckLayerAvailability"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "SessionManager",
+                "Effect": "Allow",
+                "Action": [
+                  "ssmmessages:OpenDataChannel",
+                  "ssmmessages:OpenControlChannel",
+                  "ssmmessages:CreateDataChannel",
+                  "ssmmessages:CreateControlChannel",
+                  "ssm:UpdateInstanceInformation",
+                  "ssm:UpdateInstanceAssociationStatus",
+                  "ssm:UpdateAssociationStatus",
+                  "ssm:PutInventory",
+                  "ssm:PutConfigurePackageResult",
+                  "ssm:PutComplianceItems",
+                  "ssm:ListInstanceAssociations",
+                  "ssm:GetManifest",
+                  "ssm:GetDocument",
+                  "ssm:GetDeployablePatchSnapshotForInstance",
+                  "ssm:DescribeInstanceProperties",
+                  "ssm:DescribeDocumentParameters",
+                  "ssm:DescribeDocument",
+                  "ec2messages:SendReply",
+                  "ec2messages:GetMessages",
+                  "ec2messages:GetEndpoint",
+                  "ec2messages:FailMessage",
+                  "ec2messages:DeleteMessage",
+                  "ec2messages:AcknowledgeMessage"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "AgentAndBackups",
+                "Effect": "Allow",
+                "Action": [
+                  "s3:PutObject",
+                  "s3:ListMultipartUploadParts",
+                  "s3:ListBucket",
+                  "s3:GetObjectVersion",
+                  "s3:GetObject",
+                  "s3:DeleteObjectVersion",
+                  "s3:DeleteObject",
+                  "s3:AbortMultipartUpload"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "DeviceMessagingAndVideo",
+                "Effect": "Allow",
+                "Action": [
+                  "kinesisvideo:ListSignalingChannels",
+                  "kinesisvideo:GetSignalingChannelEndpoint",
+                  "kinesisvideo:GetIceServerConfig",
+                  "kinesisvideo:DescribeSignalingChannel",
+                  "kinesisvideo:DeleteSignalingChannel",
+                  "kinesisvideo:CreateSignalingChannel",
+                  "kinesisvideo:ConnectAsViewer",
+                  "kinesisvideo:ConnectAsMaster",
+                  "iot:Subscribe",
+                  "iot:Receive",
+                  "iot:Publish",
+                  "iot:ListThings",
+                  "iot:DescribeThing",
+                  "iot:DescribeEndpoint",
+                  "iot:CreateThing",
+                  "iot:Connect",
+                  "iot:AssumeRoleWithCertificate"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "ReadEncryptedVolumesAndObjects",
+                "Effect": "Allow",
+                "Action": [
+                  "kms:GenerateDataKeyWithoutPlaintext",
+                  "kms:GenerateDataKey",
+                  "kms:DescribeKey",
+                  "kms:Decrypt"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "OwnLogs",
+                "Effect": "Allow",
+                "Action": [
+                  "logs:PutLogEvents",
+                  "logs:DescribeLogStreams",
+                  "logs:CreateLogStream"
+                ],
+                "Resource": "*"
+              },
+              {
+                "Sid": "NeverIdentityOrBilling",
+                "Effect": "Deny",
+                "Action": [
+                  "sts:AssumeRole",
+                  "organizations:*",
+                  "iam:*",
+                  "billing:*",
+                  "aws-portal:*",
+                  "account:*"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        - ClusterCeiling: !If
+          - WantsCluster
+          - |
             {
-              "Sid": "PullImages",
+              "Sid": "ClusterNodesAndAddons",
               "Effect": "Allow",
               "Action": [
-                "ecr:ListImages",
-                "ecr:GetDownloadUrlForLayer",
-                "ecr:GetAuthorizationToken",
-                "ecr:DescribeRepositories",
-                "ecr:DescribeImages",
-                "ecr:BatchGetImage",
-                "ecr:BatchCheckLayerAvailability"
+                "elasticloadbalancing:*",
+                "eks:DescribeCluster",
+                "ec2:UnassignPrivateIpAddresses",
+                "ec2:ModifyVolume",
+                "ec2:ModifyNetworkInterfaceAttribute",
+                "ec2:DetachVolume",
+                "ec2:DetachNetworkInterface",
+                "ec2:DeleteVolume",
+                "ec2:DeleteSnapshot",
+                "ec2:DeleteNetworkInterface",
+                "ec2:CreateVolume",
+                "ec2:CreateTags",
+                "ec2:CreateSnapshot",
+                "ec2:CreateNetworkInterface",
+                "ec2:AttachVolume",
+                "ec2:AttachNetworkInterface",
+                "ec2:AssignPrivateIpAddresses",
+                "autoscaling:TerminateInstanceInAutoScalingGroup",
+                "autoscaling:SetDesiredCapacity",
+                "acm:ListCertificates",
+                "acm:DescribeCertificate"
               ],
               "Resource": "*"
             },
             {
-              "Sid": "SessionManager",
+              "Sid": "ClusterReads",
               "Effect": "Allow",
               "Action": [
-                "ssmmessages:OpenDataChannel",
-                "ssmmessages:OpenControlChannel",
-                "ssmmessages:CreateDataChannel",
-                "ssmmessages:CreateControlChannel",
-                "ssm:UpdateInstanceInformation",
-                "ssm:UpdateInstanceAssociationStatus",
-                "ssm:UpdateAssociationStatus",
-                "ssm:PutInventory",
-                "ssm:PutConfigurePackageResult",
-                "ssm:PutComplianceItems",
-                "ssm:ListInstanceAssociations",
-                "ssm:GetManifest",
-                "ssm:GetDocument",
-                "ssm:GetDeployablePatchSnapshotForInstance",
-                "ssm:DescribeInstanceProperties",
-                "ssm:DescribeDocumentParameters",
-                "ssm:DescribeDocument",
-                "ec2messages:SendReply",
-                "ec2messages:GetMessages",
-                "ec2messages:GetEndpoint",
-                "ec2messages:FailMessage",
-                "ec2messages:DeleteMessage",
-                "ec2messages:AcknowledgeMessage"
+                "elasticloadbalancing:Describe*",
+                "ec2:Describe*",
+                "autoscaling:Describe*"
               ],
               "Resource": "*"
             },
-            {
-              "Sid": "AgentAndBackups",
-              "Effect": "Allow",
-              "Action": [
-                "s3:PutObject",
-                "s3:ListMultipartUploadParts",
-                "s3:ListBucket",
-                "s3:GetObjectVersion",
-                "s3:GetObject",
-                "s3:DeleteObjectVersion",
-                "s3:DeleteObject",
-                "s3:AbortMultipartUpload"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Sid": "DeviceMessagingAndVideo",
-              "Effect": "Allow",
-              "Action": [
-                "kinesisvideo:ListSignalingChannels",
-                "kinesisvideo:GetSignalingChannelEndpoint",
-                "kinesisvideo:GetIceServerConfig",
-                "kinesisvideo:DescribeSignalingChannel",
-                "kinesisvideo:DeleteSignalingChannel",
-                "kinesisvideo:CreateSignalingChannel",
-                "kinesisvideo:ConnectAsViewer",
-                "kinesisvideo:ConnectAsMaster",
-                "iot:Subscribe",
-                "iot:Receive",
-                "iot:Publish",
-                "iot:ListThings",
-                "iot:DescribeThing",
-                "iot:DescribeEndpoint",
-                "iot:CreateThing",
-                "iot:Connect",
-                "iot:AssumeRoleWithCertificate"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Sid": "ReadEncryptedVolumesAndObjects",
-              "Effect": "Allow",
-              "Action": [
-                "kms:GenerateDataKeyWithoutPlaintext",
-                "kms:GenerateDataKey",
-                "kms:DescribeKey",
-                "kms:Decrypt"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Sid": "OwnLogs",
-              "Effect": "Allow",
-              "Action": [
-                "logs:PutLogEvents",
-                "logs:DescribeLogStreams",
-                "logs:CreateLogStream"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Sid": "NeverIdentityOrBilling",
-              "Effect": "Deny",
-              "Action": [
-                "sts:AssumeRole",
-                "organizations:*",
-                "iam:*",
-                "billing:*",
-                "aws-portal:*",
-                "account:*"
-              ],
-              "Resource": "*"
-            }
-          ]
-        }
+          - ""
 
   CaytuProvisionerRole:
     Type: AWS::IAM::Role
@@ -182,6 +241,197 @@ Resources:
               StringEquals:
                 sts:ExternalId: !Ref ExternalId
       Policies:
+        # The cluster half is its own policy rather than more statements in the
+        # one below: together they run past the size limit on a single policy.
+        - !If
+          - WantsCluster
+          - PolicyName: !Sub "${RoleName}Cluster"
+            PolicyDocument: !Sub |
+              {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Sid": "BuildTheClusterNetwork",
+                    "Effect": "Allow",
+                    "Action": [
+                      "ec2:CreateVpcEndpoint",
+                      "ec2:CreateVpc",
+                      "ec2:CreateSubnet",
+                      "ec2:CreateRouteTable",
+                      "ec2:CreateRoute",
+                      "ec2:CreateNatGateway",
+                      "ec2:CreateLaunchTemplateVersion",
+                      "ec2:CreateLaunchTemplate",
+                      "ec2:CreateInternetGateway",
+                      "ec2:AllocateAddress"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "ChangeOnlyOurOwnNetwork",
+                    "Effect": "Allow",
+                    "Action": [
+                      "ec2:ReleaseAddress",
+                      "ec2:ModifyVpcAttribute",
+                      "ec2:ModifySubnetAttribute",
+                      "ec2:DisassociateRouteTable",
+                      "ec2:DisassociateAddress",
+                      "ec2:DetachInternetGateway",
+                      "ec2:DeleteVpcEndpoint",
+                      "ec2:DeleteVpc",
+                      "ec2:DeleteSubnet",
+                      "ec2:DeleteRouteTable",
+                      "ec2:DeleteRoute",
+                      "ec2:DeleteNatGateway",
+                      "ec2:DeleteLaunchTemplateVersions",
+                      "ec2:DeleteLaunchTemplate",
+                      "ec2:DeleteInternetGateway",
+                      "ec2:AttachInternetGateway",
+                      "ec2:AssociateRouteTable",
+                      "ec2:AssociateAddress"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      },
+                      "StringLike": {
+                        "aws:ResourceTag/Name": "caytu-*"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "RunTheCluster",
+                    "Effect": "Allow",
+                    "Action": [
+                      "eks:UpdateNodegroupVersion",
+                      "eks:UpdateNodegroupConfig",
+                      "eks:UpdateClusterVersion",
+                      "eks:UpdateClusterConfig",
+                      "eks:UpdateAddon",
+                      "eks:UntagResource",
+                      "eks:TagResource",
+                      "eks:ListTagsForResource",
+                      "eks:DisassociateAccessPolicy",
+                      "eks:DescribeNodegroup",
+                      "eks:DescribeCluster",
+                      "eks:DescribeAddon",
+                      "eks:DescribeAccessEntry",
+                      "eks:DeleteNodegroup",
+                      "eks:DeleteCluster",
+                      "eks:DeleteAddon",
+                      "eks:DeleteAccessEntry",
+                      "eks:CreateNodegroup",
+                      "eks:CreateCluster",
+                      "eks:CreateAddon",
+                      "eks:CreateAccessEntry",
+                      "eks:AssociateAccessPolicy"
+                    ],
+                    "Resource": [
+                      "arn:aws:eks:*:${AWS::AccountId}:nodegroup/caytu-*/*",
+                      "arn:aws:eks:*:${AWS::AccountId}:cluster/caytu-*",
+                      "arn:aws:eks:*:${AWS::AccountId}:addon/caytu-*/*",
+                      "arn:aws:eks:*:${AWS::AccountId}:access-entry/caytu-*/*"
+                    ],
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "ReadTheClusterCatalogue",
+                    "Effect": "Allow",
+                    "Action": [
+                      "eks:ListNodegroups",
+                      "eks:ListClusters",
+                      "eks:ListAssociatedAccessPolicies",
+                      "eks:ListAddons",
+                      "eks:ListAccessEntries",
+                      "eks:DescribeAddonVersions"
+                    ],
+                    "Resource": "*"
+                  },
+                  {
+                    "Sid": "ClusterIdentityProvider",
+                    "Effect": "Allow",
+                    "Action": [
+                      "iam:UpdateOpenIDConnectProviderThumbprint",
+                      "iam:TagOpenIDConnectProvider",
+                      "iam:GetOpenIDConnectProvider",
+                      "iam:DeleteOpenIDConnectProvider",
+                      "iam:CreateOpenIDConnectProvider"
+                    ],
+                    "Resource": "arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.*.amazonaws.com/id/*"
+                  },
+                  {
+                    "Sid": "ServiceLinkedRolesTheClusterNeeds",
+                    "Effect": "Allow",
+                    "Action": "iam:CreateServiceLinkedRole",
+                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
+                    "Condition": {
+                      "StringEquals": {
+                        "iam:AWSServiceName": [
+                          "eks.amazonaws.com",
+                          "eks-nodegroup.amazonaws.com",
+                          "autoscaling.amazonaws.com",
+                          "elasticloadbalancing.amazonaws.com"
+                        ]
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "ClusterKeyAndScaling",
+                    "Effect": "Allow",
+                    "Action": [
+                      "kms:TagResource",
+                      "kms:ScheduleKeyDeletion",
+                      "kms:PutKeyPolicy",
+                      "kms:ListResourceTags",
+                      "kms:GetKeyRotationStatus",
+                      "kms:GetKeyPolicy",
+                      "kms:EnableKeyRotation",
+                      "kms:DeleteAlias",
+                      "kms:CreateKey",
+                      "kms:CreateAlias",
+                      "autoscaling:UpdateAutoScalingGroup",
+                      "autoscaling:Describe*",
+                      "autoscaling:DeleteTags",
+                      "autoscaling:CreateOrUpdateTags"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "ClusterLogs",
+                    "Effect": "Allow",
+                    "Action": [
+                      "logs:TagResource",
+                      "logs:PutRetentionPolicy",
+                      "logs:ListTagsForResource",
+                      "logs:DescribeLogGroups",
+                      "logs:DeleteLogGroup",
+                      "logs:CreateLogGroup"
+                    ],
+                    "Resource": "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/eks/caytu-*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  }
+                ]
+              }
+          - !Ref AWS::NoValue
         - PolicyName: !Ref RoleName
           PolicyDocument: !Sub |
             {
