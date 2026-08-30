@@ -2977,15 +2977,51 @@ bootstrap_secret_store() {
   return 1
 }
 
+# Secrets this deployment needs and nobody should be typing.
+#
+# Each one is generated here if the env file does not already carry it, so a
+# machine provisioned by the pipeline is not sharing anything with the next one.
+# Never overwritten: a value already set was either chosen deliberately or is
+# what a running deployment is already using, and replacing it would lock the
+# deployment out of its own data.
+#
+# MinIO is why this exists. The compose file falls back to minioadmin/minioadmin
+# when these are empty, which is MinIO's published default and the first thing
+# any scanner tries, and nothing was filling them in. Every machine we built
+# automatically was running its object store on that until this.
+#
+# The others fail closed rather than open: an empty TURN secret means video does
+# not connect for anyone behind NAT, and an empty signalling token means it does
+# not connect at all. Safer, but still a deployment that does not work.
 ensure_deployment_secrets() {
   local env_file=$1
   local key
-  for key in JWT_SECRET; do
+
+  # 32 hex characters each. The user is a name rather than a secret, but it
+  # should still differ per deployment so one leaked pair does not read as
+  # every deployment's pair.
+  for key in JWT_SECRET MINIO_ROOT_PASSWORD TURN_SECRET SIGNALING_AUTH_TOKEN SMS_ENCRYPTION_KEY; do
     [[ -n "$(env_get "$env_file" "$key" || true)" ]] && continue
     require_cmd openssl
     env_upsert "$env_file" "$key" "$(openssl rand -hex 32)"
     ok "generated $key for this deployment"
   done
+
+  if [[ -z "$(env_get "$env_file" MINIO_ROOT_USER || true)" ]]; then
+    require_cmd openssl
+    env_upsert "$env_file" MINIO_ROOT_USER "caytu-$(openssl rand -hex 6)"
+    ok "generated MINIO_ROOT_USER for this deployment"
+  fi
+
+  # The store keeps the same pair under different names, and the backend reads
+  # it from there rather than from the env file. Kept in step here because the
+  # two drifting is a deployment that starts and then cannot reach its own
+  # object storage, which does not look like a credential problem from outside.
+  local minio_user minio_pass
+  minio_user="$(env_get "$env_file" MINIO_ROOT_USER || true)"
+  minio_pass="$(env_get "$env_file" MINIO_ROOT_PASSWORD || true)"
+  [[ -n "$minio_user" ]] && env_upsert "$env_file" MINIO_ACCESS_KEY "$minio_user"
+  [[ -n "$minio_pass" ]] && env_upsert "$env_file" MINIO_SECRET_KEY "$minio_pass"
 }
 
 # Whether the token in this env file is missing or past its expiry.
