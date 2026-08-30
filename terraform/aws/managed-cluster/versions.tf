@@ -73,3 +73,20 @@ provider "helm" {
     token                  = data.aws_eks_cluster_auth.this.token
   }
 }
+
+# Route 53 separately, because the name and the cluster do not have to live in
+# the same account. A caytu.link record stays ours to write even when the
+# cluster is provisioned in a customer account through assume_role above.
+provider "aws" {
+  alias   = "dns"
+  region  = var.dns_region
+  profile = var.aws_profile != "" ? var.aws_profile : null
+
+  dynamic "assume_role" {
+    for_each = var.dns_assume_role_arn != "" ? [1] : []
+    content {
+      role_arn     = var.dns_assume_role_arn
+      session_name = "caytu-dns-${var.name_prefix}"
+    }
+  }
+}

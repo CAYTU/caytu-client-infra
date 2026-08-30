@@ -572,6 +572,31 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # The certificate the load balancer serves. A single machine gets one from
+  # Let's Encrypt on the machine; a cluster needs one in ACM, here.
+  #
+  # Not scoped to a resource: a certificate has no name until it is requested,
+  # and its arn is a generated id rather than something we choose.
+  statement {
+    sid    = "CertificateForTheIngress"
+    effect = "Allow"
+    actions = [
+      "acm:RequestCertificate",
+      "acm:DescribeCertificate",
+      "acm:DeleteCertificate",
+      "acm:ListCertificates",
+      "acm:AddTagsToCertificate",
+      "acm:ListTagsForCertificate",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
   # Control-plane logging, in its own log group named after the cluster.
   statement {
     sid    = "ClusterLogs"

@@ -107,3 +107,13 @@ output "helm_commands" {
     caytu-client -t aws-cluster k8s apply
   EOT
 }
+
+output "certificate_arn" {
+  description = "The certificate the ingress should serve. Empty when none was asked for."
+  value       = local.certificate_arn
+}
+
+output "domain_name" {
+  description = "The name the cluster answers on. Empty when none was asked for."
+  value       = var.domain_name
+}
