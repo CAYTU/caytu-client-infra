@@ -16,6 +16,31 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
+  # Who administers this cluster.
+  #
+  # Named rather than inferred. The module's own option asks IAM who the caller
+  # is, which needs iam:GetRole on the role it is already running as, and the
+  # provisioner role deliberately cannot read IAM. Granting that permission to
+  # satisfy a lookup would be widening the role to answer a question we can
+  # already answer.
+  #
+  # It is also the better shape: the cluster's administrator should be a
+  # principal we chose, not a consequence of whoever happened to run the apply.
+  #
+  # Building in someone else's account means the role we assumed. In our own it
+  # is the role this run holds, which arrives as an assumed-role arn and has to
+  # be turned back into the role arn an access entry wants.
+  caller_arn             = data.aws_caller_identity.current.arn
+  caller_is_assumed_role = can(regex(":assumed-role/", local.caller_arn))
+  caller_role_name       = local.caller_is_assumed_role ? split("/", local.caller_arn)[1] : ""
+  own_role_arn           = local.caller_is_assumed_role ? "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:role/${local.caller_role_name}" : local.caller_arn
+
+  creator_admin_arn = var.assume_role_arn != "" ? var.assume_role_arn : local.own_role_arn
+
+  # The operators named in tfvars, plus whoever is applying. Deduplicated, or
+  # naming the applying role in tfvars too would produce a duplicate key.
+  cluster_admin_arns = distinct(concat(var.operator_admin_arns, [local.creator_admin_arn]))
+
   # Three where a region has three, fewer where it does not. `slice` past the
   # end is an error, not a shorter list.
   discovered_azs = slice(
@@ -76,11 +101,13 @@ module "eks" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  enable_cluster_creator_admin_permissions = true
+  # Off, because it resolves the creator by asking IAM. See cluster_admin_arns:
+  # the applying role is added to the access entries below by name instead.
+  enable_cluster_creator_admin_permissions = false
 
   # Access entries — modern replacement for aws-auth ConfigMap.
   access_entries = {
-    for arn in var.operator_admin_arns : arn => {
+    for arn in local.cluster_admin_arns : arn => {
       principal_arn = arn
       policy_associations = {
         admin = {
