@@ -11,6 +11,8 @@ namespace: caytu-client
 
 resources:
   - ../../base
+  # The only thing that can act on this deployment once the build has finished.
+  - agent.yaml
 
 secretGenerator:
   - name: caytu-secrets
@@ -30,6 +32,9 @@ images:
     newTag: latest
   - name: caytu-client/gstreamer-recorder
     newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-gstreamer-recorder
+    newTag: latest
+  - name: caytu-client/cluster-agent
+    newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-cluster-agent
     newTag: latest
   - name: caytu-client/mqtt-streamer
     newName: <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/caytu-client-mqtt-streamer

@@ -1758,6 +1758,56 @@ fetch_secret_shard() {
 # ran whatever IMAGE_TAG happened to say in its own env file. A fork published
 # under another name had nowhere to be declared, and pinning a site to a
 # known-good version meant editing a file on the box.
+# Bring this host's configuration up to what the console holds.
+#
+# The console records settings and does not push them: the platform has no route
+# into a customer's network, so nothing happens until the host asks. This is the
+# asking, and it is why an operator's Save is described as recording rather than
+# applying.
+#
+# Everything lands in the env file, which is already where the generated secrets
+# live. Values arrive decrypted over the host's own token and never touch a
+# workflow log.
+#
+# Returns 1 with a reason on stdout, so the caller can report why.
+fetch_and_apply_settings() {
+  local env_file=$1 id=$2
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  if [[ -z "$token" ]]; then
+    echo "this host has no platform credential, so it cannot collect settings"
+    return 1
+  fi
+
+  local body
+  if ! body="$(curl -fsS -m 30 \
+    "$(instance_platform_url "$env_file")/api/billings/instances/$id/settings/resolved" \
+    -H "Authorization: Bearer $token" 2>/dev/null)"; then
+    echo "the platform did not answer, so nothing was changed"
+    return 1
+  fi
+
+  local count
+  count="$(printf '%s' "$body" | jq -r '.settings | length' 2>/dev/null || echo 0)"
+  if [[ "$count" == "0" || -z "$count" ]]; then
+    echo "the console holds no settings for this deployment, so nothing changed"
+    return 0
+  fi
+
+  # Written one at a time rather than rewriting the file, so a key the console
+  # does not know about is left alone. The env file also holds values only this
+  # host has, and a wholesale rewrite would lose them.
+  local key value applied=0
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    value="$(printf '%s' "$body" | jq -r --arg k "$key" '.settings[$k]')"
+    env_upsert "$env_file" "$key" "$value" && applied=$((applied + 1))
+  done < <(printf '%s' "$body" | jq -r '.settings | keys[]')
+
+  chmod 600 "$env_file" 2>/dev/null || true
+  echo "$applied"
+  return 0
+}
+
 apply_instance_source() {
   local env_file=$1 record=$2
   local mode; mode="$(printf '%s' "$record" | jq -r '.source.mode // empty')"
@@ -2198,6 +2248,31 @@ command_execute() {
         status="failed"; error="the backend did not come back, so the licence is configured but not in use"
       else
         printf 'licence %s configured; the deployment installs it as it comes back up' "$lic" > "$work/result"
+      fi
+      ;;
+    apply-settings)
+      # Saving is not applying, and this is the applying. The values are
+      # collected here rather than sent with the command: a command row is
+      # stored on the platform and readable afterwards, and these are secrets.
+      local outcome
+      if ! outcome="$(fetch_and_apply_settings "$env_file" "$id")"; then
+        status="failed"; error="$outcome"
+      elif [[ "$outcome" =~ ^[0-9]+$ ]]; then
+        # --force-recreate for the same reason install-license needs it: the
+        # values arrive through the env file, and a plain restart reuses the
+        # container they are already baked into, so nothing would change and
+        # this would report success having done nothing.
+        if ! compose up -d --force-recreate >/dev/null 2>&1; then
+          status="failed"
+          error="the settings were written but the stack did not come back: $(compose_failure_reason)"
+        else
+          printf '%s setting(s) written and the stack restarted on them' "$outcome" > "$work/result"
+        fi
+      else
+        # Nothing to do is not a failure. Reported so the console does not show
+        # a successful apply that changed nothing without saying so.
+        skipped=1
+        printf '%s' "$outcome" > "$work/result"
       fi
       ;;
     teardown)
