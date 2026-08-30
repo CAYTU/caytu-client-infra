@@ -30,8 +30,20 @@ terraform {
 }
 
 provider "aws" {
-  region  = var.region
-  profile = var.aws_profile
+  region = var.region
+  # Empty means environment credentials, which is what a runner has. Naming a
+  # profile there sends terraform looking for a file that is not present.
+  profile = var.aws_profile != "" ? var.aws_profile : null
+
+  # Present only when the cluster belongs in someone else's account.
+  dynamic "assume_role" {
+    for_each = var.assume_role_arn != "" ? [1] : []
+    content {
+      role_arn     = var.assume_role_arn
+      external_id  = var.assume_role_external_id != "" ? var.assume_role_external_id : null
+      session_name = "caytu-provision-${var.name_prefix}"
+    }
+  }
 
   default_tags {
     tags = {

@@ -140,3 +140,21 @@ variable "backup_bucket_name" {
   type    = string
   default = ""
 }
+
+# -----------------------------------------------------------------------------
+# Building in an account we do not own
+# -----------------------------------------------------------------------------
+# Both empty on a Caytu-hosted apply, which is the default.
+
+variable "assume_role_arn" {
+  description = "Role to assume in the target account. Empty runs with the caller's own credentials."
+  type        = string
+  default     = ""
+}
+
+variable "assume_role_external_id" {
+  description = "External id that account requires. Only meaningful with assume_role_arn."
+  type        = string
+  default     = ""
+  sensitive   = true
+}

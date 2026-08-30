@@ -1,0 +1,207 @@
+name: Provision a cluster deployment
+
+# Build one deployment on EKS, and nothing else.
+#
+# A sibling of Provision.yml rather than a branch inside it. A single machine
+# and a cluster share the account resolution and the artifact grant, and agree
+# on almost nothing after that: one takes an instance type and an SSH decision,
+# the other takes node pools; one ends with a machine that enrols itself, the
+# other ends with manifests applied to an API server.
+#
+# State is per deployment and separate from the single-instance key, so a
+# deployment can never have both and destroy the wrong one.
+#
+# Known gap: a cluster has no host agent, so nothing reports back and the
+# console will show it as provisioning after this finishes. See
+# docs/cluster-readiness.md.
+
+run-name: Provision cluster ${{ inputs.subdomain }} (${{ inputs.instance_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "The platform's deployment record id"
+        required: true
+      region:
+        description: "AWS region"
+        required: true
+        default: "us-east-1"
+      subdomain:
+        description: "Hostname label, used to name the resources"
+        required: true
+      platform_url:
+        description: "Where the deployment reports back to"
+        required: true
+      certificate_arn:
+        description: "ACM certificate for the ingress. Terraform does not create one."
+        required: true
+      target_account_id:
+        description: "AWS account to build in. Empty means our own."
+        required: false
+        default: ""
+      target_role_arn:
+        required: false
+        default: ""
+      target_external_id:
+        required: false
+        default: ""
+      target_permissions_boundary:
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  # One build per deployment. Two applies against one state corrupts it.
+  group: provision-cluster-${{ github.event.inputs.instance_id }}
+  cancel-in-progress: false
+
+env:
+  TF_DIR: terraform/aws/managed-cluster
+  OVERLAY: kubernetes/overlays/aws-eks
+
+jobs:
+  provision:
+    name: Provision cluster ${{ github.event.inputs.subdomain }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PROVISIONING_ROLE_ARN }}
+          role-session-name: provision-cluster-${{ github.event.inputs.subdomain }}
+          aws-region: ${{ github.event.inputs.region }}
+
+      - name: Work out whose account this is
+        id: target
+        uses: ./.github/actions/target-account
+        with:
+          target_account_id: ${{ github.event.inputs.target_account_id }}
+          role_arn: ${{ github.event.inputs.target_role_arn }}
+          external_id: ${{ github.event.inputs.target_external_id }}
+          permissions_boundary: ${{ github.event.inputs.target_permissions_boundary }}
+
+      # Our account, not theirs, so it runs before terraform assumes anything.
+      - name: Let that account reach our images
+        if: github.event.inputs.target_account_id != ''
+        run: ./scripts/grant-customer-artifacts.sh "${{ github.event.inputs.target_account_id }}"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Init, with this deployment's own state
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          test -n "$TF_STATE_BUCKET" || {
+            echo "::error::TF_STATE_BUCKET is not set. Building without remote state would create a cluster nothing can find again."
+            exit 1
+          }
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=instances/${{ github.event.inputs.instance_id }}/cluster.tfstate" \
+            -backend-config="region=${{ github.event.inputs.region }}" \
+            ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
+            -backend-config="encrypt=true"
+
+      - name: Plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+          ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
+          ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -out=tfplan \
+            -var "aws_profile=" \
+            -var "region=${REGION}" \
+            -var "environment=production" \
+            -var "name_prefix=caytu-${SUBDOMAIN}" \
+            -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
+            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}"
+
+      - name: Apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      # Everything below runs against the cluster that now exists.
+      - name: Reach the cluster
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          eval "$(terraform output -raw kubeconfig_command)"
+          kubectl get nodes
+
+      - name: Cluster add-ons
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          # The manifests below assume an ingress class and a metrics source.
+          # Applying them first would leave the ingress unclaimed and the HPAs
+          # unable to read anything.
+          terraform output -raw helm_commands > /tmp/addons.sh
+          bash /tmp/addons.sh
+
+      - name: Configure the deployment
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          CERT_ARN: ${{ github.event.inputs.certificate_arn }}
+        run: |
+          set -euo pipefail
+          registry="$(terraform output -raw ecr_registry 2>/dev/null || true)"
+          overlay="${GITHUB_WORKSPACE}/${OVERLAY}"
+
+          # Generated here for now. The platform will own these once deployment
+          # settings exist; until then a cluster gets working values rather than
+          # the placeholders in the example file.
+          {
+            echo "CAYTU_DOMAIN=${SUBDOMAIN}.caytu.link"
+            echo "CAYTU_BILLINGS_URL=${PLATFORM_URL}"
+            echo "MINIO_ROOT_USER=caytu"
+            echo "MINIO_ROOT_PASSWORD=$(openssl rand -hex 24)"
+            echo "TURN_SECRET=$(openssl rand -hex 32)"
+            echo "SIGNALING_AUTH_TOKEN=$(openssl rand -hex 32)"
+            echo "JWT_SECRET=$(openssl rand -hex 64)"
+          } > "$overlay/secrets.env"
+
+          cd "$overlay"
+          kustomize edit set image \
+            "caytu-client/backend=${registry}/caytu-client-backend:latest" \
+            "caytu-client/frontend=${registry}/caytu-client-frontend:latest" \
+            "caytu-client/gstreamer-recorder=${registry}/caytu-client-gstreamer-recorder:latest" \
+            "caytu-client/mqtt-streamer=${registry}/caytu-client-mqtt-streamer:latest"
+
+          # The example carries a placeholder host and certificate.
+          sed -i "s|caytu.example.com|${SUBDOMAIN}.caytu.link|g" kustomization.yaml
+          sed -i "s|arn:aws:acm:REGION:ACCOUNT:certificate/UUID|${CERT_ARN}|g" kustomization.yaml
+
+      - name: Apply the manifests
+        run: |
+          set -euo pipefail
+          kubectl apply -k "${GITHUB_WORKSPACE}/${OVERLAY}"
+          kubectl -n caytu-client rollout status deploy/backend --timeout=10m
+
+      - name: What was created
+        if: always()
+        run: |
+          {
+            echo "### Cluster \`${{ github.event.inputs.subdomain }}\`"
+            echo
+            kubectl -n caytu-client get pods 2>/dev/null || echo "the cluster was not reachable"
+            echo
+            echo "Point ${{ github.event.inputs.subdomain }}.caytu.link at the load balancer above."
+            echo "No agent runs in a cluster yet, so the console will still show this as provisioning."
+          } >> "$GITHUB_STEP_SUMMARY"
