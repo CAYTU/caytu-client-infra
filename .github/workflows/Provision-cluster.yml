@@ -278,6 +278,7 @@ jobs:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
         run: |
           set -euo pipefail
           # Ours, never the cluster's. terraform output ecr_registry reports
@@ -318,6 +319,14 @@ jobs:
             "caytu-client/frontend=${registry}/caytu-client-frontend:${tag}" \
             "caytu-client/gstreamer-recorder=${registry}/caytu-client-gstreamer-recorder:${tag}" \
             "caytu-client/mqtt-streamer=${registry}/caytu-client-mqtt-streamer:${tag}"
+
+          # The agent is what makes the cluster reachable once this run ends.
+          # It needs to know which deployment it speaks for and where to speak,
+          # and neither is knowable until now.
+          sed -i "s|PLATFORM_URL_PLACEHOLDER|${PLATFORM_URL}|g" agent.yaml
+          sed -i "s|INSTANCE_ID_PLACEHOLDER|${INSTANCE_ID}|g" agent.yaml
+          kustomize edit set image \
+            "caytu-client/cluster-agent=${registry}/caytu-client-cluster-agent:latest"
 
           # The example carries a placeholder host and certificate.
           sed -i "s|caytu.example.com|${SUBDOMAIN}.caytu.link|g" kustomization.yaml
@@ -406,5 +415,5 @@ jobs:
             echo
             kubectl -n caytu-client get pods 2>/dev/null || echo "the cluster was not reachable"
             echo
-            echo "No agent runs in a cluster yet, so the console will still show this as provisioning."
+            echo "The agent in the cluster reports from here on: what is running, and anything the console asks for."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -16,7 +16,10 @@ ACCOUNT="${1:?usage: grant-customer-artifacts.sh <aws-account-id> [prefix]}"
 PREFIX="${2:-caytu-}"
 BUCKET="${AGENT_BUCKET:-caytu-cli}"
 AGENT_PREFIX="${AGENT_PREFIX:-agent}"
-REPOS="${IMAGE_REPOSITORIES:-caytu-client-backend caytu-client-frontend caytu-client-mqtt-streamer caytu-client-gstreamer-recorder caytu-client-signaling-server}"
+# The cluster agent is in this list because a cluster's nodes pull it like any
+# other workload. Without it the agent pod is the one thing that cannot start,
+# and a cluster comes up unreachable.
+REPOS="${IMAGE_REPOSITORIES:-caytu-client-backend caytu-client-frontend caytu-client-mqtt-streamer caytu-client-gstreamer-recorder caytu-client-signaling-server caytu-client-cluster-agent}"
 
 [[ "$ACCOUNT" =~ ^[0-9]{12}$ ]] || {
   echo "::error::'$ACCOUNT' is not a 12-digit account id"

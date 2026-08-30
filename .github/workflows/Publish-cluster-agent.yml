@@ -1,0 +1,79 @@
+name: Publish the cluster agent
+
+# Build the image a cluster runs so it can be reached at all.
+#
+# Separate from Publish-agent.yml because the two are different artefacts with
+# different lifetimes: that one is a tarball a machine downloads at boot, this
+# is an image the cluster pulls like any other workload.
+#
+# Published to our own registry, and a customer's account is granted read on it
+# by the same script that grants the rest.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cluster-agent/**"
+      - ".github/workflows/Publish-cluster-agent.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  REPOSITORY: caytu-client-cluster-agent
+
+jobs:
+  publish:
+    name: Publish cluster agent
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PROVISIONING_ROLE_ARN }}
+          role-session-name: publish-cluster-agent
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Created here rather than in Terraform: this image belongs to the agent,
+      # not to any one deployment's stack, and nothing else would create it.
+      - name: Make sure the repository exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "${REPOSITORY}" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "${REPOSITORY}" \
+                 --image-scanning-configuration scanOnPush=true >/dev/null
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Both architectures, because a cluster's nodes are whatever the sizing
+      # chose and Graviton is the cheaper half of that list.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: cluster-agent
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORY }}:latest
+            ${{ steps.ecr.outputs.registry }}/${{ env.REPOSITORY }}:${{ github.sha }}
+
+      - name: What was published
+        run: |
+          {
+            echo "### Cluster agent"
+            echo
+            echo "\`${{ steps.ecr.outputs.registry }}/${REPOSITORY}:${{ github.sha }}\`"
+            echo
+            echo "Also tagged \`latest\`, which is what a cluster pulls."
+          } >> "$GITHUB_STEP_SUMMARY"

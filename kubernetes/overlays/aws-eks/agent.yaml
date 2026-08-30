@@ -1,0 +1,103 @@
+# The agent that lets the console reach a cluster deployment.
+#
+# Without it a cluster is built and then unreachable: settings cannot be
+# applied, logs cannot be read, a licence cannot be installed, and the console
+# cannot tell a healthy cluster from a dead one.
+#
+# It is scoped to this namespace. The credential it holds speaks for one
+# deployment, so the permissions it carries should not reach past one either.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: caytu-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: caytu-agent
+rules:
+  # Reading what is running, which is the heartbeat.
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list]
+  # Settings and its own credential. Namespaced, so it cannot read another
+  # deployment's secrets even if something else were running beside it.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, create, update, patch]
+  # Rolling the workloads after a settings change, and scaling them to zero on
+  # a teardown.
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale, statefulsets, statefulsets/scale]
+    verbs: [get, list, patch, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: caytu-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: caytu-agent
+subjects:
+  - kind: ServiceAccount
+    name: caytu-agent
+---
+# Purge removes the namespace, which is not something a Role inside it can do.
+# Deliberately the only cluster-scoped permission, and it names the one verb.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: caytu-agent-purge
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: caytu-agent-purge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: caytu-agent-purge
+subjects:
+  - kind: ServiceAccount
+    name: caytu-agent
+    namespace: caytu-client
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: caytu-agent
+spec:
+  replicas: 1
+  # Two agents would claim the same command and answer it twice. Recreate rather
+  # than rolling, so there is never a moment with two running.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: caytu-agent }
+  template:
+    metadata:
+      labels: { app: caytu-agent }
+    spec:
+      serviceAccountName: caytu-agent
+      containers:
+        - name: agent
+          image: caytu-client/cluster-agent:latest
+          env:
+            - name: CAYTU_PLATFORM_URL
+              value: PLATFORM_URL_PLACEHOLDER
+            - name: CAYTU_INSTANCE_ID
+              value: INSTANCE_ID_PLACEHOLDER
+            - name: CAYTU_NAMESPACE
+              value: caytu-client
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
