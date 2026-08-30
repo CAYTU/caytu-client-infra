@@ -1720,12 +1720,6 @@ ecr_login_if_needed() {
   return 0
 }
 
-# Point this host at the images the record names.
-#
-# Without it the record described a deployment but not its software, so a host
-# ran whatever IMAGE_TAG happened to say in its own env file. A fork published
-# under another name had nowhere to be declared, and pinning a site to a
-# known-good version meant editing a file on the box.
 # Collect this deployment's own secret-store shard from the platform.
 #
 # Without one the client derives its key from a shard baked into the image,
@@ -1758,6 +1752,12 @@ fetch_secret_shard() {
   chmod 600 "$env_file" 2>/dev/null || true
 }
 
+# Point this host at the images the record names.
+#
+# Without it the record described a deployment but not its software, so a host
+# ran whatever IMAGE_TAG happened to say in its own env file. A fork published
+# under another name had nowhere to be declared, and pinning a site to a
+# known-good version meant editing a file on the box.
 apply_instance_source() {
   local env_file=$1 record=$2
   local mode; mode="$(printf '%s' "$record" | jq -r '.source.mode // empty')"
