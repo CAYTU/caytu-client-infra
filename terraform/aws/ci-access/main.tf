@@ -122,6 +122,48 @@ data "aws_iam_policy_document" "pipeline" {
   }
 }
 
+# Pushing the cluster agent's image.
+#
+# One repository, named. This role provisions deployments and does not otherwise
+# publish anything, so letting it push over the client images would be a much
+# larger permission than the job needs. The agent is the exception because its
+# source lives in this repository and nothing else builds it.
+#
+# GetDownloadUrlForLayer and BatchGetImage look like read permissions on a push,
+# and they are: buildx checks which layers the registry already has before
+# uploading, and the push fails on the check rather than the upload without them.
+data "aws_iam_policy_document" "publish_cluster_agent" {
+  statement {
+    sid       = "AuthenticateToOurRegistry"
+    effect    = "Allow"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "PushTheClusterAgent"
+    effect = "Allow"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+    resources = [
+      "arn:${local.partition}:ecr:${var.region}:${local.account_id}:repository/caytu-client-cluster-agent",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "publish_cluster_agent" {
+  name   = "publish-cluster-agent"
+  role   = aws_iam_role.provisioning.id
+  policy = data.aws_iam_policy_document.publish_cluster_agent.json
+}
+
 resource "aws_iam_role_policy" "pipeline" {
   name   = "pipeline"
   role   = aws_iam_role.provisioning.id
