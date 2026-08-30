@@ -50,6 +50,10 @@ on:
         description: "Most nodes in the pool that scales. Empty uses the stack default."
         required: false
         default: ""
+      image_tag:
+        description: "Which published version to run. Empty means the moving latest tag."
+        required: false
+        default: ""
       report_token:
         description: "Lets this run report progress for one deployment. Minted by the platform."
         required: false
@@ -273,6 +277,7 @@ jobs:
         env:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          IMAGE_TAG: ${{ github.event.inputs.image_tag }}
         run: |
           set -euo pipefail
           # Ours, never the cluster's. terraform output ecr_registry reports
@@ -300,12 +305,19 @@ jobs:
             echo "JWT_SECRET=$(openssl rand -hex 64)"
           } > "$overlay/secrets.env"
 
+          # The version the record names, not whatever latest points at. A single
+          # machine gets this from its agent, which reads the record; a cluster
+          # has no agent, so it ran latest and quietly ignored the version
+          # chosen in the console.
+          tag="${IMAGE_TAG:-latest}"
+          echo "running caytu-client ${tag}"
+
           cd "$overlay"
           kustomize edit set image \
-            "caytu-client/backend=${registry}/caytu-client-backend:latest" \
-            "caytu-client/frontend=${registry}/caytu-client-frontend:latest" \
-            "caytu-client/gstreamer-recorder=${registry}/caytu-client-gstreamer-recorder:latest" \
-            "caytu-client/mqtt-streamer=${registry}/caytu-client-mqtt-streamer:latest"
+            "caytu-client/backend=${registry}/caytu-client-backend:${tag}" \
+            "caytu-client/frontend=${registry}/caytu-client-frontend:${tag}" \
+            "caytu-client/gstreamer-recorder=${registry}/caytu-client-gstreamer-recorder:${tag}" \
+            "caytu-client/mqtt-streamer=${registry}/caytu-client-mqtt-streamer:${tag}"
 
           # The example carries a placeholder host and certificate.
           sed -i "s|caytu.example.com|${SUBDOMAIN}.caytu.link|g" kustomization.yaml
