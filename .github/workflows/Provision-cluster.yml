@@ -111,6 +111,22 @@ jobs:
           [ -n "${REPORT_TOKEN:-}" ] || exit 0
           url="${PLATFORM_URL}/api/billings/instances/${INSTANCE_ID}/provision-state"
           case "$1" in
+            # What is actually running, straight from the cluster.
+            #
+            # A container's waiting reason wins over the pod phase. The API only
+            # ever reports Pending, Running, Succeeded, Failed or Unknown, so an
+            # image that will not pull looks identical to a pod that is merely
+            # starting, and that is exactly the failure worth seeing.
+            pods)
+              pods="$(kubectl -n caytu-client get pods -o json 2>/dev/null | jq -c '
+                [.items[] | . as $p | {
+                  name: $p.metadata.name,
+                  phase: ([$p.status.containerStatuses[]?.state.waiting.reason // empty] | first
+                          // $p.status.phase // "Unknown"),
+                  ready: ("\([$p.status.containerStatuses[]? | select(.ready)] | length)/\($p.spec.containers | length)"),
+                  restarts: ([$p.status.containerStatuses[]?.restartCount] | add // 0)
+                }]' || true)"
+              body="$(jq -n --argjson p "${pods:-[]}" '{pods:$p}')" ;;
             done)   body='{"status":"running"}' ;;
             failed) body="$(jq -n --arg m "$2" '{status:"failed", lastError:$m,
                               step:{message:$m, ok:false}}')" ;;
@@ -346,6 +362,16 @@ jobs:
                 Name:$n, Type:"CNAME", TTL:60, ResourceRecords:[{Value:$v}]}}]}')"
 
           echo "${SUBDOMAIN}.caytu.link -> $host"
+
+      # Before the outcome, so a failed build still shows what came up and what
+      # did not. That is usually the whole answer.
+      - name: Report what is running
+        if: always()
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: /tmp/report.sh pods
 
       - name: Report the outcome
         if: always()
