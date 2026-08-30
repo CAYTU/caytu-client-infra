@@ -412,6 +412,24 @@ Resources:
                     }
                   },
                   {
+                    "Sid": "CertificateForTheIngress",
+                    "Effect": "Allow",
+                    "Action": [
+                      "acm:RequestCertificate",
+                      "acm:ListTagsForCertificate",
+                      "acm:ListCertificates",
+                      "acm:DescribeCertificate",
+                      "acm:DeleteCertificate",
+                      "acm:AddTagsToCertificate"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
                     "Sid": "ClusterLogs",
                     "Effect": "Allow",
                     "Action": [

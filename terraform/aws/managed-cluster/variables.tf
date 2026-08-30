@@ -158,3 +158,42 @@ variable "assume_role_external_id" {
   default     = ""
   sensitive   = true
 }
+
+# -----------------------------------------------------------------------------
+# The name the cluster answers on, and the certificate for it.
+#
+# A single machine gets its certificate from Let's Encrypt, on the machine. A
+# cluster answers behind a load balancer, which wants an ACM certificate in the
+# same account and region. Nothing was creating one, so certificate_arn had to
+# be filled in by hand or the build failed at the ingress.
+# -----------------------------------------------------------------------------
+
+variable "domain_name" {
+  description = "FQDN the cluster answers on, e.g. \"client.caytu.link\". Empty skips the certificate and DNS entirely."
+  type        = string
+  default     = ""
+}
+
+variable "route53_zone_name" {
+  description = "Zone holding that name, e.g. \"caytu.link\". Ours, even when the cluster is in someone else's account."
+  type        = string
+  default     = ""
+}
+
+variable "dns_region" {
+  description = "Route 53 is global but the provider still needs a region."
+  type        = string
+  default     = "us-east-1"
+}
+
+variable "dns_assume_role_arn" {
+  description = "Role that may write the zone. Empty means the credentials already in the environment, which is our own pipeline."
+  type        = string
+  default     = ""
+}
+
+variable "certificate_arn" {
+  description = "An existing certificate to use instead of creating one. Empty with domain_name set means create it."
+  type        = string
+  default     = ""
+}

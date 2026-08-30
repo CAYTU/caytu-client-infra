@@ -34,8 +34,9 @@ on:
         description: "Where the deployment reports back to"
         required: true
       certificate_arn:
-        description: "ACM certificate for the ingress. Terraform does not create one."
-        required: true
+        description: "An existing ACM certificate. Leave empty and the stack requests one."
+        required: false
+        default: ""
       target_account_id:
         description: "AWS account to build in. Empty means our own."
         required: false
@@ -121,15 +122,21 @@ jobs:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
           ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+          CERT_ARN: ${{ github.event.inputs.certificate_arn }}
         run: |
           set -euo pipefail
+          # The zone stays ours whoever owns the cluster, so the dns provider
+          # keeps this runner's own credentials rather than assuming anything.
           terraform plan -input=false -out=tfplan \
             -var "aws_profile=" \
             -var "region=${REGION}" \
             -var "environment=production" \
             -var "name_prefix=caytu-${SUBDOMAIN}" \
             -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
-            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}"
+            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}" \
+            -var "domain_name=${SUBDOMAIN}.caytu.link" \
+            -var "route53_zone_name=caytu.link" \
+            -var "certificate_arn=${CERT_ARN}"
 
       - name: Apply
         working-directory: ${{ env.TF_DIR }}
@@ -158,10 +165,15 @@ jobs:
         env:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
-          CERT_ARN: ${{ github.event.inputs.certificate_arn }}
         run: |
           set -euo pipefail
           registry="$(terraform output -raw ecr_registry 2>/dev/null || true)"
+          # Whichever it is: the one that was passed in, or the one just created.
+          CERT_ARN="$(terraform output -raw certificate_arn)"
+          test -n "$CERT_ARN" || {
+            echo "::error::No certificate. The ingress would serve nothing."
+            exit 1
+          }
           overlay="${GITHUB_WORKSPACE}/${OVERLAY}"
 
           # Generated here for now. The platform will own these once deployment
@@ -194,6 +206,38 @@ jobs:
           kubectl apply -k "${GITHUB_WORKSPACE}/${OVERLAY}"
           kubectl -n caytu-client rollout status deploy/backend --timeout=10m
 
+      # Not in Terraform: this balancer is created by the ingress controller
+      # during the apply above, so its name does not exist at plan time.
+      # Written with the runner's own credentials, because the zone is ours
+      # whoever owns the cluster.
+      - name: Point the name at the load balancer
+        env:
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+        run: |
+          set -euo pipefail
+          host=""
+          for _ in $(seq 1 60); do
+            host="$(kubectl -n caytu-client get ingress -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            [ -n "$host" ] && break
+            sleep 10
+          done
+          test -n "$host" || {
+            echo "::error::The ingress never reported a load balancer, so ${SUBDOMAIN}.caytu.link has nothing to point at."
+            exit 1
+          }
+
+          zone="$(aws route53 list-hosted-zones-by-name --dns-name caytu.link. \
+            --query 'HostedZones[0].Id' --output text | cut -d/ -f3)"
+
+          # CNAME rather than an alias record: an alias needs the balancer's
+          # zone id, which belongs to whichever account holds the cluster.
+          aws route53 change-resource-record-sets --hosted-zone-id "$zone" \
+            --change-batch "$(jq -n --arg n "${SUBDOMAIN}.caytu.link" --arg v "$host" '
+              {Changes:[{Action:"UPSERT",ResourceRecordSet:{
+                Name:$n, Type:"CNAME", TTL:60, ResourceRecords:[{Value:$v}]}}]}')"
+
+          echo "${SUBDOMAIN}.caytu.link -> $host"
+
       - name: What was created
         if: always()
         run: |
@@ -202,6 +246,5 @@ jobs:
             echo
             kubectl -n caytu-client get pods 2>/dev/null || echo "the cluster was not reachable"
             echo
-            echo "Point ${{ github.event.inputs.subdomain }}.caytu.link at the load balancer above."
             echo "No agent runs in a cluster yet, so the console will still show this as provisioning."
           } >> "$GITHUB_STEP_SUMMARY"
