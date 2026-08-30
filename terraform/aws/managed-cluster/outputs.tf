@@ -10,9 +10,20 @@ output "cluster_region" {
   value = var.region
 }
 
+locals {
+  # An empty profile means environment credentials, which is what a runner has.
+  # Naming a profile there sends the CLI looking for a file that is not present.
+  kubeconfig_command = join(" ", compact([
+    "aws eks update-kubeconfig",
+    var.aws_profile != "" ? "--profile ${var.aws_profile}" : "",
+    "--region ${var.region}",
+    "--name ${module.eks.cluster_name}",
+  ]))
+}
+
 output "kubeconfig_command" {
   description = "Run this to add the cluster to your local kubeconfig"
-  value       = "aws eks update-kubeconfig --profile ${var.aws_profile} --region ${var.region} --name ${module.eks.cluster_name}"
+  value       = local.kubeconfig_command
 }
 
 output "ecr_registry" {
@@ -52,10 +63,10 @@ output "alb_controller_role_arn" {
 
 output "helm_commands" {
   description = "Post-apply commands: install ALB controller + metrics-server. Copy/paste."
-  value = <<-EOT
+  value       = <<-EOT
 
     # 1. Configure kubectl:
-    ${output.kubeconfig_command.value}
+    ${local.kubeconfig_command}
 
     # 2. Install AWS Load Balancer Controller:
     helm repo add eks https://aws.github.io/eks-charts
