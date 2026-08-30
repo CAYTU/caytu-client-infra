@@ -27,8 +27,9 @@ data "aws_iam_policy_document" "ebs_csi_assume" {
 }
 
 resource "aws_iam_role" "ebs_csi" {
-  name               = "${var.name_prefix}-${var.environment}-ebs-csi"
-  assume_role_policy = data.aws_iam_policy_document.ebs_csi_assume.json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  name                 = "${var.name_prefix}-${var.environment}-ebs-csi"
+  assume_role_policy   = data.aws_iam_policy_document.ebs_csi_assume.json
 }
 
 resource "aws_iam_role_policy_attachment" "ebs_csi" {
@@ -54,8 +55,9 @@ data "aws_iam_policy_document" "alb_controller_assume" {
 }
 
 resource "aws_iam_role" "alb_controller" {
-  name               = "${var.name_prefix}-${var.environment}-alb-controller"
-  assume_role_policy = data.aws_iam_policy_document.alb_controller_assume.json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  name                 = "${var.name_prefix}-${var.environment}-alb-controller"
+  assume_role_policy   = data.aws_iam_policy_document.alb_controller_assume.json
 }
 
 # For staging this coarse policy is fine; harden for prod using the upstream
@@ -116,8 +118,9 @@ data "aws_iam_policy_document" "app_backend_assume" {
 }
 
 resource "aws_iam_role" "app_backend" {
-  name               = "${var.name_prefix}-${var.environment}-backend"
-  assume_role_policy = data.aws_iam_policy_document.app_backend_assume.json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  name                 = "${var.name_prefix}-${var.environment}-backend"
+  assume_role_policy   = data.aws_iam_policy_document.app_backend_assume.json
 }
 
 data "aws_iam_policy_document" "app_backend" {
@@ -167,8 +170,9 @@ data "aws_iam_policy_document" "autoscaler_assume" {
 }
 
 resource "aws_iam_role" "autoscaler" {
-  name               = "${var.name_prefix}-${var.environment}-autoscaler"
-  assume_role_policy = data.aws_iam_policy_document.autoscaler_assume.json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  name                 = "${var.name_prefix}-${var.environment}-autoscaler"
+  assume_role_policy   = data.aws_iam_policy_document.autoscaler_assume.json
 }
 
 data "aws_iam_policy_document" "autoscaler" {

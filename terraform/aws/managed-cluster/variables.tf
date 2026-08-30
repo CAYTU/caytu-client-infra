@@ -198,3 +198,9 @@ variable "certificate_arn" {
   type        = string
   default     = ""
 }
+
+variable "iam_permissions_boundary" {
+  description = "Boundary every role this stack creates must carry. Required in a customer account, where CreateRole without it is refused outright. Empty in our own."
+  type        = string
+  default     = ""
+}

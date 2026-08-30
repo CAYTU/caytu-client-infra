@@ -436,13 +436,23 @@ Resources:
                     "Resource": "arn:aws:iam::${AWS::AccountId}:role/CaytuProvisioner"
                   },
                   {
+                    "Sid": "FindTheClusterLogGroup",
+                    "Effect": "Allow",
+                    "Action": "logs:DescribeLogGroups",
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
                     "Sid": "ClusterLogs",
                     "Effect": "Allow",
                     "Action": [
                       "logs:TagResource",
                       "logs:PutRetentionPolicy",
                       "logs:ListTagsForResource",
-                      "logs:DescribeLogGroups",
                       "logs:DeleteLogGroup",
                       "logs:CreateLogGroup"
                     ],
