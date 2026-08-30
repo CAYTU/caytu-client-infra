@@ -11,9 +11,10 @@ name: Provision a cluster deployment
 # State is per deployment and separate from the single-instance key, so a
 # deployment can never have both and destroy the wrong one.
 #
-# Known gap: a cluster has no host agent, so nothing reports back and the
-# console will show it as provisioning after this finishes. See
-# docs/cluster-readiness.md.
+# A cluster has no host agent, so unlike a single machine nothing on it can
+# enrol and report. This run says what it is doing instead, with a token the
+# platform minted for this one deployment. It covers the build and stops there:
+# once this finishes, a cluster is silent until the in-cluster agent exists.
 
 run-name: Provision cluster ${{ inputs.subdomain }} (${{ inputs.instance_id }})
 
@@ -47,6 +48,10 @@ on:
         default: ""
       max_nodes:
         description: "Most nodes in the pool that scales. Empty uses the stack default."
+        required: false
+        default: ""
+      report_token:
+        description: "Lets this run report progress for one deployment. Minted by the platform."
         required: false
         default: ""
       target_account_id:
@@ -89,6 +94,35 @@ jobs:
       TF_STATE_TABLE: ${{ secrets.TF_STATE_LOCK_TABLE }}
     steps:
       - uses: actions/checkout@v4
+
+      # Progress the console can read while this runs. Never fatal: a build that
+      # cannot report is still a build, and failing here would destroy a working
+      # cluster over a status line.
+      - name: Set up reporting
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/report.sh <<'SH'
+          #!/usr/bin/env bash
+          # report <percent> <message> [ok] | report done | report failed <message>
+          [ -n "${REPORT_TOKEN:-}" ] || exit 0
+          url="${PLATFORM_URL}/api/billings/instances/${INSTANCE_ID}/provision-state"
+          case "$1" in
+            done)   body='{"status":"running"}' ;;
+            failed) body="$(jq -n --arg m "$2" '{status:"failed", lastError:$m,
+                              step:{message:$m, ok:false}}')" ;;
+            *)      body="$(jq -n --argjson p "$1" --arg m "$2" \
+                              '{percent:$p, step:{message:$m, ok:true}}')" ;;
+          esac
+          curl -fsS -X PATCH "$url" \
+            -H "Authorization: Bearer ${REPORT_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "$body" >/dev/null 2>&1 || echo "::warning::could not report progress"
+          SH
+          chmod +x /tmp/report.sh
 
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -182,6 +216,13 @@ jobs:
             -var "certificate_arn=${CERT_ARN}" \
             "${extra[@]+"${extra[@]}"}"
 
+      - name: Report building the cluster and its network
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: /tmp/report.sh 20 "building the cluster and its network"
+
       - name: Apply
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -input=false -auto-approve tfplan
@@ -193,6 +234,13 @@ jobs:
           set -euo pipefail
           eval "$(terraform output -raw kubeconfig_command)"
           kubectl get nodes
+
+      - name: Report installing the ingress, metrics and autoscaler
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: /tmp/report.sh 55 "installing the ingress, metrics and autoscaler"
 
       - name: Cluster add-ons
         working-directory: ${{ env.TF_DIR }}
@@ -247,6 +295,13 @@ jobs:
           sed -i "s|caytu.example.com|${SUBDOMAIN}.caytu.link|g" kustomization.yaml
           sed -i "s|arn:aws:acm:REGION:ACCOUNT:certificate/UUID|${CERT_ARN}|g" kustomization.yaml
 
+      - name: Report starting the application
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: /tmp/report.sh 75 "starting the application"
+
       - name: Apply the manifests
         run: |
           set -euo pipefail
@@ -257,6 +312,13 @@ jobs:
       # during the apply above, so its name does not exist at plan time.
       # Written with the runner's own credentials, because the zone is ours
       # whoever owns the cluster.
+      - name: Report pointing the address at the load balancer
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: /tmp/report.sh 90 "pointing the address at the load balancer"
+
       - name: Point the name at the load balancer
         env:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
@@ -284,6 +346,19 @@ jobs:
                 Name:$n, Type:"CNAME", TTL:60, ResourceRecords:[{Value:$v}]}}]}')"
 
           echo "${SUBDOMAIN}.caytu.link -> $host"
+
+      - name: Report the outcome
+        if: always()
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            /tmp/report.sh done
+          else
+            /tmp/report.sh failed "the build failed at ${{ job.status }}, see the run log"
+          fi
 
       - name: What was created
         if: always()
