@@ -69,6 +69,9 @@ variable "stateful_desired_size" {
   default = 2
 }
 
+# The ceiling the autoscaler may grow into. Not a target: nodes are only added
+# when a pod cannot be placed, so a higher ceiling costs nothing until it is
+# needed, and a low one turns a traffic spike into pending pods.
 variable "stateful_max_size" {
   description = "Cap on stateful pool; usually small — data pods scale vertically, not horizontally"
   type        = number
@@ -76,6 +79,9 @@ variable "stateful_max_size" {
 }
 
 # --- Stateless pool (SPOT) ---------------------------------------------------
+# Several types on purpose. SPOT capacity is per type per zone, so one type is
+# one thing to run out of; AWS substitutes from this list instead of failing.
+# Keep them the same size or the autoscaler's decisions get unpredictable.
 variable "stateless_instance_types" {
   description = "Diversified type list for SPOT. Keep them same-size so HPA scaling is predictable."
   type        = list(string)

@@ -147,3 +147,73 @@ resource "aws_iam_role_policy_attachment" "app_backend" {
   role       = aws_iam_role.app_backend.name
   policy_arn = aws_iam_policy.app_backend.arn
 }
+
+# --- Cluster autoscaler -----------------------------------------------------
+# The HPAs scale pods. Nothing scaled nodes, so a scale-up beyond the fixed
+# desired_size left pods Pending with no machine to place them on.
+data "aws_iam_policy_document" "autoscaler_assume" {
+  statement {
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [module.eks.oidc_provider_arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${replace(module.eks.cluster_oidc_issuer_url, "https://", "")}:sub"
+      values   = ["system:serviceaccount:kube-system:cluster-autoscaler"]
+    }
+  }
+}
+
+resource "aws_iam_role" "autoscaler" {
+  name               = "${var.name_prefix}-${var.environment}-autoscaler"
+  assume_role_policy = data.aws_iam_policy_document.autoscaler_assume.json
+}
+
+data "aws_iam_policy_document" "autoscaler" {
+  # Reads every group to decide, writes only to ours. The tags on the node
+  # groups are what "ours" means.
+  statement {
+    sid    = "Inspect"
+    effect = "Allow"
+    actions = [
+      "autoscaling:DescribeAutoScalingGroups",
+      "autoscaling:DescribeAutoScalingInstances",
+      "autoscaling:DescribeLaunchConfigurations",
+      "autoscaling:DescribeScalingActivities",
+      "autoscaling:DescribeTags",
+      "ec2:DescribeInstanceTypes",
+      "ec2:DescribeLaunchTemplateVersions",
+      "ec2:DescribeImages",
+      "eks:DescribeNodegroup",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "ScaleOurOwn"
+    effect = "Allow"
+    actions = [
+      "autoscaling:SetDesiredCapacity",
+      "autoscaling:TerminateInstanceInAutoScalingGroup",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "autoscaling:ResourceTag/k8s.io/cluster-autoscaler/${var.name_prefix}-${var.environment}"
+      values   = ["owned"]
+    }
+  }
+}
+
+resource "aws_iam_policy" "autoscaler" {
+  name   = "${var.name_prefix}-${var.environment}-autoscaler"
+  policy = data.aws_iam_policy_document.autoscaler.json
+}
+
+resource "aws_iam_role_policy_attachment" "autoscaler" {
+  role       = aws_iam_role.autoscaler.name
+  policy_arn = aws_iam_policy.autoscaler.arn
+}

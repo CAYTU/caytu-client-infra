@@ -56,6 +56,11 @@ output "irsa_backup_role_arn" {
   value       = var.create_backup_bucket ? aws_iam_role.backup[0].arn : ""
 }
 
+output "autoscaler_role_arn" {
+  description = "IRSA role for cluster-autoscaler. Used in the helm install below."
+  value       = aws_iam_role.autoscaler.arn
+}
+
 output "alb_controller_role_arn" {
   description = "IRSA role for aws-load-balancer-controller. Used in the helm install command below."
   value       = aws_iam_role.alb_controller.arn
@@ -80,7 +85,19 @@ output "helm_commands" {
       --set region=${var.region} \\
       --set vpcId=${module.vpc.vpc_id}
 
-    # 3. metrics-server:
+    # 3. Cluster autoscaler. Without it the HPAs scale pods onto nodes that
+    #    do not exist, and they sit Pending.
+    helm repo add autoscaler https://kubernetes.github.io/autoscaler
+    helm upgrade --install cluster-autoscaler autoscaler/cluster-autoscaler \\
+      -n kube-system \\
+      --set autoDiscovery.clusterName=${module.eks.cluster_name} \\
+      --set awsRegion=${var.region} \\
+      --set rbac.serviceAccount.name=cluster-autoscaler \\
+      --set rbac.serviceAccount.annotations."eks\\.amazonaws\\.com/role-arn"=${aws_iam_role.autoscaler.arn} \\
+      --set extraArgs.balance-similar-node-groups=true \\
+      --set extraArgs.skip-nodes-with-local-storage=false
+
+    # 4. metrics-server:
     kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 
     # 4. Then deploy the app:
