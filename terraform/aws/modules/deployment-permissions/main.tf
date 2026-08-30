@@ -616,6 +616,23 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # Listing log groups is account-wide by design: the API takes a name prefix
+  # as a filter, not a resource, so a scoped statement never matches and every
+  # apply fails reading back the group it just made. It reveals which log
+  # groups exist and nothing in them.
+  statement {
+    sid       = "FindTheClusterLogGroup"
+    effect    = "Allow"
+    actions   = ["logs:DescribeLogGroups"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
   # Control-plane logging, in its own log group named after the cluster.
   statement {
     sid    = "ClusterLogs"
@@ -623,7 +640,6 @@ data "aws_iam_policy_document" "cluster" {
     actions = [
       "logs:CreateLogGroup",
       "logs:DeleteLogGroup",
-      "logs:DescribeLogGroups",
       "logs:PutRetentionPolicy",
       "logs:TagResource",
       "logs:ListTagsForResource",

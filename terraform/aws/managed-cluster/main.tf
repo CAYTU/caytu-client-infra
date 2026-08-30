@@ -71,6 +71,15 @@ module "vpc" {
   public_subnets  = local.public_subnets
   private_subnets = local.private_subnets
 
+  # Left as AWS made them. Tightening the default ACL and security group means
+  # editing resources we did not create, which needs network-ACL permissions
+  # across the account, and the tag condition that would scope them is not
+  # reliably set at the moment the call is made. Nothing is attached to either:
+  # the cluster brings its own security groups.
+  manage_default_network_acl    = false
+  manage_default_security_group = false
+  manage_default_route_table    = false
+
   enable_nat_gateway   = true
   single_nat_gateway   = true # one NAT keeps costs down for staging; set false for prod
   enable_dns_hostnames = true
@@ -100,6 +109,12 @@ module "eks" {
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
+
+  # Every role the module creates has to carry the boundary and start with our
+  # name. A customer's policy refuses CreateRole without the boundary outright,
+  # and only allows it for names beginning caytu-, so the module's own defaults
+  # fail twice over: unbounded, and named after the node group.
+  iam_role_permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
 
   # Off, because it resolves the creator by asking IAM. See cluster_admin_arns:
   # the applying role is added to the access entries below by name instead.
@@ -141,6 +156,15 @@ module "eks" {
   # Kustomize aws-eks overlay adds nodeSelector: caytu.io/workload=stateful
   # to the stateful workloads. Stateless deployments have no selector and land
   # on whichever pool has room (typically SPOT since it's the bigger pool).
+  eks_managed_node_group_defaults = {
+    iam_role_permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+    # Without this the role is named after the node group, e.g.
+    # "stateful-eks-node-group-", which a customer's policy does not recognise
+    # as ours and refuses to create.
+    iam_role_name            = null
+    iam_role_use_name_prefix = true
+  }
+
   eks_managed_node_groups = {
     stateful = {
       instance_types = var.stateful_instance_types
@@ -148,6 +172,8 @@ module "eks" {
       min_size       = var.stateful_min_size
       desired_size   = var.stateful_desired_size
       max_size       = var.stateful_max_size
+
+      iam_role_name = "${var.name_prefix}-stateful-node"
 
       labels = { "caytu.io/workload" = "stateful" }
 
@@ -170,6 +196,8 @@ module "eks" {
       min_size       = var.stateless_min_size
       desired_size   = var.stateless_desired_size
       max_size       = var.stateless_max_size
+
+      iam_role_name = "${var.name_prefix}-stateless-node"
 
       labels = { "caytu.io/workload" = "stateless" }
 

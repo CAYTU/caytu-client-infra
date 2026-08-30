@@ -199,6 +199,7 @@ jobs:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
           ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+          PERMISSIONS_BOUNDARY: ${{ steps.target.outputs.permissions_boundary }}
           CERT_ARN: ${{ github.event.inputs.certificate_arn }}
           NODE_TYPE: ${{ github.event.inputs.node_instance_type }}
           MIN_NODES: ${{ github.event.inputs.min_nodes }}
@@ -234,6 +235,7 @@ jobs:
             -var "domain_name=${SUBDOMAIN}.caytu.link" \
             -var "route53_zone_name=caytu.link" \
             -var "certificate_arn=${CERT_ARN}" \
+            -var "iam_permissions_boundary=${PERMISSIONS_BOUNDARY}" \
             "${extra[@]+"${extra[@]}"}"
 
       - name: Report building the cluster and its network

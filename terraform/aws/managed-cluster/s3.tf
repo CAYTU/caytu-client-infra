@@ -62,9 +62,10 @@ data "aws_iam_policy_document" "backup_assume" {
 }
 
 resource "aws_iam_role" "backup" {
-  count              = var.create_backup_bucket ? 1 : 0
-  name               = "${var.name_prefix}-${var.environment}-backup"
-  assume_role_policy = data.aws_iam_policy_document.backup_assume[0].json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  count                = var.create_backup_bucket ? 1 : 0
+  name                 = "${var.name_prefix}-${var.environment}-backup"
+  assume_role_policy   = data.aws_iam_policy_document.backup_assume[0].json
 }
 
 data "aws_iam_policy_document" "backup" {

@@ -48,9 +48,10 @@ data "aws_iam_policy_document" "iot_role_alias_assume" {
 }
 
 resource "aws_iam_role" "iot_kvs" {
-  count              = local.iot_enabled ? 1 : 0
-  name               = "${var.name_prefix}-${var.environment}-iot-kvs"
-  assume_role_policy = data.aws_iam_policy_document.iot_role_alias_assume[0].json
+  permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
+  count                = local.iot_enabled ? 1 : 0
+  name                 = "${var.name_prefix}-${var.environment}-iot-kvs"
+  assume_role_policy   = data.aws_iam_policy_document.iot_role_alias_assume[0].json
 }
 
 data "aws_iam_policy_document" "iot_kvs" {
