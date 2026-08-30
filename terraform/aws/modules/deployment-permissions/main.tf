@@ -597,6 +597,25 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # Reading its own role, which the EKS module does on every plan.
+  #
+  # It resolves the caller's assumed-role arn back to the role arn behind it,
+  # and it does so whether or not the option that uses the answer is on: the
+  # data source is gated on the module being created, not on the feature. So
+  # this is not optional however the cluster is configured.
+  #
+  # One role, its own, and a read. The deny above still stops it rewriting
+  # itself, which is the thing that mattered.
+  dynamic "statement" {
+    for_each = var.self_role_name != "" ? [1] : []
+    content {
+      sid       = "ReadOurOwnRole"
+      effect    = "Allow"
+      actions   = ["iam:GetRole"]
+      resources = ["arn:${var.partition}:iam::${var.account_id}:role/${var.self_role_name}"]
+    }
+  }
+
   # Control-plane logging, in its own log group named after the cluster.
   statement {
     sid    = "ClusterLogs"
