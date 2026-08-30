@@ -372,3 +372,224 @@ data "aws_iam_policy_document" "provisioner" {
   }
 }
 
+
+# A cluster, as its own policy.
+#
+# Separate from the document above because the two together are over 9,000
+# characters and a managed policy stops at 6,144. Attached alongside the base
+# one only when the account holds a cluster, which is also the question the
+# access stack asks.
+#
+# Derived from terraform/aws/managed-cluster, which builds on the community VPC
+# and EKS modules, so this is the set those two actually call.
+data "aws_iam_policy_document" "cluster" {
+  # A cluster gets its own VPC. Creating one names nothing yet, so these cannot
+  # be scoped to a resource; the region pin is the only limit that applies.
+  statement {
+    sid    = "BuildTheClusterNetwork"
+    effect = "Allow"
+    actions = [
+      "ec2:CreateVpc",
+      "ec2:CreateSubnet",
+      "ec2:CreateRouteTable",
+      "ec2:CreateRoute",
+      "ec2:CreateInternetGateway",
+      "ec2:CreateNatGateway",
+      "ec2:CreateVpcEndpoint",
+      "ec2:AllocateAddress",
+      "ec2:CreateLaunchTemplate",
+      "ec2:CreateLaunchTemplateVersion",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
+  # Changing or removing network the account already had is the risk here, so
+  # these apply only to resources carrying our name. The VPC module tags
+  # everything it creates, which is what makes the condition hold.
+  statement {
+    sid    = "ChangeOnlyOurOwnNetwork"
+    effect = "Allow"
+    actions = [
+      "ec2:DeleteVpc",
+      "ec2:DeleteSubnet",
+      "ec2:DeleteRouteTable",
+      "ec2:DeleteRoute",
+      "ec2:DeleteInternetGateway",
+      "ec2:DeleteNatGateway",
+      "ec2:DeleteVpcEndpoint",
+      "ec2:ReleaseAddress",
+      "ec2:DeleteLaunchTemplate",
+      "ec2:DeleteLaunchTemplateVersions",
+      "ec2:ModifyVpcAttribute",
+      "ec2:ModifySubnetAttribute",
+      "ec2:AttachInternetGateway",
+      "ec2:DetachInternetGateway",
+      "ec2:AssociateRouteTable",
+      "ec2:DisassociateRouteTable",
+      "ec2:AssociateAddress",
+      "ec2:DisassociateAddress",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringLike"
+      variable = "aws:ResourceTag/Name"
+      values   = ["${var.resource_prefix}*"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
+  statement {
+    sid    = "RunTheCluster"
+    effect = "Allow"
+    actions = [
+      "eks:CreateCluster",
+      "eks:DeleteCluster",
+      "eks:DescribeCluster",
+      "eks:UpdateClusterConfig",
+      "eks:UpdateClusterVersion",
+      "eks:CreateNodegroup",
+      "eks:DeleteNodegroup",
+      "eks:DescribeNodegroup",
+      "eks:UpdateNodegroupConfig",
+      "eks:UpdateNodegroupVersion",
+      "eks:CreateAddon",
+      "eks:DeleteAddon",
+      "eks:DescribeAddon",
+      "eks:UpdateAddon",
+      "eks:CreateAccessEntry",
+      "eks:DeleteAccessEntry",
+      "eks:DescribeAccessEntry",
+      "eks:AssociateAccessPolicy",
+      "eks:DisassociateAccessPolicy",
+      "eks:TagResource",
+      "eks:UntagResource",
+      "eks:ListTagsForResource",
+    ]
+    resources = [
+      "arn:${var.partition}:eks:*:${var.account_id}:cluster/${var.resource_prefix}*",
+      "arn:${var.partition}:eks:*:${var.account_id}:nodegroup/${var.resource_prefix}*/*",
+      "arn:${var.partition}:eks:*:${var.account_id}:addon/${var.resource_prefix}*/*",
+      "arn:${var.partition}:eks:*:${var.account_id}:access-entry/${var.resource_prefix}*/*",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
+  # Listing and the add-on catalogue are account-wide reads with no resource to
+  # name. Neither says anything but which clusters exist.
+  statement {
+    sid    = "ReadTheClusterCatalogue"
+    effect = "Allow"
+    actions = [
+      "eks:ListClusters",
+      "eks:ListNodegroups",
+      "eks:ListAddons",
+      "eks:ListAccessEntries",
+      "eks:ListAssociatedAccessPolicies",
+      "eks:DescribeAddonVersions",
+    ]
+    resources = ["*"]
+  }
+
+  # IRSA. Pods get roles through this provider, so without it every add-on falls
+  # back to node credentials. Scoped to providers for EKS clusters.
+  statement {
+    sid    = "ClusterIdentityProvider"
+    effect = "Allow"
+    actions = [
+      "iam:CreateOpenIDConnectProvider",
+      "iam:DeleteOpenIDConnectProvider",
+      "iam:GetOpenIDConnectProvider",
+      "iam:TagOpenIDConnectProvider",
+      "iam:UpdateOpenIDConnectProviderThumbprint",
+    ]
+    resources = ["arn:${var.partition}:iam::${var.account_id}:oidc-provider/oidc.eks.*.amazonaws.com/id/*"]
+  }
+
+  # EKS, node groups and load balancers each want a service-linked role the
+  # first time they run in an account. Named, so this creates no others.
+  statement {
+    sid       = "ServiceLinkedRolesTheClusterNeeds"
+    effect    = "Allow"
+    actions   = ["iam:CreateServiceLinkedRole"]
+    resources = ["arn:${var.partition}:iam::${var.account_id}:role/aws-service-role/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:AWSServiceName"
+      values = [
+        "eks.amazonaws.com",
+        "eks-nodegroup.amazonaws.com",
+        "autoscaling.amazonaws.com",
+        "elasticloadbalancing.amazonaws.com",
+      ]
+    }
+  }
+
+  # The control plane encrypts secrets with its own key, and node groups arrive
+  # as autoscaling groups Terraform reads back.
+  statement {
+    sid    = "ClusterKeyAndScaling"
+    effect = "Allow"
+    actions = [
+      "kms:CreateKey",
+      "kms:CreateAlias",
+      "kms:DeleteAlias",
+      "kms:ScheduleKeyDeletion",
+      "kms:EnableKeyRotation",
+      "kms:GetKeyRotationStatus",
+      "kms:GetKeyPolicy",
+      "kms:PutKeyPolicy",
+      "kms:ListResourceTags",
+      "kms:TagResource",
+      "autoscaling:Describe*",
+      "autoscaling:CreateOrUpdateTags",
+      "autoscaling:DeleteTags",
+      "autoscaling:UpdateAutoScalingGroup",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
+  # Control-plane logging, in its own log group named after the cluster.
+  statement {
+    sid    = "ClusterLogs"
+    effect = "Allow"
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:DescribeLogGroups",
+      "logs:PutRetentionPolicy",
+      "logs:TagResource",
+      "logs:ListTagsForResource",
+    ]
+    resources = ["arn:${var.partition}:logs:*:${var.account_id}:log-group:/aws/eks/${var.resource_prefix}*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+}

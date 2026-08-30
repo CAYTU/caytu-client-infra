@@ -29,11 +29,12 @@ module "permissions" {
   boundary_arn     = aws_iam_policy.boundary.arn
   allow_route53    = var.allow_route53
   route53_zone_ids = var.route53_zone_ids
+  include_cluster  = var.include_cluster
 }
 
 resource "aws_iam_policy" "provisioner" {
   name        = var.role_name
-  description = "Exactly what Caytu's single-instance Terraform needs in this account."
+  description = "Exactly what Caytu's provisioning Terraform needs in this account."
   policy      = module.permissions.policy_json
 }
 
@@ -67,4 +68,21 @@ resource "aws_iam_role" "provisioner" {
 resource "aws_iam_role_policy_attachment" "provisioner" {
   role       = aws_iam_role.provisioner.name
   policy_arn = aws_iam_policy.provisioner.arn
+}
+
+# The cluster half, only when the account holds one.
+#
+# A second policy rather than more statements in the first: the two together are
+# over 9,000 characters and a managed policy stops at 6,144.
+resource "aws_iam_policy" "cluster" {
+  count       = var.include_cluster ? 1 : 0
+  name        = "${var.role_name}Cluster"
+  description = "The extra permissions an EKS cluster needs in this account."
+  policy      = module.permissions.cluster_policy_json
+}
+
+resource "aws_iam_role_policy_attachment" "cluster" {
+  count      = var.include_cluster ? 1 : 0
+  role       = aws_iam_role.provisioner.name
+  policy_arn = aws_iam_policy.cluster[0].arn
 }

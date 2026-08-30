@@ -113,6 +113,64 @@ data "aws_iam_policy_document" "boundary" {
     resources = ["*"]
   }
 
+
+  # A cluster's roles, when this account holds one.
+  #
+  # The boundary intersects with whatever policy a role carries, so without
+  # this the AWS managed policies EKS attaches to its own node role would be
+  # capped to nothing and the nodes would never join.
+  dynamic "statement" {
+    for_each = var.include_cluster ? [1] : []
+    content {
+      sid    = "ClusterNodesAndAddons"
+      effect = "Allow"
+      actions = [
+        # The VPC CNI hands each pod an address off the node's interface.
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface",
+        "ec2:AttachNetworkInterface",
+        "ec2:DetachNetworkInterface",
+        "ec2:ModifyNetworkInterfaceAttribute",
+        "ec2:AssignPrivateIpAddresses",
+        "ec2:UnassignPrivateIpAddresses",
+        "ec2:CreateTags",
+        # Volumes for anything that keeps state.
+        "ec2:CreateVolume",
+        "ec2:DeleteVolume",
+        "ec2:AttachVolume",
+        "ec2:DetachVolume",
+        "ec2:ModifyVolume",
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        # The load balancer controller turns an ingress into a real balancer.
+        "elasticloadbalancing:*",
+        "acm:DescribeCertificate",
+        "acm:ListCertificates",
+        # The autoscaler adds and removes nodes.
+        "autoscaling:SetDesiredCapacity",
+        "autoscaling:TerminateInstanceInAutoScalingGroup",
+        "eks:DescribeCluster",
+      ]
+      resources = ["*"]
+    }
+  }
+
+  # Reads the add-ons make constantly. Separate because they are describes, and
+  # keeping them apart makes the block above readable as "what may change".
+  dynamic "statement" {
+    for_each = var.include_cluster ? [1] : []
+    content {
+      sid    = "ClusterReads"
+      effect = "Allow"
+      actions = [
+        "ec2:Describe*",
+        "autoscaling:Describe*",
+        "elasticloadbalancing:Describe*",
+      ]
+      resources = ["*"]
+    }
+  }
+
   # The point of the whole file. Without this a created role could be handed a
   # policy granting IAM, and the boundary would have bought nothing.
   statement {

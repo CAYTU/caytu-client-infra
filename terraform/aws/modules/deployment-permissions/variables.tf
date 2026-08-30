@@ -52,3 +52,9 @@ variable "protected_role_arns" {
   type        = list(string)
   default     = []
 }
+
+variable "include_cluster" {
+  description = "Whether this account may hold an EKS cluster. A cluster needs its own network, an OIDC provider and a key, none of which a single machine uses, so it is asked for rather than granted by default."
+  type        = bool
+  default     = false
+}

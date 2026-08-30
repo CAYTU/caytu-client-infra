@@ -50,3 +50,9 @@ variable "route53_zone_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "include_cluster" {
+  description = "Whether this account may hold an EKS cluster as well as single machines. Grants network, OIDC and key permissions a single machine never uses."
+  type        = bool
+  default     = false
+}
