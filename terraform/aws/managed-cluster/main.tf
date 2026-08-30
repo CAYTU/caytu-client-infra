@@ -93,6 +93,11 @@ module "eks" {
 
       labels = { "caytu.io/workload" = "stateful" }
 
+      tags = {
+        "k8s.io/cluster-autoscaler/enabled"                               = "true"
+        "k8s.io/cluster-autoscaler/${var.name_prefix}-${var.environment}" = "owned"
+      }
+
       iam_role_additional_policies = {
         AmazonEBSCSIDriverPolicy = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
       }
@@ -109,6 +114,11 @@ module "eks" {
       max_size       = var.stateless_max_size
 
       labels = { "caytu.io/workload" = "stateless" }
+
+      tags = {
+        "k8s.io/cluster-autoscaler/enabled"                               = "true"
+        "k8s.io/cluster-autoscaler/${var.name_prefix}-${var.environment}" = "owned"
+      }
 
       iam_role_additional_policies = {
         AmazonEBSCSIDriverPolicy = "arn:${data.aws_partition.current.partition}:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
