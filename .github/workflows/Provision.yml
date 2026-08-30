@@ -41,6 +41,10 @@ on:
         description: "Left empty to use the default for the architecture"
         required: false
         default: ""
+      root_volume_size_gb:
+        description: "Disk in GB. Left empty to use the stack default."
+        required: false
+        default: ""
       target_account_id:
         description: "AWS account to provision into. Empty means our own, which is the Caytu-hosted case."
         required: false
@@ -138,6 +142,7 @@ jobs:
           DNS_ZONE: caytu.link
           INSTANCE_ARCH: ${{ github.event.inputs.instance_arch }}
           INSTANCE_TYPE: ${{ github.event.inputs.instance_type }}
+          ROOT_VOLUME_SIZE_GB: ${{ github.event.inputs.root_volume_size_gb }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
           ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
@@ -159,6 +164,9 @@ jobs:
           extra=()
           if [ -n "${INSTANCE_TYPE}" ]; then
             extra+=(-var "instance_type=${INSTANCE_TYPE}")
+          fi
+          if [ -n "${ROOT_VOLUME_SIZE_GB}" ]; then
+            extra+=(-var "root_volume_size_gb=${ROOT_VOLUME_SIZE_GB}")
           fi
 
           # Empty on the hosted path, which leaves the provider using this

@@ -37,6 +37,18 @@ on:
         description: "An existing ACM certificate. Leave empty and the stack requests one."
         required: false
         default: ""
+      node_instance_type:
+        description: "Instance type for the nodes. Empty uses the stack default."
+        required: false
+        default: ""
+      min_nodes:
+        description: "Fewest nodes in the pool that scales. Empty uses the stack default."
+        required: false
+        default: ""
+      max_nodes:
+        description: "Most nodes in the pool that scales. Empty uses the stack default."
+        required: false
+        default: ""
       target_account_id:
         description: "AWS account to build in. Empty means our own."
         required: false
@@ -123,8 +135,28 @@ jobs:
           ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
           ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
           CERT_ARN: ${{ github.event.inputs.certificate_arn }}
+          NODE_TYPE: ${{ github.event.inputs.node_instance_type }}
+          MIN_NODES: ${{ github.event.inputs.min_nodes }}
+          MAX_NODES: ${{ github.event.inputs.max_nodes }}
         run: |
           set -euo pipefail
+
+          # The chosen size applies to both pools; the counts apply only to the
+          # one that scales. The stateful pool holds the data pods, which grow
+          # vertically rather than horizontally, so letting an operator set its
+          # count would offer a lever that does not do what it reads like.
+          extra=()
+          if [ -n "${NODE_TYPE}" ]; then
+            extra+=(-var "stateless_instance_types=[\"${NODE_TYPE}\"]")
+            extra+=(-var "stateful_instance_types=[\"${NODE_TYPE}\"]")
+          fi
+          if [ -n "${MIN_NODES}" ]; then
+            extra+=(-var "stateless_min_size=${MIN_NODES}")
+            extra+=(-var "stateless_desired_size=${MIN_NODES}")
+          fi
+          if [ -n "${MAX_NODES}" ]; then
+            extra+=(-var "stateless_max_size=${MAX_NODES}")
+          fi
           # The zone stays ours whoever owns the cluster, so the dns provider
           # keeps this runner's own credentials rather than assuming anything.
           terraform plan -input=false -out=tfplan \
@@ -136,7 +168,8 @@ jobs:
             -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}" \
             -var "domain_name=${SUBDOMAIN}.caytu.link" \
             -var "route53_zone_name=caytu.link" \
-            -var "certificate_arn=${CERT_ARN}"
+            -var "certificate_arn=${CERT_ARN}" \
+            "${extra[@]+"${extra[@]}"}"
 
       - name: Apply
         working-directory: ${{ env.TF_DIR }}
