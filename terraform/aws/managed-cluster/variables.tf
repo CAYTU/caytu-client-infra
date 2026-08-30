@@ -33,8 +33,9 @@ variable "vpc_cidr" {
 }
 
 variable "availability_zones" {
-  type    = list(string)
-  default = ["us-east-1a", "us-east-1b", "us-east-1c"]
+  description = "Zones to spread the cluster across. Empty picks the first three the region has, which is what you want unless a region is short of capacity in one."
+  type        = list(string)
+  default     = []
 }
 
 variable "public_subnet_cidrs" {
