@@ -384,6 +384,12 @@ Resources:
                     }
                   },
                   {
+                    "Sid": "ReadTheServiceLinkedRoles",
+                    "Effect": "Allow",
+                    "Action": "iam:GetRole",
+                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*"
+                  },
+                  {
                     "Sid": "ClusterKeyAndScaling",
                     "Effect": "Allow",
                     "Action": [
