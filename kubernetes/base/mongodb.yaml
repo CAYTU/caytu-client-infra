@@ -6,6 +6,14 @@ metadata:
     app: mongodb
 spec:
   clusterIP: None  # headless — required for StatefulSet DNS
+  # Publish the pod's DNS name before it is ready.
+  #
+  # Without this the deployment deadlocks and cannot recover on its own. A
+  # headless service only publishes ready endpoints, mongo is only ready once
+  # the replica set is initiated, and initiating it requires resolving
+  # mongodb-0.mongodb, which does not exist until the endpoint is published.
+  # The probe sat there failing on "Name or service not known" forever.
+  publishNotReadyAddresses: true
   selector:
     app: mongodb
   ports:
