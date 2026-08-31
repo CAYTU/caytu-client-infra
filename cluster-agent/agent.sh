@@ -195,9 +195,17 @@ run_command() {
       local svc lines
       svc="$(printf '%s' "$params" | jq -r '.service // "backend"')"
       lines="$(printf '%s' "$params" | jq -r '.lines // 200')"
-      if ! result="$(kubectl -n "$NAMESPACE" logs "deployment/${svc}" \
-          --tail="$lines" --all-containers 2>&1)"; then
-        status="failed"; error="could not read the logs for ${svc}"
+      # By label, not by workload kind. `deployment/x` fails on a StatefulSet,
+      # and mongo, redis and minio are all StatefulSets, so the one pod worth
+      # reading when a deployment will not start was the one this could not
+      # reach.
+      if ! result="$(kubectl -n "$NAMESPACE" logs -l "app=${svc}" \
+          --tail="$lines" --all-containers --prefix 2>&1)" || [ -z "$result" ]; then
+        # Falls back to the name, for anything not labelled that way.
+        result="$(kubectl -n "$NAMESPACE" logs "deployment/${svc}" \
+          --tail="$lines" --all-containers 2>&1)" || {
+          status="failed"; error="could not read the logs for ${svc}"
+        }
       fi
       ;;
 
