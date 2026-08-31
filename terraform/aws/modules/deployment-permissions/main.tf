@@ -546,6 +546,20 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # EKS checks whether its own service-linked role exists before making a node
+  # group, and asks IAM to do it. Separate from the create statement above
+  # because that one is conditioned on iam:AWSServiceName, which GetRole does
+  # not carry, so adding the action there would never match.
+  #
+  # Service-linked roles are AWS's own, named by AWS, and reading one says
+  # nothing about the account beyond which services have been used.
+  statement {
+    sid       = "ReadTheServiceLinkedRoles"
+    effect    = "Allow"
+    actions   = ["iam:GetRole"]
+    resources = ["arn:${var.partition}:iam::${var.account_id}:role/aws-service-role/*"]
+  }
+
   # The control plane encrypts secrets with its own key, and node groups arrive
   # as autoscaling groups Terraform reads back.
   statement {
