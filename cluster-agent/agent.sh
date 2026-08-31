@@ -68,7 +68,11 @@ store_token() {
 enrol() {
   local doc sig body
   doc="$(imds dynamic/instance-identity/document)" || return 1
-  sig="$(imds dynamic/instance-identity/signature)" || return 1
+  # rsa2048, not `signature`. IMDS offers three forms of the same proof and the
+  # platform verifies this one; `signature` is the SHA-1 form and is refused as
+  # "not signed by AWS", which reads like a broken document rather than the
+  # wrong format. The machine agent has always used rsa2048.
+  sig="$(imds dynamic/instance-identity/rsa2048)" || return 1
   [[ -n "$doc" && -n "$sig" ]] || return 1
 
   body="$(jq -n --arg d "$doc" --arg s "$sig" --arg i "$INSTANCE_ID" \
