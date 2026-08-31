@@ -1793,18 +1793,41 @@ fetch_and_apply_settings() {
     return 0
   fi
 
-  # Written one at a time rather than rewriting the file, so a key the console
-  # does not know about is left alone. The env file also holds values only this
-  # host has, and a wholesale rewrite would lose them.
-  local key value applied=0
+  # Secrets go into the deployment's encrypted store, not the env file.
+  #
+  # The store exists because the env file is plaintext on disk, and a file
+  # secret is overridden by the store whatever the env file says, so an AWS IoT
+  # certificate written here could never take effect. Sealing happens inside the
+  # backend container, which is where the shard that derives the key lives.
+  #
+  # This replaces the manual pipeline: edit a plain file, run encrypt-secrets.sh,
+  # carry a vault.json to the host, seed it.
+  local secret_payload plain_count=0 sealed_count=0
+  secret_payload="$(printf '%s' "$body" | jq -c '{env: (.secrets // {}), files: (.files // {})}')"
+
+  if [[ "$(printf '%s' "$secret_payload" | jq '(.env | length) + (.files | length)')" -gt 0 ]]; then
+    local out rc=0
+    out="$(printf '%s' "$secret_payload" | compose exec -T backend \
+      timeout 120 node loader.js --seal-secrets 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+      echo "the secrets could not be sealed into the store: $(printf '%s' "$out" | tail -1)"
+      return 1
+    fi
+    sealed_count="$(printf '%s' "$secret_payload" | jq '(.env | length) + (.files | length)')"
+  fi
+
+  # Ordinary settings still belong in the env file. Written one at a time rather
+  # than rewriting it, so a key the console does not know about is left alone:
+  # the file also holds values only this host has.
+  local key value
   while IFS= read -r key; do
     [[ -n "$key" ]] || continue
     value="$(printf '%s' "$body" | jq -r --arg k "$key" '.settings[$k]')"
-    env_upsert "$env_file" "$key" "$value" && applied=$((applied + 1))
+    env_upsert "$env_file" "$key" "$value" && plain_count=$((plain_count + 1))
   done < <(printf '%s' "$body" | jq -r '.settings | keys[]')
 
   chmod 600 "$env_file" 2>/dev/null || true
-  echo "$applied"
+  echo "$((plain_count + sealed_count))"
   return 0
 }
 
