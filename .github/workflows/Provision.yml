@@ -161,6 +161,26 @@ jobs:
           # syntax anywhere in a run block, comments included, so writing the
           # empty form here to illustrate it is what made this whole file
           # unloadable: every push reported a startup failure and no job.
+          # The architecture has to match the type, and only one of them can be
+          # authoritative. The console picks a type from its own list and knows
+          # nothing about this input, so a type chosen there arrived next to an
+          # arch left on its default and RunInstances refused the pair.
+          #
+          # AWS names Graviton families with a trailing g on the family: t4g,
+          # m6g, c7g. Everything else is x86.
+          arch="${INSTANCE_ARCH}"
+          if [ -n "${INSTANCE_TYPE}" ]; then
+            # The g comes straight after the generation number and may carry
+            # more letters: t4g, m6gd, c6gn, x2gd. Matching a trailing g alone
+            # gets c6gn wrong and builds a machine that cannot boot.
+            if [[ "${INSTANCE_TYPE%%.*}" =~ [0-9]g[a-z]*$ ]]; then
+              arch="arm64"
+            else
+              arch="amd64"
+            fi
+            echo "instance type ${INSTANCE_TYPE} is ${arch}"
+          fi
+
           extra=()
           if [ -n "${INSTANCE_TYPE}" ]; then
             extra+=(-var "instance_type=${INSTANCE_TYPE}")
@@ -180,7 +200,7 @@ jobs:
             -var "region=${REGION}" \
             -var "environment=production" \
             -var "name_prefix=caytu-${SUBDOMAIN}" \
-            -var "instance_arch=${INSTANCE_ARCH}" \
+            -var "instance_arch=${arch}" \
             "${extra[@]}" \
             -var "caytu_instance_id=${INSTANCE_ID}" \
             -var "caytu_platform_url=${PLATFORM_URL}" \
