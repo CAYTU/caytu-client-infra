@@ -101,8 +101,11 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.20"
 
-  cluster_name    = "${var.name_prefix}-${var.environment}"
-  cluster_version = var.cluster_version
+  cluster_name = "${var.name_prefix}-${var.environment}"
+  # Null means AWS's current default. Pinning is how a cluster quietly ends up
+  # on a version past standard support, where the control plane costs $0.60 an
+  # hour instead of $0.10 and the node AMIs stop being published.
+  cluster_version = var.cluster_version != "" ? var.cluster_version : null
 
   cluster_endpoint_public_access       = true
   cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"] # restrict via operator_ssh_cidrs equivalent in prod
@@ -157,6 +160,11 @@ module "eks" {
   # to the stateful workloads. Stateless deployments have no selector and land
   # on whichever pool has room (typically SPOT since it's the bigger pool).
   eks_managed_node_group_defaults = {
+    # Amazon Linux 2 is retired and AWS no longer publishes an EKS AMI for it,
+    # which is why node group creation failed with "Requested AMI for this
+    # version is not supported". The module still defaults to it.
+    ami_type = "AL2023_x86_64_STANDARD"
+
     iam_role_permissions_boundary = var.iam_permissions_boundary != "" ? var.iam_permissions_boundary : null
     # Without this the role is named after the node group, e.g.
     # "stateful-eks-node-group-", which a customer's policy does not recognise

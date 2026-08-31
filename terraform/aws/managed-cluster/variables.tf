@@ -19,9 +19,9 @@ variable "name_prefix" {
 }
 
 variable "cluster_version" {
-  description = "EKS Kubernetes version"
+  description = "EKS Kubernetes version. Empty lets AWS pick its current default, which is what you want: a pinned version ages into extended support and is billed at six times the standard rate."
   type        = string
-  default     = "1.30"
+  default     = ""
 }
 
 # -----------------------------------------------------------------------------
