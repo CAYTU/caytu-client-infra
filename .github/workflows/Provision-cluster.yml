@@ -250,10 +250,50 @@ jobs:
         run: terraform apply -input=false -auto-approve tfplan
 
       # Everything below runs against the cluster that now exists.
+      # Terraform assumed the customer's role for itself; the shell did not, so
+      # everything after the apply was still talking to our own account. The
+      # cluster is not there, and `update-kubeconfig` said so in a way that
+      # reads like a missing permission rather than the wrong account.
+      #
+      # Skipped when the cluster is in our own account, where this run's own
+      # credentials are already the right ones.
+      - name: Step into the account the cluster is in
+        if: steps.target.outputs.assume_role_arn != ''
+        env:
+          ROLE: ${{ steps.target.outputs.assume_role_arn }}
+          EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+        run: |
+          set -euo pipefail
+          creds="$(aws sts assume-role \
+            --role-arn "$ROLE" \
+            --role-session-name "cluster-kubectl-${{ github.event.inputs.subdomain }}" \
+            --external-id "$EXTERNAL_ID" \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+
+          read -r key secret token <<< "$creds"
+          # Masked before they are written anywhere, or a later command that
+          # echoes its environment prints a working credential into the log.
+          echo "::add-mask::$secret"
+          echo "::add-mask::$token"
+
+          # A file, not the environment. The DNS record is written in our own
+          # zone, so that step has to keep this run's own credentials; a global
+          # export would send it into the customer's account and fail there.
+          umask 077
+          {
+            echo "export AWS_ACCESS_KEY_ID=$key"
+            echo "export AWS_SECRET_ACCESS_KEY=$secret"
+            echo "export AWS_SESSION_TOKEN=$token"
+          } > "$RUNNER_TEMP/cluster-creds.sh"
+
       - name: Reach the cluster
         working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
+          # Whoever holds the cluster. Sourced rather than exported, so the
+          # steps that talk to our own account are unaffected.
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
           eval "$(terraform output -raw kubeconfig_command)"
           kubectl get nodes
 
@@ -271,6 +311,7 @@ jobs:
           # The manifests below assume an ingress class and a metrics source.
           # Applying them first would leave the ingress unclaimed and the HPAs
           # unable to read anything.
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
           terraform output -raw helm_commands > /tmp/addons.sh
           bash /tmp/addons.sh
 
@@ -344,6 +385,7 @@ jobs:
       - name: Apply the manifests
         run: |
           set -euo pipefail
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
           kubectl apply -k "${GITHUB_WORKSPACE}/${OVERLAY}"
           kubectl -n caytu-client rollout status deploy/backend --timeout=10m
 
@@ -363,9 +405,14 @@ jobs:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
         run: |
           set -euo pipefail
+          # Read from the cluster in a subshell, so the credentials for it do
+          # not reach the Route 53 call below. That zone is ours.
           host=""
           for _ in $(seq 1 60); do
-            host="$(kubectl -n caytu-client get ingress -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+            host="$(
+              [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+              kubectl -n caytu-client get ingress -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true
+            )"
             [ -n "$host" ] && break
             sleep 10
           done
@@ -394,7 +441,10 @@ jobs:
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
           REPORT_TOKEN: ${{ github.event.inputs.report_token }}
-        run: /tmp/report.sh pods
+        run: |
+          set -euo pipefail
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+          /tmp/report.sh pods
 
       - name: Report the outcome
         if: always()
@@ -415,7 +465,8 @@ jobs:
           {
             echo "### Cluster \`${{ github.event.inputs.subdomain }}\`"
             echo
-            kubectl -n caytu-client get pods 2>/dev/null || echo "the cluster was not reachable"
+            ( [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+              kubectl -n caytu-client get pods 2>/dev/null ) || echo "the cluster was not reachable"
             echo
             echo "The agent in the cluster reports from here on: what is running, and anything the console asks for."
           } >> "$GITHUB_STEP_SUMMARY"
