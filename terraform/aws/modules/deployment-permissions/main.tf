@@ -437,10 +437,14 @@ data "aws_iam_policy_document" "cluster" {
     ]
     resources = ["*"]
 
+    # The tag Terraform puts on everything it creates, not a name we hope
+    # somebody chose. The Name prefix was the wrong control: the EKS module
+    # names its launch templates after the node group, so deleting one was
+    # refused and a destroy could not finish, leaving a cluster billing.
     condition {
-      test     = "StringLike"
-      variable = "aws:ResourceTag/Name"
-      values   = ["${var.resource_prefix}*"]
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/Project"
+      values   = ["caytu-client"]
     }
 
     condition {

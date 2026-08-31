@@ -298,10 +298,8 @@ Resources:
                     "Resource": "*",
                     "Condition": {
                       "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      },
-                      "StringLike": {
-                        "aws:ResourceTag/Name": "caytu-*"
+                        "aws:RequestedRegion": "${AWS::Region}",
+                        "aws:ResourceTag/Project": "caytu-client"
                       }
                     }
                   },
