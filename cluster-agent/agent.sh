@@ -175,6 +175,81 @@ apply_settings() {
   echo "$count"
 }
 
+# Make sure this deployment has an encrypted store, and that it holds what the
+# console knows.
+#
+# The machine agent does this at provision. A cluster had nobody doing it, so
+# the store stayed empty and the backend fell back to its defaults: it looked
+# for MinIO credentials, found none, and tried "minioadmin" against a MinIO that
+# had a real password. The error it printed was about an access key, which is
+# three steps from the cause.
+#
+# Two calls, and the order matters. Bootstrap creates the keyring the ratchet is
+# written against and refuses to touch a store that already has one. Sealing
+# needs that keyring to exist and refuses without it.
+seed_the_store() {
+  local pod
+  pod="$(kubectl -n "$NAMESPACE" get pods -l app=backend \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [[ -z "$pod" ]]; then
+    log "no backend pod yet, leaving the store for the next pass"
+    return 1
+  fi
+
+  # Idempotent: it says so and exits 0 when the store is already there, so this
+  # is safe on every restart rather than only the first.
+  if ! kubectl -n "$NAMESPACE" exec "$pod" -- \
+      node loader.js --bootstrap-store >/dev/null 2>&1; then
+    log "could not bootstrap the secret store"
+    return 1
+  fi
+
+  local body
+  body="$(api GET "/api/billings/instances/${INSTANCE_ID}/settings/resolved")" || {
+    log "the platform did not answer, so the store keeps what it has"
+    return 1
+  }
+
+  # What the console holds, plus the credentials this deployment generated for
+  # itself at build time.
+  #
+  # MinIO is the one that bites. Its password is made when the cluster is built
+  # and put in the Kubernetes secret so MinIO can start with it, but the backend
+  # reads that credential from the store and never from the environment. So the
+  # two have to be told the same thing, and only this can do it.
+  local minio_user minio_password
+  minio_user="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.MINIO_ROOT_USER}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  minio_password="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.MINIO_ROOT_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+
+  local payload
+  payload="$(printf '%s' "$body" | jq -c \
+    --arg u "$minio_user" --arg p "$minio_password" '
+    {env: (.secrets // {}), files: (.files // {})}
+    # The console wins where it has an opinion: an operator who set these
+    # deliberately should not be overwritten by what the build generated.
+    | if $u != "" and (.env.MINIO_ACCESS_KEY // "") == ""
+      then .env.MINIO_ACCESS_KEY = $u else . end
+    | if $p != "" and (.env.MINIO_SECRET_KEY // "") == ""
+      then .env.MINIO_SECRET_KEY = $p else . end')"
+  local count
+  count="$(printf '%s' "$payload" | jq '(.env | length) + (.files | length)')"
+  if [[ "${count:-0}" -eq 0 ]]; then
+    log "the console holds no secrets for this deployment"
+    return 0
+  fi
+
+  if printf '%s' "$payload" | kubectl -n "$NAMESPACE" exec -i "$pod" -- \
+      node loader.js --seal-secrets >/dev/null 2>&1; then
+    log "sealed ${count} secret(s) into the store"
+    kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+  else
+    log "could not seal the secrets into the store"
+    return 1
+  fi
+}
+
 run_command() {
   local id=$1 type=$2 params=$3
   local status="done" error="" result=""
@@ -282,6 +357,10 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 log "agent up for ${INSTANCE_ID} in ${NAMESPACE}"
+
+# Once, at startup. A deployment with an empty store cannot serve anything, so
+# this is not something to wait for a console command to trigger.
+seed_the_store || log "the store is not seeded yet; it is retried on restart"
 last_beat=0
 while true; do
   now="$(date +%s)"
