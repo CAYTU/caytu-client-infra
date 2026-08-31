@@ -176,6 +176,7 @@ jobs:
       # Only detached ones. An interface still in use belongs to something that
       # has not gone yet, and deleting it would break that rather than help.
       - name: Remove interfaces the cluster left behind
+        id: sweep
         if: always()
         working-directory: ${{ env.TF_DIR }}
         env:
@@ -197,7 +198,13 @@ jobs:
             aws ec2 delete-network-interface --region "$REGION"               --network-interface-id "$eni" 2>&1 | tail -1 || true
           done
 
+      # First pass. Allowed to fail: the interfaces that block a subnet only
+      # become detached once the nodes holding them are gone, which happens
+      # during this step. Sweeping before it finds nothing, which is why the
+      # sweep above has never once had anything to do.
       - name: Destroy
+        id: first
+        continue-on-error: true
         working-directory: ${{ env.TF_DIR }}
         env:
           REGION: ${{ github.event.inputs.region }}
@@ -211,6 +218,42 @@ jobs:
           # names and tags. Passing the provision's values here would mean
           # keeping two lists in step forever, and getting one wrong would look
           # like a successful destroy that left the cluster running.
+          terraform destroy -input=false -auto-approve \
+            -var "aws_profile=" \
+            -var "region=${REGION}" \
+            -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
+            -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}"
+
+      # Now they are detached, so this is the pass that finds them.
+      - name: Remove interfaces the destroy left behind
+        if: steps.first.outcome == 'failure'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          set -uo pipefail
+          vpc="$(terraform state show module.vpc.aws_vpc.this[0] 2>/dev/null | grep -oE 'vpc-[0-9a-f]+' | head -1 || true)"
+          [ -n "$vpc" ] || { echo "no vpc left in state"; exit 0; }
+
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+          for eni in $(aws ec2 describe-network-interfaces --region "$REGION" \
+                --filters "Name=vpc-id,Values=$vpc" "Name=status,Values=available" \
+                --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+            echo "removing detached interface $eni"
+            aws ec2 delete-network-interface --region "$REGION" --network-interface-id "$eni" 2>&1 | tail -1 || true
+          done
+
+      # The pass that has to succeed. A teardown that stops half way leaves the
+      # state matching neither what is there nor what is gone.
+      - name: Destroy what is left
+        if: steps.first.outcome == 'failure'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
+          ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+        run: |
+          set -euo pipefail
           terraform destroy -input=false -auto-approve \
             -var "aws_profile=" \
             -var "region=${REGION}" \
