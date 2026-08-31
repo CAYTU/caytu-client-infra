@@ -389,10 +389,12 @@ Resources:
                     "Sid": "ClusterKeyAndScaling",
                     "Effect": "Allow",
                     "Action": [
+                      "kms:UpdateAlias",
                       "kms:TagResource",
                       "kms:ScheduleKeyDeletion",
                       "kms:PutKeyPolicy",
                       "kms:ListResourceTags",
+                      "kms:ListAliases",
                       "kms:GetKeyRotationStatus",
                       "kms:GetKeyPolicy",
                       "kms:EnableKeyRotation",
