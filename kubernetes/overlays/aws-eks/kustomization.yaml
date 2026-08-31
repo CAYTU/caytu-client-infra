@@ -13,6 +13,9 @@ resources:
   - ../../base
   # The only thing that can act on this deployment once the build has finished.
   - agent.yaml
+  # gp3 as the default class. The EBS CSI addon ships gp2 as default, and the
+  # base assumes gp3.
+  - storage.yaml
 
 secretGenerator:
   - name: caytu-secrets

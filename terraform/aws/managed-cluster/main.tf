@@ -221,42 +221,15 @@ module "eks" {
   }
 }
 
-# -----------------------------------------------------------------------------
-# gp3 storage class (base assumes gp3; the addon's default is gp2)
-# -----------------------------------------------------------------------------
-resource "kubernetes_storage_class_v1" "gp3" {
-  metadata {
-    name = "gp3"
-    annotations = {
-      "storageclass.kubernetes.io/is-default-class" = "true"
-    }
-  }
-  storage_provisioner    = "ebs.csi.aws.com"
-  reclaim_policy         = "Retain"
-  volume_binding_mode    = "WaitForFirstConsumer"
-  allow_volume_expansion = true
-
-  parameters = {
-    type   = "gp3"
-    fsType = "ext4"
-  }
-
-  depends_on = [module.eks]
-}
-
-# -----------------------------------------------------------------------------
-# gp2 -> not default anymore
-# -----------------------------------------------------------------------------
-resource "kubernetes_annotations" "gp2_not_default" {
-  api_version = "storage.k8s.io/v1"
-  kind        = "StorageClass"
-  metadata {
-    name = "gp2"
-  }
-  annotations = {
-    "storageclass.kubernetes.io/is-default-class" = "false"
-  }
-  force = true
-
-  depends_on = [module.eks]
-}
+# The gp3 storage class and the gp2 demotion used to live here, as
+# kubernetes_* resources. They are manifests now, in the overlay, applied by
+# kubectl with the rest.
+#
+# Terraform managing objects inside a cluster it also owns breaks at both ends.
+# On create the provider authenticates as this run rather than as the role that
+# administers the cluster, and is refused. On destroy the cluster is going away,
+# so the provider has no endpoint, falls back to localhost, and the teardown
+# stops with every real resource still standing.
+#
+# Both happened. Nothing else in this stack reaches into the cluster, and
+# nothing should.

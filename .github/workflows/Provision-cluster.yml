@@ -387,6 +387,15 @@ jobs:
           set -euo pipefail
           [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
           kubectl apply -k "${GITHUB_WORKSPACE}/${OVERLAY}"
+
+          # The EBS CSI addon ships gp2 as the default class and the overlay
+          # adds gp3 as one too. Two defaults is not an error Kubernetes raises
+          # loudly; it just picks one, and a claim can land on the wrong disk.
+          # Patched rather than declared, because gp2 belongs to the addon.
+          kubectl annotate storageclass gp2 \
+            storageclass.kubernetes.io/is-default-class=false --overwrite \
+            >/dev/null 2>&1 || true
+
           kubectl -n caytu-client rollout status deploy/backend --timeout=10m
 
       # Not in Terraform: this balancer is created by the ingress controller
