@@ -20,6 +20,15 @@ rules:
   - apiGroups: [""]
     resources: [pods, pods/log]
     verbs: [get, list]
+  # Seeding the secret store runs the backend's image on its own, because the
+  # backend itself will not start until the store exists. Create and delete
+  # only, and attach so its output can be read back.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, delete]
+  - apiGroups: [""]
+    resources: [pods/attach, pods/exec]
+    verbs: [create, get]
   # Settings and its own credential. Namespaced, so it cannot read another
   # deployment's secrets even if something else were running beside it.
   - apiGroups: [""]
