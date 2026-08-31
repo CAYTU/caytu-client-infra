@@ -291,10 +291,15 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: |
           set -euo pipefail
-          # Whoever holds the cluster. Sourced rather than exported, so the
-          # steps that talk to our own account are unaffected.
+          # State first, as ourselves. The bucket is ours, so reading it with
+          # the customer's credentials is a 403, and the command comes back
+          # empty: kubectl then falls through to localhost and says the
+          # connection was refused, which points nowhere near the cause.
+          cmd="$(terraform output -raw kubeconfig_command)"
+
+          # Only now, and only for the cluster.
           [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
-          eval "$(terraform output -raw kubeconfig_command)"
+          eval "$cmd"
           kubectl get nodes
 
       - name: Report installing the ingress, metrics and autoscaler
@@ -311,8 +316,10 @@ jobs:
           # The manifests below assume an ingress class and a metrics source.
           # Applying them first would leave the ingress unclaimed and the HPAs
           # unable to read anything.
-          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+          # Written as ourselves, run against the cluster. Same reason as above.
           terraform output -raw helm_commands > /tmp/addons.sh
+
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
           bash /tmp/addons.sh
 
       - name: Configure the deployment

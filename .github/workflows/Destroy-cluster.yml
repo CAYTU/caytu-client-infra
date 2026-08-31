@@ -182,10 +182,15 @@ jobs:
           REGION: ${{ github.event.inputs.region }}
         run: |
           set -uo pipefail
-          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+          # The state is in our bucket, so it is read as ourselves. Sourcing the
+          # customer's credentials first makes this a 403, and the step then finds
+          # no vpc and quietly does nothing.
 
           vpc="$(terraform state show module.vpc.aws_vpc.this[0] 2>/dev/null                  | grep -oE 'vpc-[0-9a-f]+' | head -1 || true)"
           [ -n "$vpc" ] || { echo "no vpc in state, nothing to clean"; exit 0; }
+
+          # The interfaces are theirs, so they are removed as them.
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
 
           for eni in $(aws ec2 describe-network-interfaces --region "$REGION"                 --filters "Name=vpc-id,Values=$vpc" "Name=status,Values=available"                 --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
             echo "removing detached interface $eni"
