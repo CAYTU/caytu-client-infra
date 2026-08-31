@@ -218,15 +218,21 @@ run_with_backend_image() {
     -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
   [[ -n "$image" ]] || return 1
 
+  # Built as JSON first. Passing the command through `jq --args` fails the
+  # moment one of its words starts with two dashes, and every command here ends
+  # in one: jq read --bootstrap-store as an option to itself.
+  local cmd_json
+  cmd_json="$(printf '%s\n' "$@" | jq -R . | jq -sc .)"
+
   local overrides
   overrides="$(jq -nc --arg i "$image" --arg n "$name" \
-    --arg org "${ORGANIZATION_ID:-}" --args '{
+    --arg org "${ORGANIZATION_ID:-}" --argjson cmd "$cmd_json" '{
     spec: {
       restartPolicy: "Never",
       containers: [{
         name: $n,
         image: $i,
-        command: $ARGS.positional,
+        command: $cmd,
         stdin: true,
         env: [{name: "CAYTU_CUSTOMER_ID", value: $org}],
         envFrom: [
@@ -235,7 +241,7 @@ run_with_backend_image() {
         ]
       }]
     }
-  }' "$@")"
+  }')"
 
   kubectl -n "$NAMESPACE" run "$name" --rm -i --quiet --restart=Never \
     --image="$image" --overrides="$overrides" 2>&1
