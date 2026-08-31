@@ -16,6 +16,7 @@ env_upsert() {
   grep -qE "^$k=" "$f" 2>/dev/null && sed -i "s|^$k=.*|$k=$v|" "$f" || printf '%s=%s\n' "$k" "$v" >> "$f"
 }
 instance_platform_url() { echo "http://platform.test"; }
+compose() { echo "compose $*" >> "$TMP/compose.log"; }
 eval "$(sed -n '/^fetch_and_apply_settings()/,/^}/p' scripts/caytu-client)"
 
 BODY=""; CODE=0
@@ -23,7 +24,7 @@ curl() { [ "$CODE" -ne 0 ] && return "$CODE"; printf '%s' "$BODY"; }
 
 echo "settings the console holds are written to the env file"
 printf 'CAYTU_METERING_TOKEN=ct_tok\nKEEP_ME=local-only\n' > "$ENV"
-BODY='{"settings":{"OPENAI_API_KEY":"sk-abc","TURN_SECRET":"turn-xyz"}}'; CODE=0
+BODY='{"settings":{"OPENAI_API_KEY":"sk-abc","TURN_SECRET":"turn-xyz"},"secrets":{},"files":{}}'; CODE=0
 out="$(fetch_and_apply_settings "$ENV" "abc123")"
 [ "$(env_get "$ENV" OPENAI_API_KEY)" = "sk-abc" ] && ok "a value is written" || bad "not written"
 [ "$(env_get "$ENV" TURN_SECRET)" = "turn-xyz" ] && ok "a second value is written" || bad "second not written"
@@ -36,14 +37,14 @@ out="$(fetch_and_apply_settings "$ENV" "abc123")"
 
 echo
 echo "an existing value is replaced, not duplicated"
-BODY='{"settings":{"OPENAI_API_KEY":"sk-new"}}'; CODE=0
+BODY='{"settings":{"OPENAI_API_KEY":"sk-new"},"secrets":{},"files":{}}'; CODE=0
 fetch_and_apply_settings "$ENV" "abc123" >/dev/null
 [ "$(env_get "$ENV" OPENAI_API_KEY)" = "sk-new" ] && ok "replaced" || bad "not replaced"
 [ "$(grep -c '^OPENAI_API_KEY=' "$ENV")" = "1" ] && ok "written once" || bad "duplicated"
 
 echo
 echo "nothing to do is not a failure"
-BODY='{"settings":{}}'; CODE=0
+BODY='{"settings":{},"secrets":{},"files":{}}'; CODE=0
 out="$(fetch_and_apply_settings "$ENV" "abc123")"; rc=$?
 [ "$rc" -eq 0 ] && ok "succeeds" || bad "failed with $rc"
 [[ "$out" == *"no settings"* ]] && ok "says so, rather than claiming an apply" || bad "said '$out'"
@@ -62,6 +63,17 @@ CODE=7
 out="$(fetch_and_apply_settings "$ENV" "abc123")"; rc=$?
 [ "$rc" -ne 0 ] && ok "fails" || bad "reported success"
 [ "$before" = "$(cat "$ENV")" ] && ok "file untouched" || bad "file was changed anyway"
+
+echo
+echo "a secret goes to the store, never the env file"
+: > "$TMP/compose.log"
+printf 'CAYTU_METERING_TOKEN=ct_tok\n' > "$TMP/.env.split"
+BODY='{"settings":{"LOG_LEVEL":"debug"},"secrets":{"OPENAI_API_KEY":"sk-secret"},"files":{}}'; CODE=0
+out="$(fetch_and_apply_settings "$TMP/.env.split" "abc123")"
+[ "$(env_get "$TMP/.env.split" LOG_LEVEL)" = "debug" ] && ok "the ordinary one is written" || bad "not written"
+grep -q "OPENAI_API_KEY" "$TMP/.env.split" && bad "the secret was written to the env file" || ok "the secret is not in the env file"
+grep -q "seal-secrets" "$TMP/compose.log" && ok "the secret is sealed into the store" || bad "never sealed"
+[ "$out" = "2" ] && ok "both counted" || bad "counted '$out'"
 
 echo
 echo "$P passed, $F failed"
