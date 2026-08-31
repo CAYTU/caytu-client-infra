@@ -1,0 +1,24 @@
+# The storage class the base assumes.
+#
+# Applied here rather than by Terraform. Terraform managing objects inside a
+# cluster it also owns fails at both ends: on create it authenticates as the run
+# rather than as the cluster's administrator, and on destroy the cluster is
+# already going away and it has nothing to talk to.
+#
+# Retain, not Delete: these volumes hold the deployment's database. Removing a
+# claim should not be able to destroy the data behind it, and there is no undo.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: ebs.csi.aws.com
+reclaimPolicy: Retain
+# The volume is made in the zone the pod lands in, rather than a zone the pod
+# may not be schedulable into.
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  fsType: ext4
