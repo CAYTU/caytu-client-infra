@@ -135,6 +135,63 @@ jobs:
             terraform state rm "$addr" >/dev/null
           done || true
 
+      # Terraform assumes the customer's role for itself. The shell does not, so
+      # the interface cleanup below would look in our own account and find
+      # nothing to do, which is worse than failing.
+      - name: Step into the account the cluster is in
+        if: steps.target.outputs.assume_role_arn != ''
+        env:
+          ROLE: ${{ steps.target.outputs.assume_role_arn }}
+          EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+        run: |
+          set -euo pipefail
+          creds="$(aws sts assume-role \
+            --role-arn "$ROLE" \
+            --role-session-name "cluster-teardown-${{ github.event.inputs.instance_id }}" \
+            --external-id "$EXTERNAL_ID" \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+
+          read -r key secret token <<< "$creds"
+          echo "::add-mask::$secret"
+          echo "::add-mask::$token"
+
+          # A file, not the environment: Terraform does its own assuming, and
+          # exporting these would change what it runs as halfway through.
+          umask 077
+          {
+            echo "export AWS_ACCESS_KEY_ID=$key"
+            echo "export AWS_SECRET_ACCESS_KEY=$secret"
+            echo "export AWS_SESSION_TOKEN=$token"
+          } > "$RUNNER_TEMP/cluster-creds.sh"
+
+      # Network interfaces the cluster left behind.
+      #
+      # EKS puts interfaces in the private subnets for its control plane, and
+      # the load balancer controller makes more. They are not Terraform's, so a
+      # destroy removes everything else and then cannot delete the subnet or the
+      # security group holding them, and stops with a DependencyViolation that
+      # names an id and nothing else.
+      #
+      # Only detached ones. An interface still in use belongs to something that
+      # has not gone yet, and deleting it would break that rather than help.
+      - name: Remove interfaces the cluster left behind
+        if: always()
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          set -uo pipefail
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+
+          vpc="$(terraform state show module.vpc.aws_vpc.this[0] 2>/dev/null                  | grep -oE 'vpc-[0-9a-f]+' | head -1 || true)"
+          [ -n "$vpc" ] || { echo "no vpc in state, nothing to clean"; exit 0; }
+
+          for eni in $(aws ec2 describe-network-interfaces --region "$REGION"                 --filters "Name=vpc-id,Values=$vpc" "Name=status,Values=available"                 --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+            echo "removing detached interface $eni"
+            aws ec2 delete-network-interface --region "$REGION"               --network-interface-id "$eni" 2>&1 | tail -1 || true
+          done
+
       - name: Destroy
         working-directory: ${{ env.TF_DIR }}
         env:
@@ -169,10 +226,12 @@ jobs:
           if [ "$remaining" -ne 0 ]; then
             echo "::error::$remaining resource(s) still in state after destroy. Listed below."
             terraform state list
-            # An instance left behind is the one that costs money. Anything else
-            # is clutter that will collide the next time this subdomain is used.
-            if terraform state list | grep -qE '^module\.(eks|vpc)\.'; then
-              echo "::error::The cluster or its network is still there and still billing."
+            # Only the ones that cost money. This used to match anything under
+            # module.eks or module.vpc, so a leftover VPC and subnet, which are
+            # free, were reported as still billing. That reads as an emergency
+            # and is not one; the difference matters at one in the morning.
+            if terraform state list | grep -qE 'aws_(nat_gateway|eip|eks_cluster|eks_node_group|instance|db_instance)\.'; then
+              echo "::error::Something that costs money is still there: a gateway, an address, or the cluster itself."
             else
               echo "::warning::The cluster is gone. What remains costs nothing but will block re-using this name."
             fi
