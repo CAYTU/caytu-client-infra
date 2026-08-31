@@ -557,7 +557,14 @@ data "aws_iam_policy_document" "cluster" {
     sid       = "ReadTheServiceLinkedRoles"
     effect    = "Allow"
     actions   = ["iam:GetRole"]
-    resources = ["arn:${var.partition}:iam::${var.account_id}:role/aws-service-role/*"]
+    resources = [
+      "arn:${var.partition}:iam::${var.account_id}:role/aws-service-role/*",
+      # The same role, named without its path. A service-linked role that does
+      # not exist yet has no path for IAM to resolve, so the check is authorized
+      # against the bare name and the pattern above cannot match it. Which is
+      # exactly the case this runs in: the first cluster in an account.
+      "arn:${var.partition}:iam::${var.account_id}:role/AWSServiceRoleFor*",
+    ]
   }
 
   # The control plane encrypts secrets with its own key, and node groups arrive

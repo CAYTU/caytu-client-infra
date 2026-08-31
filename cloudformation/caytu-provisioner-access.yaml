@@ -387,7 +387,10 @@ Resources:
                     "Sid": "ReadTheServiceLinkedRoles",
                     "Effect": "Allow",
                     "Action": "iam:GetRole",
-                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*"
+                    "Resource": [
+                      "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
+                      "arn:aws:iam::${AWS::AccountId}:role/AWSServiceRoleFor*"
+                    ]
                   },
                   {
                     "Sid": "ClusterKeyAndScaling",
