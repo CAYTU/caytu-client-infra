@@ -449,6 +449,21 @@ Resources:
                     }
                   },
                   {
+                    "Sid": "AttachRolesToTheCluster",
+                    "Effect": "Allow",
+                    "Action": "iam:PassRole",
+                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+                    "Condition": {
+                      "StringEquals": {
+                        "iam:PassedToService": [
+                          "eks.amazonaws.com",
+                          "eks-nodegroup.amazonaws.com",
+                          "ec2.amazonaws.com"
+                        ]
+                      }
+                    }
+                  },
+                  {
                     "Sid": "ClusterLogs",
                     "Effect": "Allow",
                     "Action": [
