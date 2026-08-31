@@ -551,6 +551,11 @@ data "aws_iam_policy_document" "cluster" {
       "kms:CreateKey",
       "kms:CreateAlias",
       "kms:DeleteAlias",
+      "kms:UpdateAlias",
+      # An alias has no arn to scope to: the API answers about the account and
+      # the caller filters. Reading it back is part of creating one, so every
+      # apply fails here without it.
+      "kms:ListAliases",
       "kms:ScheduleKeyDeletion",
       "kms:EnableKeyRotation",
       "kms:GetKeyRotationStatus",
