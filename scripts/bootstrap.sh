@@ -2,7 +2,12 @@
 # =============================================================================
 # bootstrap.sh — one-shot host bootstrap for Ubuntu/Debian
 #
-#   # Docker compose stack host (default):
+#   # A machine of your own, all the way to a running deployment. The code
+#   # comes from the console, under Billings > Instances.
+#   curl -fsSL https://raw.githubusercontent.com/CAYTU/caytu-client-infra/main/scripts/bootstrap.sh \
+#     | sudo CAYTU_CODE=<CODE> CAYTU_PLATFORM=https://your.platform bash
+#
+#   # Prepare the machine only, and enrol it yourself later:
 #   curl -fsSL https://raw.githubusercontent.com/CAYTU/caytu-client-infra/main/scripts/bootstrap.sh | sudo bash
 #
 #   # Single-node k3s cluster:
@@ -279,12 +284,63 @@ ECRTIMER
     fi
   fi
 else
-  log "done. remaining steps (from your workstation):"
-  log "  caytu-client --target ssh state set ssh_host $(hostname -I | awk '{print $1}')"
-  log "  caytu-client --target ssh state set ssh_user $DEPLOY_USER"
-  log "  caytu-client --target ssh state set ssh_key_path ~/.ssh/id_ed25519"
-  log "  caytu-client --target ssh init"
-  log "  # edit compose/.env.ssh"
-  log "  caytu-client --target ssh env push"
-  log "  caytu-client --target ssh up"
+  # A machine that is not one of ours: somebody's own server, on their own
+  # network.
+  #
+  # The agent above comes from S3 using the instance's AWS role. This machine
+  # has no AWS identity and never will, so it takes the same files from the
+  # repository this script was itself downloaded from. Same two directories the
+  # published tarball carries, and nothing else: a host has no use for the
+  # terraform or the docs.
+  install_agent_from_source() {
+    local ref="${CAYTU_AGENT_REF:-main}"
+    local url="https://codeload.github.com/CAYTU/caytu-client-infra/tar.gz/${ref}"
+
+    log "installing the client from ${ref}"
+    local tmp; tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    if ! curl -fsSL "$url" -o "$tmp/src.tar.gz"; then
+      log "ERROR: could not download the client from GitHub."
+      log "  The repository has to be public for this to work. If it is not yet,"
+      log "  that is the reason, and nothing here can work around it."
+      return 1
+    fi
+
+    # --strip-components drops the caytu-client-infra-<ref>/ wrapper GitHub adds.
+    tar -xzf "$tmp/src.tar.gz" -C "$DEPLOY_DIR" --strip-components=1 \
+      --wildcards '*/scripts' '*/compose' 2>/dev/null || {
+      log "ERROR: the download did not contain scripts and compose"
+      return 1
+    }
+
+    chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
+    ln -sf "$DEPLOY_DIR/scripts/caytu-client" /usr/local/bin/caytu-client
+    log "installed caytu-client"
+  }
+
+  if install_agent_from_source; then
+    if [[ -n "${CAYTU_CODE:-}" ]]; then
+      # One command from the console, ending with a deployment that is running.
+      # Splitting this across three commands is what left a machine prepared and
+      # empty, with instructions naming a program that was never installed.
+      : "${CAYTU_PLATFORM:?CAYTU_CODE was given, so CAYTU_PLATFORM is required}"
+
+      log "enrolling with the code you were given"
+      sudo -u "$DEPLOY_USER" caytu-client -t onprem enroll "$CAYTU_CODE" \
+        --platform "$CAYTU_PLATFORM"
+
+      log "starting the agent, which brings the deployment up"
+      sudo -u "$DEPLOY_USER" caytu-client -t onprem instance agent
+      log "done"
+    else
+      log "done. Create a code in the console under Billings > Instances, then:"
+      log "  caytu-client -t onprem enroll <CODE> --platform <your platform url>"
+      log "  caytu-client -t onprem instance agent"
+      log ""
+      log "Or re-run this with the code and it will do both:"
+      log "  ... | sudo CAYTU_CODE=<CODE> CAYTU_PLATFORM=<url> bash"
+    fi
+  fi
 fi
