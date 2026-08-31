@@ -638,6 +638,28 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # Handing the cluster and its nodes the roles they run as.
+  #
+  # In the cluster policy rather than the shared one above, which lists the two
+  # services a single machine passes to. Same shape: the role must be one of
+  # ours, and it may only be handed to these services.
+  statement {
+    sid       = "AttachRolesToTheCluster"
+    effect    = "Allow"
+    actions   = ["iam:PassRole"]
+    resources = [local.role_arn_pattern]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values = [
+        "eks.amazonaws.com",
+        "eks-nodegroup.amazonaws.com",
+        "ec2.amazonaws.com",
+      ]
+    }
+  }
+
   # Control-plane logging, in its own log group named after the cluster.
   statement {
     sid    = "ClusterLogs"
