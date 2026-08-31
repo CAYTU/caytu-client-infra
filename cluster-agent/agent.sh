@@ -62,7 +62,13 @@ stored_token() {
 
 store_token() {
   kubectl -n "$NAMESPACE" create secret generic "$CREDENTIAL_SECRET" \
-    --from-literal=token="$1" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    --from-literal=token="$1" --from-literal=organizationId="${2:-}" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+}
+
+stored_org() {
+  kubectl -n "$NAMESPACE" get secret "$CREDENTIAL_SECRET" \
+    -o jsonpath='{.data.organizationId}' 2>/dev/null | base64 -d 2>/dev/null
 }
 
 enrol() {
@@ -82,14 +88,19 @@ enrol() {
   out="$(curl -sS -m 30 -X POST "${PLATFORM_URL}/api/auth/enroll/instance" \
     -H 'Content-Type: application/json' -d "$body" 2>/dev/null)" || return 1
 
-  local token; token="$(printf '%s' "$out" | jq -r '.token // empty')"
+  local token org
+  token="$(printf '%s' "$out" | jq -r '.token // empty')"
+  # The store's key is derived partly from this, so bootstrapping needs it and
+  # only the enrolment reply carries it.
+  org="$(printf '%s' "$out" | jq -r '.organizationId // empty')"
   [[ -n "$token" ]] || {
     log "enrolment refused: $(printf '%s' "$out" | jq -r '.errors[0].message // "unknown"')"
     return 1
   }
 
-  store_token "$token"
+  store_token "$token" "$org"
   TOKEN="$token"
+  ORGANIZATION_ID="$org"
   log "enrolled, credential stored in $CREDENTIAL_SECRET"
 }
 
@@ -191,20 +202,78 @@ apply_settings() {
 # Two calls, and the order matters. Bootstrap creates the keyring the ratchet is
 # written against and refuses to touch a store that already has one. Sealing
 # needs that keyring to exist and refuses without it.
-seed_the_store() {
-  local pod
-  pod="$(kubectl -n "$NAMESPACE" get pods -l app=backend \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [[ -z "$pod" ]]; then
-    log "no backend pod yet, leaving the store for the next pass"
-    return 1
-  fi
+# Run one command with the backend's image, on its own.
+#
+# Not `kubectl exec` into the backend pod. That was a deadlock: the backend
+# crash-loops when the store is empty, so the container is not running, so there
+# is nothing to exec into, so the store stays empty. The image is what carries
+# the shard, not the running pod, so a throwaway pod does the job.
+#
+# Same config as the backend, or the key it derives would not match the one the
+# backend derives, and it would seal rows nothing could read.
+run_with_backend_image() {
+  local name=$1; shift
+  local image
+  image="$(kubectl -n "$NAMESPACE" get deploy backend \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  [[ -n "$image" ]] || return 1
 
-  # Idempotent: it says so and exits 0 when the store is already there, so this
-  # is safe on every restart rather than only the first.
-  if ! kubectl -n "$NAMESPACE" exec "$pod" -- \
-      node loader.js --bootstrap-store >/dev/null 2>&1; then
-    log "could not bootstrap the secret store"
+  local overrides
+  overrides="$(jq -nc --arg i "$image" --arg n "$name" \
+    --arg org "${ORGANIZATION_ID:-}" --args '{
+    spec: {
+      restartPolicy: "Never",
+      containers: [{
+        name: $n,
+        image: $i,
+        command: $ARGS.positional,
+        stdin: true,
+        env: [{name: "CAYTU_CUSTOMER_ID", value: $org}],
+        envFrom: [
+          {configMapRef: {name: "caytu-shared"}},
+          {secretRef: {name: "caytu-secrets"}}
+        ]
+      }]
+    }
+  }' "$@")"
+
+  kubectl -n "$NAMESPACE" run "$name" --rm -i --quiet --restart=Never \
+    --image="$image" --overrides="$overrides" 2>&1
+}
+
+# Make sure this deployment has an encrypted store, and that it holds what the
+# console knows.
+#
+# The machine agent does this at provision. A cluster had nobody doing it, so
+# the store stayed empty and the backend fell back to its defaults: it looked
+# for MinIO credentials, found none, and tried "minioadmin" against a MinIO that
+# had a real password. The error it printed was about an access key, which is
+# three steps from the cause.
+#
+# Two calls, and the order matters. Bootstrap creates the keyring the ratchet is
+# written against and refuses to touch a store that already has one. Sealing
+# needs that keyring to exist and refuses without it.
+seed_the_store() {
+  local out
+
+  # An agent that enrolled before this stored the organization id has none, and
+  # re-enrolling is refused once a machine is already enrolled. Asked for
+  # instead, over the credential it already holds.
+  if [[ -z "${ORGANIZATION_ID:-}" ]]; then
+    ORGANIZATION_ID="$(api GET "/api/billings/instances" \
+      | jq -r --arg id "$INSTANCE_ID" \
+        '.instances[]? | select(.id == $id) | .organizationId // empty' 2>/dev/null || true)"
+    if [[ -n "$ORGANIZATION_ID" ]]; then
+      store_token "$TOKEN" "$ORGANIZATION_ID"
+      log "recovered the organization id from the platform"
+    else
+      log "no organization id, so the store cannot be bootstrapped"
+      return 1
+    fi
+  fi
+  if ! out="$(printf '' | run_with_backend_image caytu-store-bootstrap \
+      node loader.js --bootstrap-store)"; then
+    log "could not bootstrap the secret store: $(printf '%s' "$out" | tail -1)"
     return 1
   fi
 
@@ -231,12 +300,11 @@ seed_the_store() {
   payload="$(printf '%s' "$body" | jq -c \
     --arg u "$minio_user" --arg p "$minio_password" '
     {env: (.secrets // {}), files: (.files // {})}
-    # The console wins where it has an opinion: an operator who set these
-    # deliberately should not be overwritten by what the build generated.
     | if $u != "" and (.env.MINIO_ACCESS_KEY // "") == ""
       then .env.MINIO_ACCESS_KEY = $u else . end
     | if $p != "" and (.env.MINIO_SECRET_KEY // "") == ""
       then .env.MINIO_SECRET_KEY = $p else . end')"
+
   local count
   count="$(printf '%s' "$payload" | jq '(.env | length) + (.files | length)')"
   if [[ "${count:-0}" -eq 0 ]]; then
@@ -244,12 +312,12 @@ seed_the_store() {
     return 0
   fi
 
-  if printf '%s' "$payload" | kubectl -n "$NAMESPACE" exec -i "$pod" -- \
-      node loader.js --seal-secrets >/dev/null 2>&1; then
+  if out="$(printf '%s' "$payload" | run_with_backend_image caytu-store-seal \
+      node loader.js --seal-secrets)"; then
     log "sealed ${count} secret(s) into the store"
     kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
   else
-    log "could not seal the secrets into the store"
+    log "could not seal the secrets into the store: $(printf '%s' "$out" | tail -1)"
     return 1
   fi
 }
@@ -360,6 +428,7 @@ poll_commands() {
 # ---------------------------------------------------------------------------
 
 TOKEN="$(stored_token)"
+ORGANIZATION_ID="$(stored_org)"
 if [[ -z "$TOKEN" ]]; then
   log "no credential yet, enrolling"
   until enrol; do

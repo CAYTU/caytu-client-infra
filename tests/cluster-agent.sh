@@ -20,6 +20,9 @@ eval "$(sed -n '/^pod_json()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^apply_settings()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^run_command()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
+# Stands in for the throwaway pod. Records the command it was asked to run.
+RUN_LOG="$TMP/run.log"; RUN_RC=0
+run_with_backend_image() { local n=$1; shift; echo "$n: $*" >> "$RUN_LOG"; cat >/dev/null; return "$RUN_RC"; }
 
 # Stand in for the cluster and the platform.
 KUBECTL_OUT=""; KUBECTL_RC=0; KUBECTL_LOG="$TMP/kubectl.log"
@@ -106,22 +109,41 @@ kubectl() {
   esac
 }
 SEALED=""
+# Already known, as it is for any agent that enrolled with this version.
+ORGANIZATION_ID=org123
+TOKEN=tok
 out="$(seed_the_store 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "succeeds" || bad "failed: $out"
-grep -q -- "--bootstrap-store" "$KUBECTL_LOG" && ok "the store is created first" || bad "never bootstrapped"
-grep -q -- "--seal-secrets" "$KUBECTL_LOG" && ok "the secrets are sealed" || bad "never sealed"
+grep -q -- "--bootstrap-store" "$RUN_LOG" && ok "the store is created first" || bad "never bootstrapped"
+grep -q -- "--seal-secrets" "$RUN_LOG" && ok "the secrets are sealed" || bad "never sealed"
 # Bootstrap has to come first: sealing refuses without a keyring.
-b=$(grep -n -- "--bootstrap-store" "$KUBECTL_LOG" | head -1 | cut -d: -f1)
-sl=$(grep -n -- "--seal-secrets" "$KUBECTL_LOG" | head -1 | cut -d: -f1)
-[ "$b" -lt "$sl" ] && ok "in that order" || bad "sealed before bootstrapping"
+b=$(grep -n -- "--bootstrap-store" "$RUN_LOG" | head -1 | cut -d: -f1)
+sl=$(grep -n -- "--seal-secrets" "$RUN_LOG" | head -1 | cut -d: -f1)
+[ "${b:-0}" -lt "${sl:-0}" ] && ok "in that order" || bad "sealed before bootstrapping"
+# The whole point of the throwaway pod: the backend cannot start until the
+# store exists, so seeding must never depend on the backend running.
+grep -q "exec" "$KUBECTL_LOG" && bad "still execs into the backend" || ok "does not need a running backend"
 
 echo
-echo "no backend pod yet is not a failure to shout about"
-: > "$KUBECTL_LOG"
+echo "an agent with no organization id asks the platform for it"
+: > "$RUN_LOG"
+ORGANIZATION_ID=""
+API_OUT='{"instances":[{"id":"abc123","organizationId":"org-from-platform"}]}'
 kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
+INSTANCE_ID=abc123
+seed_the_store >/dev/null 2>&1
+# Asserted on the value, not the log line: log() is silenced in here.
+[ "$ORGANIZATION_ID" = "org-from-platform" ] && ok "recovers it" || bad "got '$ORGANIZATION_ID'"
+ORGANIZATION_ID=org123
+API_OUT='{"settings":{},"secrets":{"SMS_ENCRYPTION_KEY":"k"},"files":{}}'
+
+echo
+echo "a bootstrap that fails does not go on to seal"
+: > "$RUN_LOG"; RUN_RC=1
 out="$(seed_the_store 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && ok "reports it did not finish" || bad "claimed success with no pod"
-grep -q -- "--seal-secrets" "$KUBECTL_LOG" && bad "tried to seal anyway" || ok "did not try to seal"
+[ "$rc" -ne 0 ] && ok "reports it did not finish" || bad "claimed success"
+grep -q -- "--seal-secrets" "$RUN_LOG" && bad "sealed without a keyring" || ok "did not try to seal"
+RUN_RC=0
 
 echo
 echo "$P passed, $F failed"
