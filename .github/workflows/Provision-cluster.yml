@@ -388,8 +388,17 @@ jobs:
           {
             echo "CAYTU_DOMAIN=${SUBDOMAIN}.caytu.link"
             echo "CAYTU_BILLINGS_URL=${PLATFORM_URL}"
-            echo "MINIO_ROOT_USER=caytu"
-            echo "MINIO_ROOT_PASSWORD=$(openssl rand -hex 24)"
+            # Two names for one credential. MinIO takes MINIO_ROOT_*; the
+            # backend authenticates with MINIO_ACCESS_KEY and
+            # MINIO_SECRET_KEY. Generating only the first pair is what made the
+            # backend send an empty key and crash on InvalidAccessKeyId while
+            # MinIO itself sat there healthy.
+            minio_user="caytu"
+            minio_password="$(openssl rand -hex 24)"
+            echo "MINIO_ROOT_USER=${minio_user}"
+            echo "MINIO_ROOT_PASSWORD=${minio_password}"
+            echo "MINIO_ACCESS_KEY=${minio_user}"
+            echo "MINIO_SECRET_KEY=${minio_password}"
             echo "TURN_SECRET=$(openssl rand -hex 32)"
             echo "SIGNALING_AUTH_TOKEN=$(openssl rand -hex 32)"
             echo "JWT_SECRET=$(openssl rand -hex 64)"
