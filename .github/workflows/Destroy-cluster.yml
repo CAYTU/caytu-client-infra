@@ -115,6 +115,26 @@ jobs:
           # below is a no-op, which is the expected outcome of running twice.
           terraform state list || true
 
+      # Objects inside the cluster, which die with it.
+      #
+      # Terraform tries to delete them through the Kubernetes API, and by then
+      # the cluster is going away, so the provider has no endpoint and falls
+      # back to localhost. The destroy then stops on a connection refused with
+      # every real resource still standing, which is how a teardown leaves a
+      # NAT gateway running.
+      #
+      # Dropped from state rather than deleted: there is nothing to delete once
+      # the control plane is gone, and nothing outside the cluster refers to
+      # them.
+      - name: Forget the objects that live inside the cluster
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -euo pipefail
+          terraform state list 2>/dev/null | grep -E '^kubernetes_' | while read -r addr; do
+            echo "forgetting $addr"
+            terraform state rm "$addr" >/dev/null
+          done || true
+
       - name: Destroy
         working-directory: ${{ env.TF_DIR }}
         env:
