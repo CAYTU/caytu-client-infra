@@ -2,6 +2,11 @@ output "cluster_name" {
   value = module.eks.cluster_name
 }
 
+output "vpc_id" {
+  description = "The network the cluster runs in. The load balancer controller needs it by name."
+  value       = module.vpc.vpc_id
+}
+
 output "cluster_endpoint" {
   value = module.eks.cluster_endpoint
 }
@@ -67,7 +72,7 @@ output "alb_controller_role_arn" {
 }
 
 output "helm_commands" {
-  description = "Post-apply commands: install ALB controller + metrics-server. Copy/paste."
+  description = "For a person, to stand a cluster up by hand. Not a script: it carries comments and steps that need a repo checkout, and its line continuations do not survive a shell. The pipeline runs its own commands in Provision-cluster.yml."
   value       = <<-EOT
 
     # 1. Configure kubectl:

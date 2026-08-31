@@ -316,11 +316,50 @@ jobs:
           # The manifests below assume an ingress class and a metrics source.
           # Applying them first would leave the ingress unclaimed and the HPAs
           # unable to read anything.
-          # Written as ourselves, run against the cluster. Same reason as above.
-          terraform output -raw helm_commands > /tmp/addons.sh
+          # Read as ourselves, installed against the cluster.
+          #
+          # Not `helm_commands`. That output is a copy/paste runbook for a
+          # person: numbered comments, a cd into a repo checkout, a file to
+          # edit. Running it as a script also loses every line continuation,
+          # because a Terraform heredoc does not process backslashes, so each
+          # helm call broke apart into a command and a pile of stray flags.
+          name="$(terraform output -raw cluster_name)"
+          region="$(terraform output -raw cluster_region)"
+          alb_role="$(terraform output -raw alb_controller_role_arn)"
+          autoscaler_role="$(terraform output -raw autoscaler_role_arn)"
+          vpc="$(terraform output -raw vpc_id)"
 
           [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
-          bash /tmp/addons.sh
+
+          helm repo add eks https://aws.github.io/eks-charts >/dev/null
+          helm repo add autoscaler https://kubernetes.github.io/autoscaler >/dev/null
+          helm repo update >/dev/null
+
+          # Turns an ingress into a real load balancer. Nothing is reachable
+          # from outside without it.
+          helm upgrade --install aws-load-balancer-controller \
+            eks/aws-load-balancer-controller -n kube-system --wait \
+            --set clusterName="$name" \
+            --set serviceAccount.create=true \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$alb_role" \
+            --set region="$region" \
+            --set vpcId="$vpc"
+
+          # Adds nodes when pods will not fit. Without it the autoscalers scale
+          # pods onto nodes that do not exist and they sit Pending forever.
+          helm upgrade --install cluster-autoscaler \
+            autoscaler/cluster-autoscaler -n kube-system --wait \
+            --set autoDiscovery.clusterName="$name" \
+            --set awsRegion="$region" \
+            --set rbac.serviceAccount.name=cluster-autoscaler \
+            --set rbac.serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$autoscaler_role" \
+            --set extraArgs.balance-similar-node-groups=true \
+            --set extraArgs.skip-nodes-with-local-storage=false
+
+          # Metrics, which the horizontal autoscalers read. Applied from
+          # upstream rather than a chart, which is how the runbook had it.
+          kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
 
       - name: Configure the deployment
         working-directory: ${{ env.TF_DIR }}
