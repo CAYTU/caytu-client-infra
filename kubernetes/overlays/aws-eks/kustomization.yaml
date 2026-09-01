@@ -135,11 +135,16 @@ patches:
       - op: add
         path: /metadata/annotations/alb.ingress.kubernetes.io~1certificate-arn
         value: arn:aws:acm:REGION:ACCOUNT:certificate/UUID  # replace with your ACM cert
-      # Perf: HTTP/2, deregistration draining, sticky sessions for WS,
-      # health-check config to fail fast, and access logs to S3 (optional).
-      - op: add
-        path: /metadata/annotations/alb.ingress.kubernetes.io~1backend-protocol-version
-        value: HTTP2
+      # Perf: deregistration draining, sticky sessions for WS, health-check
+      # config to fail fast, and access logs to S3 (optional).
+      #
+      # No backend-protocol-version here, so the balancer speaks HTTP/1.1 to the
+      # pods. HTTP2 means cleartext h2c, which none of these serve: express,
+      # next and minio all answer HTTP/1.1 and nothing else. Setting it made
+      # every target group fail its health check at the protocol, before the
+      # path was ever read, and the balancer served 502 for the whole site.
+      # This is the hop inside the VPC; the browser still arrives over TLS, and
+      # routing.http2.enabled below is what gives it HTTP/2.
       - op: add
         path: /metadata/annotations/alb.ingress.kubernetes.io~1target-group-attributes
         value: "deregistration_delay.timeout_seconds=30,stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=3600"
