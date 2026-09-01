@@ -1831,6 +1831,26 @@ fetch_and_apply_settings() {
   return 0
 }
 
+# Which version the platform considers current.
+#
+# Asked for rather than guessed. The registry holds per-commit tags, build
+# caches and architecture halves alongside real releases, and the platform
+# already filters that list down and honours whatever this organization is
+# entitled to.
+#
+# Quiet on failure: a host that cannot reach the platform is better off saying
+# it has no version pinned than picking one nobody chose.
+current_release() {
+  local env_file=$1
+  local token; token="$(env_get "$env_file" CAYTU_METERING_TOKEN || true)"
+  [[ -n "$token" ]] || return 0
+
+  curl -fsS -m 20 \
+    "$(instance_platform_url "$env_file")/api/billings/instances/versions" \
+    -H "Authorization: Bearer $token" 2>/dev/null \
+    | jq -r '.pinned // (.versions[0].tag // empty)' 2>/dev/null || true
+}
+
 apply_instance_source() {
   local env_file=$1 record=$2
   local mode; mode="$(printf '%s' "$record" | jq -r '.source.mode // empty')"
@@ -1845,6 +1865,17 @@ apply_instance_source() {
       # as a Docker Hub organisation, so every pull was denied.
       local ours; ours="$(caytu_registry)"
       [[ -n "$ours" ]] && env_upsert "$env_file" IMAGE_REGISTRY "$ours"
+
+      # No tag on the record means the operator did not name a version, and the
+      # console told them the current supported release would be resolved when
+      # the host provisions. Nothing was doing that resolving: IMAGE_TAG stayed
+      # at latest and the stack then refused to start, telling them to go and
+      # set a version by hand in a file. This is the resolving.
+      if [[ -z "$tag" ]]; then
+        tag="$(current_release "$env_file")"
+        [[ -n "$tag" ]] && ok "current supported release is $tag"
+      fi
+
       [[ -n "$tag" ]] && env_upsert "$env_file" IMAGE_TAG "$tag"
       ok "images: ${ours:-Caytu registry}${tag:+, pinned to $tag}"
       ;;
