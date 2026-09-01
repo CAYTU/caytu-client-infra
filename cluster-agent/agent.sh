@@ -234,6 +234,10 @@ run_with_backend_image() {
         image: $i,
         command: $cmd,
         stdin: true,
+        # Closed once the payload is written, so the process sees end of input
+        # and exits. Without it the container waits on a pipe nobody will write
+        # to again and kubectl gives up on the attach.
+        stdinOnce: true,
         env: [{name: "CAYTU_CUSTOMER_ID", value: $org}],
         envFrom: [
           {configMapRef: {name: "caytu-shared"}},
@@ -243,13 +247,32 @@ run_with_backend_image() {
     }
   }')"
 
-  # Removed first. --rm does not clean up after a failed run, and the name is
-  # fixed, so a second attempt would collide with the remains of the first.
+  # Waited for, not fired and forgotten. The name is fixed, so a retry that
+  # starts before the last pod has finished going away is refused with
+  # "object is being deleted", which is what every other attempt hit.
+  kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found --wait \
+    --timeout=60s >/dev/null 2>&1 || true
+
+  # Deliberately not --rm. That makes kubectl hold the attach open until the
+  # container is gone, and with a piped payload it times out instead of
+  # returning what the command said. The pod is waited for and read here, then
+  # removed on the way out.
+  if ! kubectl -n "$NAMESPACE" run "$name" -i --quiet --restart=Never \
+      --image="$image" --overrides="$overrides" >/dev/null 2>&1; then
+    : # It may still have run; the phase below is what decides.
+  fi
+
+  kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded \
+    "pod/$name" --timeout=120s >/dev/null 2>&1
+  local phase
+  phase="$(kubectl -n "$NAMESPACE" get pod "$name" \
+    -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+
+  kubectl -n "$NAMESPACE" logs "$name" 2>&1 || true
   kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found --wait=false \
     >/dev/null 2>&1 || true
 
-  kubectl -n "$NAMESPACE" run "$name" --rm -i --quiet --restart=Never \
-    --image="$image" --overrides="$overrides" 2>&1
+  [[ "$phase" == "Succeeded" ]]
 }
 
 # Make sure this deployment has an encrypted store, and that it holds what the
