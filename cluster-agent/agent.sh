@@ -163,6 +163,29 @@ balancer_url() {
   printf 'https://%s' "$host"
 }
 
+# The workloads that are the client itself.
+#
+# Named rather than discovered. Every deployment in this namespace carries a
+# caytu-client image, the agent included, and retagging the agent would kill the
+# process running the update halfway through it. mongo, redis and minio are
+# StatefulSets and are not ours to move at all.
+CLIENT_WORKLOADS=(backend frontend gstreamer-recorder mqtt-streamer signaling-server)
+
+# Which release is actually in the cluster, read off the backend.
+#
+# The record says what was asked for and only this says what arrived, so an
+# update that failed halfway is visible as the two disagreeing rather than as
+# silence. The backend is enough: every workload moves together.
+running_version() {
+  local image
+  image="$(kubectl -n "$NAMESPACE" get deploy backend \
+    -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  [[ -n "$image" ]] || return 0
+  # After the last colon, unless that colon belongs to a registry port.
+  local tag="${image##*:}"
+  [[ "$tag" == *"/"* ]] || printf '%s' "$tag"
+}
+
 heartbeat() {
   # Empty is not "[]": kubectl answering with nothing leaves jq nothing to read,
   # and the whole payload then fails to build, so a cluster the agent could not
@@ -178,9 +201,11 @@ heartbeat() {
   local payload
   payload="$(jq -nc --argjson p "$pods" --argjson bad "${bad:-0}" \
     --arg u "$(ingress_url)" --arg d "$(balancer_url)" \
+    --arg v "$(running_version)" \
     '{clusterPods:$p} + (if $bad == 0 then {status:"running"} else {} end)
                       + (if $u == "" then {} else {publicUrl:$u} end)
-                      + (if $d == "" then {} else {directUrl:$d} end)')"
+                      + (if $d == "" then {} else {directUrl:$d} end)
+                      + (if $v == "" then {} else {version:$v} end)')"
   api PATCH "/api/billings/instances/${INSTANCE_ID}/state" "$payload" >/dev/null
 }
 
@@ -417,6 +442,80 @@ trim_logs() {
     | tail -c "$MAX_RESULT_BYTES"
 }
 
+# Why a workload will not come back, in Kubernetes' words.
+#
+# A rollout timing out says nothing on its own: an image that does not exist, a
+# node with no room and a container crashing on boot all look identical from
+# here. The reason on the pod is what an operator would go and read, so it
+# travels with the failure instead of our guess at it.
+workload_trouble() {
+  local app=$1 why
+  why="$(kubectl -n "$NAMESPACE" get pods -l "app=${app}" -o json 2>/dev/null | jq -r '
+    [ .items[] | .status.containerStatuses[]?
+      | (.state.waiting // .state.terminated // empty)
+      | select(.reason)
+      | .reason + (if .message then ": " + (.message | .[0:200]) else "" end) ]
+    | first // empty' 2>/dev/null || true)"
+  printf '%s' "${why:-no reason reported}"
+}
+
+# Move the client workloads onto another release.
+#
+# Only the tag changes. The repository each Deployment already points at is
+# reused, so a cluster pulling from a customer's own registry keeps pulling from
+# it, and this cannot quietly repoint a deployment somewhere else.
+update_release() {
+  local tag=$1
+  [[ -n "$tag" ]] || { echo "no version was named"; return 1; }
+
+  # Every image first, then the waiting. One at a time would spend four rollout
+  # timeouts against a single deadline, and a stack half on each version is not
+  # a state worth pausing in.
+  local moved=() name image container
+  for name in "${CLIENT_WORKLOADS[@]}"; do
+    image="$(kubectl -n "$NAMESPACE" get deploy "$name" \
+      -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+    # Not every overlay runs every workload: EKS drops signaling-server because
+    # KVS does that job.
+    [[ -n "$image" ]] || continue
+    container="$(kubectl -n "$NAMESPACE" get deploy "$name" \
+      -o jsonpath='{.spec.template.spec.containers[0].name}' 2>/dev/null || true)"
+    [[ -n "$container" ]] || continue
+
+    if ! kubectl -n "$NAMESPACE" set image "deploy/${name}" \
+        "${container}=${image%:*}:${tag}" >/dev/null 2>&1; then
+      echo "${name} would not take ${tag}"
+      return 1
+    fi
+    moved+=("$name")
+  done
+
+  [[ ${#moved[@]} -gt 0 ]] || {
+    echo "this cluster runs none of the client workloads"
+    return 1
+  }
+
+  local failed=()
+  for name in "${moved[@]}"; do
+    kubectl -n "$NAMESPACE" rollout status "deploy/${name}" --timeout=300s \
+      >/dev/null 2>&1 || failed+=("${name}: $(workload_trouble "$name")")
+  done
+
+  # All of them, not only the ones that failed. A cluster left running two
+  # versions of the client is worse than one still on the old release, and
+  # nobody asked for that state.
+  if [[ ${#failed[@]} -gt 0 ]]; then
+    for name in "${moved[@]}"; do
+      kubectl -n "$NAMESPACE" rollout undo "deploy/${name}" >/dev/null 2>&1 || true
+    done
+    local why; why="$(printf '%s; ' "${failed[@]}")"
+    echo "${tag} did not come up (${why%; }). Rolled back to the previous version."
+    return 1
+  fi
+
+  echo "${#moved[@]} workload(s) now running ${tag}"
+}
+
 run_command() {
   local id=$1 type=$2 params=$3
   local status="done" error="" result=""
@@ -467,6 +566,19 @@ run_command() {
         status="failed"; error="the licence is configured but the backend did not restart"
       else
         result="licence ${lic} configured; the deployment installs it as it comes back"
+      fi
+      ;;
+
+    update)
+      local tag outcome
+      tag="$(printf '%s' "$params" | jq -r '.tag // empty')"
+      if ! outcome="$(update_release "$tag")"; then
+        status="failed"; error="$outcome"
+      else
+        result="$outcome"
+        # Now rather than at the next heartbeat, so the console shows the new
+        # version as soon as it is true.
+        heartbeat
       fi
       ;;
 

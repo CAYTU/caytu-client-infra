@@ -25,6 +25,10 @@ eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
 eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
+eval "$(sed -n '/^CLIENT_WORKLOADS=/p'      cluster-agent/agent.sh)"
+eval "$(sed -n '/^running_version()/,/^}/p'  cluster-agent/agent.sh)"
+eval "$(sed -n '/^workload_trouble()/,/^}/p' cluster-agent/agent.sh)"
+eval "$(sed -n '/^update_release()/,/^}/p'   cluster-agent/agent.sh)"
 # Stands in for the throwaway pod. Records the command it was asked to run.
 RUN_LOG="$TMP/run.log"; RUN_RC=0
 run_with_backend_image() { local n=$1; shift; echo "$n: $*" >> "$RUN_LOG"; cat >/dev/null; return "$RUN_RC"; }
@@ -205,6 +209,63 @@ kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
 : > "$API_LOG"
 heartbeat
 grep -q "publicUrl" "$API_LOG" && bad "invented an address" || ok "says nothing"
+echo "an update moves the client onto another release"
+# A cluster as it actually is: four workloads, no signaling-server, images in
+# our registry.
+ROLLOUT_RC=0
+kubectl() {
+  echo "$*" >> "$KUBECTL_LOG"
+  local args="$*" name
+  name="${args#*get deploy }"; name="${name%% *}"
+  case "$args" in
+    *"containers[0].image"*)
+      [ "$name" = "signaling-server" ] && return 1
+      echo "reg.test/caytu-client-${name}:v1.0.0" ;;
+    *"containers[0].name"*) echo "$name" ;;
+    *"rollout status"*) return "$ROLLOUT_RC" ;;
+    *"get pods"*) echo '{"items":[{"status":{"containerStatuses":[{"state":{"waiting":{"reason":"ImagePullBackOff","message":"manifest unknown"}}}]}}]}' ;;
+    *) : ;;
+  esac
+}
+: > "$KUBECTL_LOG"
+out="$(update_release v1.2.0)"; rc=$?
+[ "$rc" -eq 0 ] && ok "succeeds" || bad "failed: $out"
+grep -q "set image deploy/backend backend=reg.test/caytu-client-backend:v1.2.0" "$KUBECTL_LOG" \
+  && ok "only the tag changes" || bad "the image was rewritten"
+# The overlay drops signaling-server, and a workload that is not there is not a
+# failure.
+grep -q "set image deploy/signaling-server" "$KUBECTL_LOG" \
+  && bad "moved a workload that is not deployed" || ok "skips what is not deployed"
+# Retagging the agent would kill the process running the update.
+grep -q "set image deploy/cluster-agent" "$KUBECTL_LOG" \
+  && bad "retagged the agent itself" || ok "leaves the agent alone"
+# The databases are not ours to move.
+grep -qE "set image (deploy|statefulset)/(mongodb|redis|minio)" "$KUBECTL_LOG" \
+  && bad "touched a stateful workload" || ok "leaves mongo, redis and minio alone"
+
+echo
+echo "an update that does not come up is rolled back, with the cluster's reason"
+: > "$KUBECTL_LOG"
+ROLLOUT_RC=1
+out="$(update_release v1.2.0)"; rc=$?
+[ "$rc" -ne 0 ] && ok "reports failure" || bad "claimed success"
+[[ "$out" == *"ImagePullBackOff"* ]] && ok "carries the real reason" || bad "said '$out'"
+grep -q "rollout undo deploy/backend" "$KUBECTL_LOG" \
+  && ok "rolls back" || bad "left the cluster half moved"
+ROLLOUT_RC=0
+
+echo
+echo "the version the cluster is actually on is read off the backend"
+[ "$(running_version)" = "v1.0.0" ] && ok "reports it" || bad "reported '$(running_version)'"
+# An image with no tag has nothing to report, and the last path segment is not a
+# version.
+kubectl() { echo "reg.test/caytu-client-backend"; }
+[ -z "$(running_version)" ] && ok "says nothing when there is no tag" || bad "invented a version"
+
+echo
+echo "an update with no version named is refused"
+out="$(update_release "")"; rc=$?
+[ "$rc" -ne 0 ] && ok "fails" || bad "accepted it"
 
 echo
 echo "a bootstrap that fails does not go on to seal"
