@@ -183,43 +183,49 @@ Resources:
           - WantsCluster
           - |
             {
-              "Sid": "ClusterNodesAndAddons",
-              "Effect": "Allow",
-              "Action": [
-                "elasticloadbalancing:*",
-                "eks:DescribeCluster",
-                "ec2:UnassignPrivateIpAddresses",
-                "ec2:ModifyVolume",
-                "ec2:ModifyNetworkInterfaceAttribute",
-                "ec2:DetachVolume",
-                "ec2:DetachNetworkInterface",
-                "ec2:DeleteVolume",
-                "ec2:DeleteSnapshot",
-                "ec2:DeleteNetworkInterface",
-                "ec2:CreateVolume",
-                "ec2:CreateTags",
-                "ec2:CreateSnapshot",
-                "ec2:CreateNetworkInterface",
-                "ec2:AttachVolume",
-                "ec2:AttachNetworkInterface",
-                "ec2:AssignPrivateIpAddresses",
-                "autoscaling:TerminateInstanceInAutoScalingGroup",
-                "autoscaling:SetDesiredCapacity",
-                "acm:ListCertificates",
-                "acm:DescribeCertificate"
-              ],
-              "Resource": "*"
-            },
-            {
-              "Sid": "ClusterReads",
-              "Effect": "Allow",
-              "Action": [
-                "elasticloadbalancing:Describe*",
-                "ec2:Describe*",
-                "autoscaling:Describe*"
-              ],
-              "Resource": "*"
-            },
+                          "Sid": "ClusterNodesAndAddons",
+                          "Effect": "Allow",
+                          "Action": [
+                            "elasticloadbalancing:*",
+                            "eks:DescribeCluster",
+                            "ec2:UnassignPrivateIpAddresses",
+                            "ec2:RevokeSecurityGroupIngress",
+                            "ec2:RevokeSecurityGroupEgress",
+                            "ec2:ModifyVolume",
+                            "ec2:ModifyNetworkInterfaceAttribute",
+                            "ec2:DetachVolume",
+                            "ec2:DetachNetworkInterface",
+                            "ec2:DeleteVolume",
+                            "ec2:DeleteSnapshot",
+                            "ec2:DeleteSecurityGroup",
+                            "ec2:DeleteNetworkInterface",
+                            "ec2:CreateVolume",
+                            "ec2:CreateTags",
+                            "ec2:CreateSnapshot",
+                            "ec2:CreateSecurityGroup",
+                            "ec2:CreateNetworkInterface",
+                            "ec2:AuthorizeSecurityGroupIngress",
+                            "ec2:AuthorizeSecurityGroupEgress",
+                            "ec2:AttachVolume",
+                            "ec2:AttachNetworkInterface",
+                            "ec2:AssignPrivateIpAddresses",
+                            "autoscaling:TerminateInstanceInAutoScalingGroup",
+                            "autoscaling:SetDesiredCapacity",
+                            "acm:ListCertificates",
+                            "acm:DescribeCertificate"
+                          ],
+                          "Resource": "*"
+                        },
+                        {
+                          "Sid": "ClusterReads",
+                          "Effect": "Allow",
+                          "Action": [
+                            "elasticloadbalancing:Describe*",
+                            "ec2:Describe*",
+                            "autoscaling:Describe*"
+                          ],
+                          "Resource": "*"
+                        },
           - ""
 
   CaytuProvisionerRole:
