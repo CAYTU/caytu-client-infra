@@ -38,6 +38,10 @@ on:
         description: "An existing ACM certificate. Leave empty and the stack requests one."
         required: false
         default: ""
+      operator_admin_arns:
+        description: "IAM users or roles that may administer the cluster, comma separated. Without one, nobody but the pipeline can reach it."
+        required: false
+        default: ""
       node_instance_type:
         description: "Instance type for the nodes. Empty uses the stack default."
         required: false
@@ -202,6 +206,7 @@ jobs:
           PERMISSIONS_BOUNDARY: ${{ steps.target.outputs.permissions_boundary }}
           CERT_ARN: ${{ github.event.inputs.certificate_arn }}
           NODE_TYPE: ${{ github.event.inputs.node_instance_type }}
+          OPERATOR_ARNS: ${{ github.event.inputs.operator_admin_arns }}
           MIN_NODES: ${{ github.event.inputs.min_nodes }}
           MAX_NODES: ${{ github.event.inputs.max_nodes }}
         run: |
@@ -212,6 +217,15 @@ jobs:
           # vertically rather than horizontally, so letting an operator set its
           # count would offer a lever that does not do what it reads like.
           extra=()
+          # A cluster nobody can reach is a cluster nobody can debug. The
+          # pipeline holds the only admin entry otherwise, and it exists for the
+          # length of a run.
+          if [ -n "${OPERATOR_ARNS}" ]; then
+            arns="$(printf '%s' "$OPERATOR_ARNS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' \
+              | grep -v '^$' | jq -R . | jq -sc .)"
+            extra+=(-var "operator_admin_arns=${arns}")
+          fi
+
           if [ -n "${NODE_TYPE}" ]; then
             extra+=(-var "stateless_instance_types=[\"${NODE_TYPE}\"]")
             extra+=(-var "stateful_instance_types=[\"${NODE_TYPE}\"]")
