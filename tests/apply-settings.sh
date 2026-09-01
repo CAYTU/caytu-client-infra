@@ -76,5 +76,18 @@ grep -q "seal-secrets" "$TMP/compose.log" && ok "the secret is sealed into the s
 [ "$out" = "2" ] && ok "both counted" || bad "counted '$out'"
 
 echo
+echo "a deployment with no version pinned gets the current release"
+eval "$(sed -n '/^current_release()/,/^}/p' ../wt-infra-aws/scripts/caytu-client 2>/dev/null || sed -n '/^current_release()/,/^}/p' scripts/caytu-client)"
+printf 'CAYTU_METERING_TOKEN=ct_tok\n' > "$TMP/.env.ver"
+BODY='{"versions":[{"tag":"v1.0.4"},{"tag":"v1.0.3"}],"available":true}'; CODE=0
+[ "$(current_release "$TMP/.env.ver")" = "v1.0.4" ] && ok "takes the newest" || bad "took something else"
+# A pin is not a default, it is the only option.
+BODY='{"versions":[{"tag":"v1.0.4"}],"pinned":"v1.0.2","available":true}'; CODE=0
+[ "$(current_release "$TMP/.env.ver")" = "v1.0.2" ] && ok "a pinned organization stays pinned" || bad "ignored the pin"
+# Better to say nothing is pinned than to pick a version nobody chose.
+CODE=7
+[ -z "$(current_release "$TMP/.env.ver")" ] && ok "says nothing when the platform is unreachable" || bad "guessed"
+
+echo
 echo "$P passed, $F failed"
 [ "$F" -eq 0 ]
