@@ -37,6 +37,26 @@ spec:
         app: signaling-server
     spec:
       terminationGracePeriodSeconds: 60  # give WebSocket sessions time to drain
+      volumes:
+        - name: signaling-tokens
+          emptyDir: {}
+      # The static driver reads its tokens from a file, and the token only ever
+      # arrives as an env var. One line of shell keeps the two in step; a second
+      # Secret would be one more thing to rotate alongside the first.
+      initContainers:
+        - name: write-tokens
+          image: caytu-client/webrtc-signaling:latest
+          command: ["sh", "-c"]
+          args:
+            - >-
+              printf '{"%s":{"id":"caytu-backend","username":"caytu-backend","policies":["signaling:*"]}}'
+              "$SIGNALING_AUTH_TOKEN" > /config/tokens.json
+          env:
+            - name: SIGNALING_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef: { name: caytu-secrets, key: SIGNALING_AUTH_TOKEN }
+          volumeMounts:
+            - { name: signaling-tokens, mountPath: /config }
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -54,14 +74,20 @@ spec:
           env:
             - name: PORT
               value: "3001"
+            # Must be one createAuth() knows: vault | static | jwt | allow-all.
+            # Anything else leaves the pod with no adapter at all.
             - name: AUTH_DRIVER
-              value: "token"
+              value: "static"
+            - name: STATIC_TOKENS_FILE
+              value: "/config/tokens.json"
             - name: MONGODB_URI
               value: "mongodb://mongodb:27017/caytu-signaling"
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+          volumeMounts:
+            - { name: signaling-tokens, mountPath: /config, readOnly: true }
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits:   { cpu: "500m", memory: "1Gi"   }
