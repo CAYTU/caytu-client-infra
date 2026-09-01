@@ -148,6 +148,8 @@ patches:
       - op: add
         path: /metadata/annotations/alb.ingress.kubernetes.io~1target-group-attributes
         value: "deregistration_delay.timeout_seconds=30,stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=3600"
+      # The default for every target group. Backend and mqtt-streamer serve it;
+      # the two that do not override it on their own Service below.
       - op: add
         path: /metadata/annotations/alb.ingress.kubernetes.io~1healthcheck-path
         value: "/health"
@@ -164,6 +166,29 @@ patches:
       # Index 2 in the base's paths array (0=/api, 1=/socket.io, 2=/signaling, ...).
       - op: remove
         path: /spec/rules/0/http/paths/2
+
+  # Health checks the two odd ones out actually answer.
+  #
+  # One healthcheck-path on the ingress lands on every target group, and only
+  # backend and mqtt-streamer serve /health. The controller reads these same
+  # annotations off a Service and applies them to that service's target group,
+  # which is the only way to say something different per backend.
+  - target: { kind: Service, name: frontend }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          alb.ingress.kubernetes.io/healthcheck-path: /api/health
+  # Both minio ports check the API port: 9001 is the console, which has no
+  # health endpoint of its own, and the question either one answers is whether
+  # this pod is alive.
+  - target: { kind: Service, name: minio }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          alb.ingress.kubernetes.io/healthcheck-path: /minio/health/live
+          alb.ingress.kubernetes.io/healthcheck-port: "9000"
 
   # Pin stateful workloads to the on-demand node group. Stateless deployments
   # have no selector and land on the SPOT pool (or spill to on-demand if SPOT
