@@ -28,11 +28,16 @@ require_cmd() {
   done
 }
 
-# Parse a value out of a plain KEY=VALUE .env file (no quoting, no comments).
+# Parse a value out of a plain KEY=VALUE .env file.
+#
+# A whitespace-preceded `#` ends the value, the way docker compose reads these
+# files. Our own templates document choices inline (`DRIVER=static  # or jwt`),
+# so a reader that kept the comment saw a different value than the containers.
 env_get() {
   local file=$1 key=$2
   [[ -f "$file" ]] || return 1
-  grep -E "^${key}=" "$file" | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//'
+  grep -E "^${key}=" "$file" | head -1 | cut -d= -f2- \
+    | sed -e 's/[[:space:]]#.*$//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//'
 }
 
 # Set KEY=VALUE, replacing an existing line or appending one. Values go through
