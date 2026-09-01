@@ -142,7 +142,17 @@ data "aws_iam_policy_document" "boundary" {
         "ec2:ModifyVolume",
         "ec2:CreateSnapshot",
         "ec2:DeleteSnapshot",
-        # The load balancer controller turns an ingress into a real balancer.
+        # The load balancer controller turns an ingress into a real balancer,
+        # and gives it its own security group so the nodes can be reached by it
+        # and nothing else. It creates that group itself, which the boundary has
+        # to allow or the ingress never gets an address and the deployment is
+        # unreachable with every pod healthy.
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
         "elasticloadbalancing:*",
         "acm:DescribeCertificate",
         "acm:ListCertificates",
