@@ -236,11 +236,30 @@ jobs:
           [ -n "$vpc" ] || { echo "no vpc left in state"; exit 0; }
 
           [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
-          for eni in $(aws ec2 describe-network-interfaces --region "$REGION" \
-                --filters "Name=vpc-id,Values=$vpc" "Name=status,Values=available" \
-                --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
-            echo "removing detached interface $eni"
-            aws ec2 delete-network-interface --region "$REGION" --network-interface-id "$eni" 2>&1 | tail -1 || true
+
+          # Waited for, not glanced at.
+          #
+          # An interface takes a minute or two to finish detaching after the
+          # node holding it is terminated, and that happens during the destroy
+          # this runs after. Looking once found them still in use, deleted
+          # nothing, and the next pass failed on the same subnet as the last.
+          deadline=$(( SECONDS + 300 ))
+          while (( SECONDS < deadline )); do
+            for eni in $(aws ec2 describe-network-interfaces --region "$REGION" \
+                  --filters "Name=vpc-id,Values=$vpc" "Name=status,Values=available" \
+                  --query 'NetworkInterfaces[].NetworkInterfaceId' --output text 2>/dev/null); do
+              echo "removing detached interface $eni"
+              aws ec2 delete-network-interface --region "$REGION" \
+                --network-interface-id "$eni" 2>&1 | tail -1 || true
+            done
+
+            busy="$(aws ec2 describe-network-interfaces --region "$REGION" \
+              --filters "Name=vpc-id,Values=$vpc" \
+              --query 'length(NetworkInterfaces)' --output text 2>/dev/null || echo 0)"
+            [ "${busy:-0}" = "0" ] && { echo "no interfaces left in $vpc"; break; }
+
+            echo "$busy interface(s) still detaching, waiting"
+            sleep 20
           done
 
       # The pass that has to succeed. A teardown that stops half way leaves the
