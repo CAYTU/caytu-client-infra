@@ -28,6 +28,9 @@ seed_signaling_tokens
 has "abc123realtoken" "$(cat "$DST")" "the token from the env file is in it"
 hasnt "REPLACE_WITH" "$(cat "$DST")" "no placeholder left behind"
 
+# uid 1001 inside the container has to open a file the deploy user wrote.
+[ "$(stat -c %a "$DST")" = "644" ] && ok "readable by the container user" || bad "mode is $(stat -c %a "$DST"), signaling exits on EACCES"
+
 echo
 echo "running twice does not rewrite it"
 before="$(stat -c %Y "$DST")"; sleep 1; seed_signaling_tokens
@@ -47,5 +50,10 @@ seed_signaling_tokens
 has "REPLACE_WITH" "$(cat "$DST")" "falls back to the template"
 printf 'hand written\n' > "$DST"; seed_signaling_tokens
 has "hand written" "$(cat "$DST")" "an existing file is left alone"
+
+# A file from before this was fixed is on disk owner-only and stays that way
+# until something widens it, which no later `up` would otherwise do.
+chmod 600 "$DST"; seed_signaling_tokens
+[ "$(stat -c %a "$DST")" = "644" ] && ok "an owner-only file is widened" || bad "left at $(stat -c %a "$DST")"
 
 printf '\n  %d passed, %d failed\n' "$P" "$F"; [ "$F" -eq 0 ]

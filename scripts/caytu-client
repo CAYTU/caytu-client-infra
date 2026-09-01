@@ -1092,14 +1092,17 @@ seed_signaling_tokens() {
   # Nothing to write. Leave whatever is there rather than replacing a file an
   # operator may have filled in by hand.
   if [[ -z "$token" || "$token" == REPLACE_WITH_* ]]; then
-    [[ -f "$dst" ]] && return 0
+    [[ -f "$dst" ]] && { chmod 0644 "$dst" 2>/dev/null || true; return 0; }
     cp "$COMPOSE_DIR/secrets/signaling-tokens.example.json" "$dst" 2>/dev/null || return 0
+    chmod 0644 "$dst" 2>/dev/null || true
     warn "SIGNALING_AUTH_TOKEN is not set, so $dst still holds a placeholder"
     return 0
   fi
 
-  # Already correct, so do not rewrite it on every up.
+  # Already correct, so do not rewrite it on every up. The mode still gets
+  # checked: a file written by an older version of this is owner-only.
   if [[ -f "$dst" ]] && grep -qF "\"$token\"" "$dst" 2>/dev/null; then
+    chmod 0644 "$dst" 2>/dev/null || true
     return 0
   fi
 
@@ -1111,7 +1114,11 @@ seed_signaling_tokens() {
   else
     printf '{\n  "%s": {\n    "id": "caytu-backend",\n    "username": "caytu-backend",\n    "policies": ["signaling:*"]\n  }\n}\n' "$token" > "$dst"
   fi
-  chmod 600 "$dst" 2>/dev/null || true
+  # Not owner-only: this is bind-mounted into a container that runs as uid
+  # 1001, and a bind mount carries the host's mode. Owner-only means the
+  # signaling server cannot open it and exits at boot on EACCES. The token it
+  # holds is already in .env, and .env stays owner-only.
+  chmod 0644 "$dst" 2>/dev/null || true
 }
 
 preflight_bind_mount_files() {
