@@ -135,6 +135,10 @@ jobs:
                   restarts: ([$p.status.containerStatuses[]?.restartCount] | add // 0)
                 }]' || true)"
               body="$(jq -n --argjson p "${pods:-[]}" '{pods:$p}')" ;;
+            # Where this deployment answers. A machine reports its own address
+            # once it is up; a cluster has no host to do that, so the build is
+            # the only thing that knows, and it stayed quiet.
+            url)    body="$(jq -n --arg u "$2" '{publicUrl:$u}')" ;;
             done)   body='{"status":"running"}' ;;
             failed) body="$(jq -n --arg m "$2" '{status:"failed", lastError:$m,
                               step:{message:$m, ok:false}}')" ;;
@@ -536,6 +540,16 @@ jobs:
               exit 1 ;;
           esac
           echo "$url answers $code"
+
+      # After the record, not before it: an address on the console that does not
+      # resolve yet is worse than none.
+      - name: Report the address
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+        run: /tmp/report.sh url "https://${SUBDOMAIN}.caytu.link"
 
       # Before the outcome, so a failed build still shows what came up and what
       # did not. That is usually the whole answer.
