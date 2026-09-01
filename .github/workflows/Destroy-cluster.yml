@@ -224,6 +224,119 @@ jobs:
             -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
             -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}"
 
+      # The load balancer the cluster made for itself.
+      #
+      # This is the one thing in the VPC that Terraform never knew about. The
+      # ingress asks the load balancer controller for an ALB, the controller
+      # creates it, and then the controller dies with the cluster, so nothing is
+      # left that would ever delete it. Everything the first pass fails on is
+      # that one balancer wearing three different hats: its public addresses are
+      # the "mapped public address(es)" the internet gateway will not detach
+      # over, its interfaces are the dependency the public subnets cannot be
+      # deleted with, and its listener is what holds the certificate "in use".
+      #
+      # Run after the first destroy rather than before it, because before it the
+      # controller is still running and would simply make the balancer again.
+      # By this point the cluster is gone, so nothing recreates anything.
+      #
+      # Everything here is scoped to this deployment's own VPC, which Terraform
+      # created for this cluster and nothing else shares.
+      - name: Remove the load balancer the cluster left behind
+        if: steps.first.outcome == 'failure'
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          set -uo pipefail
+          # Read as ourselves: the state is in our bucket. The customer's
+          # credentials are sourced afterwards, for the deleting.
+          vpc="$(terraform state show module.vpc.aws_vpc.this[0] 2>/dev/null \
+            | grep -oE 'vpc-[0-9a-f]+' | head -1 || true)"
+          cert="$(terraform state show 'aws_acm_certificate.this[0]' 2>/dev/null \
+            | grep -oE 'arn:aws:acm:[^"]*certificate/[0-9a-f-]+' | head -1 || true)"
+          [ -n "$vpc" ] || { echo "no vpc in state, nothing to clean"; exit 0; }
+
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+
+          for arn in $(aws elbv2 describe-load-balancers --region "$REGION" \
+                --query "LoadBalancers[?VpcId=='$vpc'].LoadBalancerArn" \
+                --output text 2>/dev/null); do
+            echo "deleting load balancer $arn"
+            aws elbv2 delete-load-balancer --region "$REGION" \
+              --load-balancer-arn "$arn" 2>&1 | tail -1 || true
+          done
+
+          # A service of type LoadBalancer with no annotations still makes one of
+          # these, and it blocks a subnet exactly as an ALB does.
+          for name in $(aws elb describe-load-balancers --region "$REGION" \
+                --query "LoadBalancerDescriptions[?VPCId=='$vpc'].LoadBalancerName" \
+                --output text 2>/dev/null); do
+            echo "deleting classic load balancer $name"
+            aws elb delete-load-balancer --region "$REGION" \
+              --load-balancer-name "$name" 2>&1 | tail -1 || true
+          done
+
+          # Waited for. Deleting a balancer returns immediately and the
+          # interfaces and addresses are released a minute or so later, so a
+          # destroy that started straight after would fail on the same subnet
+          # for the same reason and look like this fix did nothing.
+          deadline=$(( SECONDS + 300 ))
+          while (( SECONDS < deadline )); do
+            left="$(aws elbv2 describe-load-balancers --region "$REGION" \
+              --query "length(LoadBalancers[?VpcId=='$vpc'])" --output text 2>/dev/null || echo 0)"
+            old="$(aws elb describe-load-balancers --region "$REGION" \
+              --query "length(LoadBalancerDescriptions[?VPCId=='$vpc'])" --output text 2>/dev/null || echo 0)"
+            [ "${left:-0}" = "0" ] && [ "${old:-0}" = "0" ] && { echo "no load balancers left in $vpc"; break; }
+            echo "${left:-0} load balancer(s) still going, waiting"
+            sleep 15
+          done
+
+          # The target groups the controller made alongside it. They cost
+          # nothing and block nothing, but they are this deployment's and
+          # leaving them makes the account harder to read a year from now.
+          for tg in $(aws elbv2 describe-target-groups --region "$REGION" \
+                --query "TargetGroups[?VpcId=='$vpc'].TargetGroupArn" \
+                --output text 2>/dev/null); do
+            aws elbv2 delete-target-group --region "$REGION" \
+              --target-group-arn "$tg" >/dev/null 2>&1 || true
+          done
+
+          # ACM reports a certificate as in use for a few minutes after the
+          # listener holding it has gone, and a destroy inside that window fails
+          # on ResourceInUseException with nothing an operator can act on.
+          if [ -n "$cert" ]; then
+            deadline=$(( SECONDS + 300 ))
+            while (( SECONDS < deadline )); do
+              # A role that cannot read the certificate is not the same as a
+              # certificate nobody is using, and saying the second when the
+              # first is true would send the destroy in early to fail again.
+              if ! users="$(aws acm describe-certificate --region "$REGION" \
+                    --certificate-arn "$cert" \
+                    --query 'length(Certificate.InUseBy)' --output text 2>/dev/null)"; then
+                echo "cannot read the certificate from here; leaving it to the destroy"
+                break
+              fi
+              [ "${users:-0}" = "0" ] && { echo "the certificate is no longer in use"; break; }
+              echo "the certificate is still attached to ${users} thing(s), waiting"
+              sleep 15
+            done
+          fi
+
+          # Security groups the controller created for the balancer. Terraform
+          # owns none of them, so nothing else will ever remove them, and the VPC
+          # cannot be deleted while they exist. Best effort and in two passes:
+          # they reference each other, so the first delete can fail on a
+          # dependency the second one no longer has.
+          for _ in 1 2; do
+            for sg in $(aws ec2 describe-security-groups --region "$REGION" \
+                  --filters "Name=vpc-id,Values=$vpc" \
+                  --query "SecurityGroups[?GroupName!='default'].GroupId" \
+                  --output text 2>/dev/null); do
+              aws ec2 delete-security-group --region "$REGION" \
+                --group-id "$sg" >/dev/null 2>&1 || true
+            done
+          done
+
       # Now they are detached, so this is the pass that finds them.
       - name: Remove interfaces the destroy left behind
         if: steps.first.outcome == 'failure'
