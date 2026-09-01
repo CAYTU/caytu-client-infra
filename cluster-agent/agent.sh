@@ -243,6 +243,11 @@ run_with_backend_image() {
     }
   }')"
 
+  # Removed first. --rm does not clean up after a failed run, and the name is
+  # fixed, so a second attempt would collide with the remains of the first.
+  kubectl -n "$NAMESPACE" delete pod "$name" --ignore-not-found --wait=false \
+    >/dev/null 2>&1 || true
+
   kubectl -n "$NAMESPACE" run "$name" --rm -i --quiet --restart=Never \
     --image="$image" --overrides="$overrides" 2>&1
 }
@@ -447,7 +452,15 @@ log "agent up for ${INSTANCE_ID} in ${NAMESPACE}"
 
 # Once, at startup. A deployment with an empty store cannot serve anything, so
 # this is not something to wait for a console command to trigger.
-seed_the_store || log "the store is not seeded yet; it is retried on restart"
+# Tried now, and again on every pass until it takes.
+#
+# The first attempt lands seconds after the cluster is built, when mongo is
+# still holding its election, and the seeding needs a primary to write to. One
+# shot at startup meant a deployment could sit crash looping forever over a
+# race it would have won a minute later.
+STORE_SEEDED=0
+seed_the_store && STORE_SEEDED=1 \
+  || log "the store is not seeded yet; trying again shortly"
 last_beat=0
 while true; do
   now="$(date +%s)"
@@ -455,6 +468,10 @@ while true; do
     heartbeat
     last_beat="$now"
   fi
+  if (( STORE_SEEDED == 0 )) && (( now - last_beat < 2 )); then
+    seed_the_store && STORE_SEEDED=1
+  fi
+
   poll_commands
   sleep "$POLL_SECONDS"
 done
