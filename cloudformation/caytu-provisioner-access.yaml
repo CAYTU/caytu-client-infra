@@ -777,6 +777,46 @@ Resources:
               ]
             }
 
+  # A role your own people assume to reach the cluster with kubectl.
+  #
+  # Only for a cluster, and only as a way in when the console cannot help: it
+  # reads logs and applies settings through an agent running inside the cluster,
+  # which needs none of this. This is the escape hatch for the day that agent is
+  # itself the problem.
+  #
+  # A role rather than a question. Asking which of your users should reach a
+  # Kubernetes cluster is a question most people cannot answer, and the answer
+  # would then have to be typed into a form correctly. Anyone in this account
+  # who is allowed to assume a role can use this one.
+  CaytuClusterOperatorRole:
+    Type: AWS::IAM::Role
+    Condition: WantsCluster
+    Properties:
+      RoleName: !Sub "${RoleName}ClusterOperator"
+      Description: Assume this to reach the Caytu cluster with kubectl.
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+            Action: sts:AssumeRole
+      Policies:
+        # Only enough to fetch a kubeconfig. What it may do inside the cluster
+        # is decided by the cluster's own access entry, which Caytu creates, not
+        # by this.
+        - PolicyName: ReadTheCluster
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: FetchAKubeconfig
+                Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                Resource: "*"
+
 Outputs:
   AwsAccountNumber:
     Description: Paste into the Caytu console.
@@ -790,3 +830,10 @@ Outputs:
   PermissionsBoundaryArn:
     Description: Paste into the Caytu console.
     Value: !Ref CaytuBoundary
+  ClusterOperatorRoleArn:
+    Condition: WantsCluster
+    Description: >
+      Paste into the Caytu console. Your own people assume this role to reach
+      the cluster with kubectl, on the day the console cannot tell you what is
+      wrong.
+    Value: !GetAtt CaytuClusterOperatorRole.Arn
