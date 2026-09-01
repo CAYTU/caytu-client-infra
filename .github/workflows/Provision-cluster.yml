@@ -511,6 +511,32 @@ jobs:
 
           echo "${SUBDOMAIN}.caytu.link -> $host"
 
+      # A hostname in the ingress status only says a balancer exists. Whether
+      # anything answers behind it is a different question, and the one the
+      # person waiting actually asked. A build once went green on a site that
+      # served 502 from every path, because this step was not here.
+      - name: Wait for the site to answer
+        env:
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+        run: |
+          set -uo pipefail
+          url="https://${SUBDOMAIN}.caytu.link/"
+          code=000
+          for _ in $(seq 1 30); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$url" || echo 000)"
+            # Whatever the application chose to send means it was reached: a
+            # login redirect and a 403 both count. Only the balancer's own
+            # errors and a dead connection do not.
+            case "$code" in 000|50[0-9]) ;; *) break ;; esac
+            sleep 10
+          done
+          case "$code" in
+            000|50[0-9])
+              echo "::error::${url} answers $code. The balancer is up but has no healthy target behind it: check the target groups on the cluster's ALB, and that each service answers the health path the ingress asks it for."
+              exit 1 ;;
+          esac
+          echo "$url answers $code"
+
       # Before the outcome, so a failed build still shows what came up and what
       # did not. That is usually the whole answer.
       - name: Report what is running
