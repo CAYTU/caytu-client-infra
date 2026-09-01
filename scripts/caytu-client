@@ -328,7 +328,7 @@ require_pinned_version() {
   die "set a released version, e.g. IMAGE_TAG=v1.4.2, in $(basename "$env_file")"
 }
 
-cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_bind_mount_files || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
+cmd_up()      { require_pinned_version "$(env_file_for)" || return 1; preflight_bind_mount_files || return 1; preflight_signaling_tokens "$(env_file_for)" || return 1; preflight_ports || return 1; local build_flag=""; [[ "${1:-}" == "--build" ]] && build_flag="--build"; compose up -d $build_flag; }
 cmd_down()    { local vols=""; [[ "${1:-}" == "--volumes" ]] && vols="--volumes"; compose down $vols; }
 cmd_start()   { compose start "$@"; }
 cmd_stop()    { compose stop "$@"; }
@@ -1045,7 +1045,6 @@ preflight_bind_mount_files() {
   local seeded=0
   local pair
   for pair in \
-      "secrets/signaling-tokens.example.json:secrets/signaling-tokens.json" \
       "mqtt-streamer/streamer_config.yaml.example:mqtt-streamer/streamer_config.yaml"; do
     local src="$COMPOSE_DIR/${pair%%:*}"
     local dst="$COMPOSE_DIR/${pair##*:}"
@@ -1056,6 +1055,55 @@ preflight_bind_mount_files() {
     seeded=$((seeded + 1))
   done
   return 0
+}
+
+# --- signaling tokens --------------------------------------------------------
+#
+# The `static` driver reads its tokens from a file; every peer reads the same
+# token from SIGNALING_AUTH_TOKEN. Nothing kept the two in step. We used to copy
+# a template whose only key was REPLACE_WITH_SIGNALING_AUTH_TOKEN, so a fresh
+# install refused every real token until somebody hand-edited the file.
+#
+# The token is the source of truth now and the file follows it.
+preflight_signaling_tokens() {
+  local env_file=$1
+  local dst="$COMPOSE_DIR/secrets/signaling-tokens.json"
+  mkdir -p "$(dirname "$dst")"
+
+  local driver
+  driver="$(env_get "$env_file" SIGNALING_AUTH_DRIVER || true)"
+
+  # The other drivers never open the file, but the bind mount still resolves:
+  # with no source, docker invents a directory and the container dies on "is a
+  # directory" rather than on the driver it was told to use.
+  if [[ -n "$driver" && "$driver" != "static" ]]; then
+    [[ -f "$dst" ]] || printf '{}\n' > "$dst"
+    chmod 0644 "$dst" 2>/dev/null || true
+    return 0
+  fi
+
+  local token
+  token="$(env_get "$env_file" SIGNALING_AUTH_TOKEN || true)"
+  if [[ -z "$token" ]]; then
+    command -v openssl >/dev/null 2>&1 || die "no SIGNALING_AUTH_TOKEN and no openssl to make one"
+    token="$(openssl rand -hex 32)"
+    env_upsert "$env_file" SIGNALING_AUTH_TOKEN "$token"
+    info "generated SIGNALING_AUTH_TOKEN in $(basename "$env_file")"
+  fi
+
+  # An operator may have added entries of their own. Only rewrite when the
+  # token in force is not one of them.
+  if ! grep -qF "\"$token\"" "$dst" 2>/dev/null; then
+    printf '{\n  "%s": {\n    "id": "caytu-backend",\n    "username": "caytu-backend",\n    "policies": ["signaling:*"]\n  }\n}\n' \
+      "$token" > "$dst"
+    ok "wrote signaling tokens for the token in $(basename "$env_file")"
+  fi
+
+  # The container runs as uid 1001 and a bind mount carries the host's mode, so
+  # an owner-only file is one the signaling server cannot open — it exits at
+  # boot with EACCES. This holds the token that is already in .env, and .env
+  # stays owner-only.
+  chmod 0644 "$dst" 2>/dev/null || true
 }
 
 preflight_ports() {

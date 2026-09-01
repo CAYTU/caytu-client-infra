@@ -39,9 +39,10 @@ GRAFANA_ADMIN_PASSWORD=<strong pw>
 
 # Signaling: on-prem uses the `static` auth driver — backend, gstreamer and
 # the browser all present this shared token, and the signaling server looks
-# it up in compose/secrets/signaling-tokens.json.
+# it up in compose/secrets/signaling-tokens.json, which `up` writes from this
+# value. Leave the token empty and `up` picks one.
 SIGNALING_AUTH_DRIVER=static
-SIGNALING_AUTH_TOKEN=<openssl rand -hex 32>
+SIGNALING_AUTH_TOKEN=
 ```
 
 That single file is the whole configuration — every service reads it. Application
@@ -72,10 +73,13 @@ must swap for real values before production use:
 
 | Seeded file | From template | What to edit |
 |---|---|---|
-| `compose/secrets/signaling-tokens.json` | `secrets/signaling-tokens.example.json` | Replace the JSON key with the value of `SIGNALING_AUTH_TOKEN` above |
 | `compose/mqtt-streamer/streamer_config.yaml` | `mqtt-streamer/streamer_config.yaml.example` | Ingest `x-api-token`, device list |
 
-Both real files are gitignored — they're per-operator secrets.
+`compose/secrets/signaling-tokens.json` is not seeded from a template: `up`
+writes it from `SIGNALING_AUTH_TOKEN` every time, so the file and the token the
+peers send cannot drift apart. Entries you add yourself are left alone.
+
+All of these are gitignored — they're per-operator secrets.
 
 Log into your registry, then start:
 
