@@ -9,7 +9,7 @@ Everything runs on one host. Good enough for pilots, staging, small production, 
 | Target | Provisioning | Where | Cost floor | Notes |
 |---|---|---|---|---|
 | `local` | none | laptop | free | dev with bind mounts + hot reload |
-| `onprem` | operator owns the host | on-site server, LAN | hardware only | prod stack, TLS via self-signed or BYO cert (no public DNS needed) |
+| `onprem` | operator owns the host | on-site server, LAN | hardware only | prod stack, plain HTTP by default; opt into self-signed or BYO cert (no public DNS needed) |
 | `ssh` | operator brings the host | anywhere with public DNS | varies | any distro Docker runs on, Let's Encrypt |
 | `aws-single` | Terraform (EC2, EIP, SG, ECR, S3, IoT role alias) | AWS | ~$70-90/mo (r6g.large) | Managed defaults: AWS IoT Core + KVS |
 | `gcp-single` | Terraform (GCE, static IP, firewall, Artifact Registry, GCS) | GCP | ~$115-130/mo (e2-standard-4) | Self-hosted messaging (no managed GCP path) |

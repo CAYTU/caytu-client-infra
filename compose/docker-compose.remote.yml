@@ -29,6 +29,37 @@ services:
   gstreamer-recorder:
     volumes:
       - gstreamer-recordings:/tmp/recordings
+    environment:
+      # Presigned MinIO URLs the recorder hands to backend/browser must be
+      # reachable from the browser's network, so they route through nginx —
+      # not the localhost fallback baked into the base compose.
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}/minio-api}
+
+  # Every "public" URL below derives from CAYTU_DOMAIN so a single knob
+  # (CAYTU_DOMAIN=host, CAYTU_SCHEME=http|https, CAYTU_WS_SCHEME=ws|wss)
+  # configures the whole browser-facing surface. Set the individual vars only
+  # to override — the common case is to leave them empty.
+  backend:
+    environment:
+      - SIGNALING_SERVER_PUBLIC_URL=${SIGNALING_SERVER_PUBLIC_URL:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}}
+      - SIGNALING_SERVER_PUBLIC_WS_URL=${SIGNALING_SERVER_PUBLIC_WS_URL:-${CAYTU_WS_SCHEME:-ws}://${CAYTU_DOMAIN}}
+      - MINIO_PUBLIC_URL=${MINIO_PUBLIC_URL:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}/minio-api}
+      - CLIENT_URL=${CLIENT_URL:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}}
+
+  # The frontend is a Next.js server that renders a runtime-config <script> tag
+  # into every page. NEXT_PUBLIC_* is baked at BUILD time and cannot be
+  # overridden on a prebuilt image — the *_URL_PUBLIC vars below are the ones
+  # the server actually reads at request time. Not setting them silently falls
+  # back to http://localhost:5000, unreachable from any browser but the host's.
+  #
+  # NAMING TRAP: MINIO_PUBLIC_URL (backend/gstreamer, above) and MINIO_URL_PUBLIC
+  # (frontend, below) are DIFFERENT variables with the same purpose. Both derive
+  # from CAYTU_DOMAIN by default so operators don't have to know.
+  frontend:
+    environment:
+      - API_URL_PUBLIC=${API_URL_PUBLIC:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}}
+      - WS_URL_PUBLIC=${WS_URL_PUBLIC:-${CAYTU_WS_SCHEME:-ws}://${CAYTU_DOMAIN}}
+      - MINIO_URL_PUBLIC=${MINIO_URL_PUBLIC:-${CAYTU_SCHEME:-http}://${CAYTU_DOMAIN}/minio-api}
 
   # The one internal service that DOES publish a host port: devices publishing
   # from other LAN hosts need to reach the broker directly. Open 1885/tcp on

@@ -10,22 +10,29 @@ before there is code shaped around the wrong answer.
 `access.tls` already offers five values. The question is which of them is the
 path we build for and support, and which are the edges.
 
-**Self-signed on a fixed address is the default**, and it is what a record gets
-when nobody chooses anything. **Bring-your-own is the first upgrade from it**,
-for a site with a hostname and an internal PKI. Let's Encrypt over DNS-01 is
-supported for a named short list of providers. HTTP-01 stays for the sites that
-genuinely have inbound `:80`, which is a minority.
+**Plain HTTP is the default for on-prem**, and it is what a record gets when
+nobody chooses anything. **Self-signed is the first upgrade from it**, for a
+site that wants encryption on the LAN and is willing to import the certificate
+on every client. **Bring-your-own is the upgrade past that**, for a site with a
+hostname and an internal PKI. Let's Encrypt over DNS-01 is supported for a named
+short list of providers. HTTP-01 stays for the sites that genuinely have
+inbound `:80`, which is a minority.
 
-The default is not a preference, it is the only thing that works on the shape
-these sites arrive in. An on-premise deployment is a box on a customer's LAN
-reached by its own address. That needs no DNS record and no hosts entry on every
-client machine, and no public CA will issue for a bare address, so Let's Encrypt
-there is not awkward but impossible.
+The default is not a preference, it is what stands up unattended without
+creating new problems. Self-signed on a fixed address looked like a stronger
+default, but it drags in two failure modes that plain HTTP does not: every
+client machine has to import the certificate to avoid a browser interstitial,
+and any mismatch between the scheme nginx serves and the scheme the frontend
+was told for its API base breaks the login and password-reset flows through a
+CORS preflight redirect. A LAN box on its own address that serves plain HTTP
+has neither problem — it is legible from any client on the segment, and its
+warnings about clear-text passwords are honest about what it is.
 
-Everything above self-signed is optional, and none of it sits on the path a site
-takes to working. That ordering is the point: the default has to stand up
-unattended on a LAN, and each other mode is something a site opts into once it
-has a reason to.
+Everything above plain HTTP is optional, and each mode is something a site opts
+into once it has a reason to. Self-signed remains the natural first step for
+LAN operators who care about eavesdropping; bring-your-own is the enterprise
+answer; DNS-01 covers cloud DNS providers; HTTP-01 stays for the sites that
+happen to have inbound `:80`.
 
 ## Why not DNS-01 as the default
 
@@ -79,21 +86,22 @@ renewal has been silently failing for two months.
 ## Build order
 
 1. **Make the default real.** A record with nothing chosen means a LAN box on
-   its own address with a certificate it signs itself, on the platform and on
-   the host alike. Nothing else matters until a site can be stood up with no
-   decisions made.
+   its own address serving plain HTTP, on the platform and on the host alike.
+   Nothing else matters until a site can be stood up with no decisions made.
+   The warning about clear-text passwords fires at boot, in the console, where
+   somebody is looking.
 2. **Dispatch on the record.** Provisioning reads `access.tls` and does the
    right thing for each value instead of always attempting HTTP-01. Sites
-   choosing `byo` or `none` stop failing an ACME attempt they never wanted.
+   choosing `byo`, `self-signed`, or `none` stop failing an ACME attempt they
+   never wanted.
 3. **Harden bring-your-own.** Check the key matches the certificate, that it
    covers the hostname, and that it is not already expired, before it goes
    anywhere near nginx. Installing a mismatched pair crash-loops nginx and
    takes the site down, which is a bad way to find out.
 4. **Watch expiry and report it.** Days remaining goes to the platform with the
    rest of the deployment's state, so the console can warn before it matters.
-   This is the one piece the default does not get for free: a self-signed
-   certificate is good for ten years, so nothing here is urgent until a site
-   brings its own.
+   The default gets this for free — there is no certificate to expire — but
+   sites that opt into self-signed or bring-your-own need the watch.
 5. **DNS-01 for route53 and cloudflare.** Two providers, named explicitly,
    rather than a field that implies we support whatever anyone types.
 

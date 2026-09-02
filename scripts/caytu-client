@@ -669,13 +669,20 @@ cert_days_left() {
 # host to HTTP-01 sent a LAN box with no public DNS and no inbound :80 to wait
 # on a challenge that could never arrive. The platform records this for every
 # deployment now, so the fallback only covers a record written before it did.
+#
+# On-prem defaults to plain HTTP. A self-signed cert on a bare IP creates two
+# problems that nothing else does: every client has to import the cert to avoid
+# a browser interstitial, and the deployment ends up serving TLS on 443 while
+# the frontend was still told the API base is http:// — the resulting mixed
+# scheme breaks the login and reset flows through a CORS preflight redirect.
+# Operators who want TLS on-prem opt in with `ssl self-signed` or `ssl bootstrap`.
 cert_mode_for() {
   local env_file=$1
   local tls; tls="$(env_get "$env_file" CAYTU_ACCESS_TLS || true)"
   if [[ -z "$tls" ]]; then
     case "$(env_get "$env_file" CAYTU_PLACEMENT || true)" in
       ""|managed) tls="letsencrypt-http" ;;
-      *)          tls="self-signed" ;;
+      *) [[ "$TARGET" == "onprem" ]] && tls="none" || tls="self-signed" ;;
     esac
   fi
   printf '%s' "$tls"
@@ -799,6 +806,34 @@ _ssl_restore_tls_remote() {
   _ssl_pin_nginx_remote "$host"
 }
 
+# Sync CAYTU_SCHEME / CAYTU_WS_SCHEME with the active TLS mode, so every
+# public-facing URL derived from CAYTU_DOMAIN gets the right protocol without
+# the operator hand-editing three vars in three files. Called by every ssl
+# subcommand that flips modes. For remote targets we rsync the env file so the
+# compose that runs on the far side sees the new values.
+_ssl_set_scheme() {
+  local scheme=$1 ws=$2
+  local env_file; env_file="$(env_file_for)"
+  [[ -f "$env_file" ]] || return 0
+
+  local cur_scheme cur_ws
+  cur_scheme="$(env_get "$env_file" CAYTU_SCHEME || true)"
+  cur_ws="$(env_get "$env_file" CAYTU_WS_SCHEME || true)"
+  [[ "$cur_scheme" == "$scheme" && "$cur_ws" == "$ws" ]] && return 0
+
+  env_upsert "$env_file" CAYTU_SCHEME "$scheme"
+  env_upsert "$env_file" CAYTU_WS_SCHEME "$ws"
+
+  case "$TARGET" in
+    ssh|aws-single|gcp-single)
+      ssh_rsync "$env_file" "compose/$(basename "$env_file")" >/dev/null 2>&1 || \
+        warn "could not push $env_file to remote — run 'caytu-client env push' by hand" ;;
+  esac
+
+  warn "CAYTU_SCHEME=$scheme, CAYTU_WS_SCHEME=$ws — recreate backend/frontend to pick up new URLs:"
+  warn "  caytu-client -t $TARGET up -d backend frontend"
+}
+
 # Days until the remote cert for $1 expires. Prints nothing when there is no
 # cert (so callers can distinguish "missing" from "expiring").
 _ssl_days_left_remote() {
@@ -852,6 +887,7 @@ cmd_ssl() {
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" || \
             warn "nginx not running yet — it will pick up the cert on 'caytu-client up'"
+          _ssl_set_scheme https wss
           ok "nginx pinned to $domain using the existing certificate"
           return 0
         fi
@@ -875,6 +911,7 @@ cmd_ssl() {
       # shellcheck disable=SC2029
       ssh_run "cd $rdir/compose && docker compose restart nginx" || \
         warn "nginx not running yet — it will pick up the cert on 'caytu-client up'"
+      _ssl_set_scheme https wss
       ok "Let's Encrypt cert issued for $domain, nginx reloaded" ;;
 
     # ---- Self-signed (no DNS required, works with a bare IP) -----------------
@@ -923,6 +960,7 @@ cmd_ssl() {
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
+      _ssl_set_scheme https wss
       ok "self-signed cert installed for $host, nginx reloaded"
       warn "browsers will show a security warning. Import certbot/conf/live/$host/fullchain.pem into client trust stores to silence it." ;;
 
@@ -951,6 +989,7 @@ cmd_ssl() {
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
         *) die "ssl only applies to onprem/remote targets" ;;
       esac
+      _ssl_set_scheme https wss
       ok "cert installed for $host, nginx reloaded" ;;
 
     # ---- HTTP-only (LAN deployments that don't care about TLS) ---------------
@@ -980,6 +1019,7 @@ cmd_ssl() {
           # shellcheck disable=SC2029
           ssh_run "cd $rdir/compose && docker compose restart nginx" ;;
       esac
+      _ssl_set_scheme http ws
       ok "nginx switched to HTTP-only mode" ;;
 
     renew)

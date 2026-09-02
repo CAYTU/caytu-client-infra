@@ -12,7 +12,7 @@ Typical shape:
 
 - Ubuntu / Debian / any Linux Docker supports
 - Docker + compose plugin (run [`scripts/bootstrap.sh`](../scripts/bootstrap.sh) as root to install)
-- `openssl` (for `ssl self-signed`)
+- `openssl` (only if you opt into `ssl self-signed`; the default HTTP-only path does not need it)
 - Access to your container registry (ECR, private registry, or `docker load` from tar)
 
 ## First run
@@ -169,7 +169,24 @@ docker compose restart backend
 
 ## TLS on a fixed IP — three choices
 
-### 1. Self-signed cert (recommended for LAN)
+An on-prem deployment defaults to plain HTTP: nothing to import into client
+trust stores, no scheme-mismatch bugs between what nginx serves and what the
+frontend was told for its API base. On an untrusted network you want one of the
+other two.
+
+### 1. HTTP-only (default)
+
+Nothing to run — a fresh on-prem install comes up on port 80 and stays there
+until an operator opts into TLS. If you have already switched an install to
+TLS and want to go back:
+
+```bash
+caytu-client -t onprem ssl http-only
+```
+
+Swaps the TLS nginx config for the HTTP-only variant. Everything runs on port 80. **Don't do this if the network is untrusted** — passwords fly plaintext.
+
+### 2. Self-signed cert (LAN with encryption)
 
 ```bash
 caytu-client -t onprem ssl self-signed 10.0.1.42
@@ -183,7 +200,7 @@ Browsers will warn on first visit. To silence:
 - Import it into the OS/browser trust store (Windows: "Trusted Root Certification Authorities"; macOS: Keychain → System → Certificates → drag → set to Always Trust; Linux/Firefox: about:preferences → Privacy & Security → View Certificates → Import).
 - For fleets, push it via MDM (JAMF / Intune / Ansible).
 
-### 2. Bring your own cert (from an internal CA)
+### 3. Bring your own cert (from an internal CA)
 
 If your org has an internal PKI:
 
@@ -194,17 +211,10 @@ caytu-client -t onprem ssl bring-your-own caytu.corp.local \
 
 Same layout, no browser warnings for machines that already trust your internal CA.
 
-### 3. HTTP-only (no TLS)
-
-For truly closed LANs where TLS is more trouble than it's worth:
-
-```bash
-caytu-client -t onprem ssl http-only
-```
-
-Swaps the TLS nginx config for the HTTP-only variant. Everything runs on port 80. **Don't do this if the network is untrusted** — passwords fly plaintext.
-
-Switching back later is `ssl self-signed <host>` or `ssl bring-your-own <host> ...`. Either one restores the TLS config from the `default.conf.tls` copy that `http-only` leaves behind, then pins it to the host.
+Switching from HTTP-only to either TLS mode later is a matter of running the
+command above. `ssl self-signed <host>` and `ssl bring-your-own <host> ...` both
+restore the TLS config from the `default.conf.tls` copy that `http-only` leaves
+behind, then pin it to the host.
 
 Note that these are the manual verbs. A deployment the platform knows about gets whichever of these its `access.tls` names, without anyone running a command. See [onprem-certificates.md](onprem-certificates.md).
 
@@ -212,7 +222,7 @@ Note that these are the manual verbs. A deployment the platform knows about gets
 
 Open on the LAN interface:
 
-- `80/tcp` if `ssl http-only`, otherwise for HTTPS redirects
+- `80/tcp` always (default HTTP-only listener, or the HTTPS redirect if TLS is on)
 - `443/tcp` if self-signed or bring-your-own
 - `3478/tcp+udp`, `5349/tcp+udp`, `49152-49252/udp` if `STREAMING_PROVIDER=self-hosted`
 - `1885/tcp` for the local mosquitto broker (on by default; only needs to be LAN-reachable if devices publish from other hosts)
