@@ -135,6 +135,14 @@ jobs:
                   restarts: ([$p.status.containerStatuses[]?.restartCount] | add // 0)
                 }]' || true)"
               body="$(jq -n --argjson p "${pods:-[]}" '{pods:$p}')" ;;
+            # Where this deployment answers. A machine reports its own address
+            # once it is up; a cluster has no host to do that, so the build is
+            # the only thing that knows, and it stayed quiet. Both are sent: the
+            # friendly name is what a customer uses, the balancer's own name is
+            # what works while DNS is still propagating.
+            url)    body="$(jq -n --arg u "$2" --arg d "${3:-}" \
+                              '{publicUrl:$u}
+                               + (if $d == "" then {} else {directUrl:$d} end)')" ;;
             done)   body='{"status":"running"}' ;;
             failed) body="$(jq -n --arg m "$2" '{status:"failed", lastError:$m,
                               step:{message:$m, ok:false}}')" ;;
@@ -511,6 +519,10 @@ jobs:
 
           echo "${SUBDOMAIN}.caytu.link -> $host"
 
+          # Carried to the next step, which is where it is reported: a shell
+          # variable does not outlive the step that set it.
+          echo "LB_HOST=$host" >> "$GITHUB_ENV"
+
       # A hostname in the ingress status only says a balancer exists. Whether
       # anything answers behind it is a different question, and the one the
       # person waiting actually asked. A build once went green on a site that
@@ -536,6 +548,17 @@ jobs:
               exit 1 ;;
           esac
           echo "$url answers $code"
+
+      # After the record exists and the site has answered on it. An address on
+      # the console that does not resolve, or that serves 502, is worse than
+      # none at all.
+      - name: Report the address
+        env:
+          PLATFORM_URL: ${{ github.event.inputs.platform_url }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+          SUBDOMAIN: ${{ github.event.inputs.subdomain }}
+        run: /tmp/report.sh url "https://${SUBDOMAIN}.caytu.link" "https://${LB_HOST}"
 
       # Before the outcome, so a failed build still shows what came up and what
       # did not. That is usually the whole answer.

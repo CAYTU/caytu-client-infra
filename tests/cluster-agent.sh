@@ -22,6 +22,9 @@ eval "$(sed -n '/^run_command()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^trim_logs()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^MAX_RESULT_BYTES=/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
+eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
+eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
+eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
 # Stands in for the throwaway pod. Records the command it was asked to run.
 RUN_LOG="$TMP/run.log"; RUN_RC=0
 run_with_backend_image() { local n=$1; shift; echo "$n: $*" >> "$RUN_LOG"; cat >/dev/null; return "$RUN_RC"; }
@@ -172,6 +175,36 @@ log() { :; }
   && ok "says the console never heard" || bad "said '$out'"
 API_RC=0
 KUBECTL_OUT=""
+
+echo
+echo "the heartbeat says where the deployment answers"
+: > "$API_LOG"
+KUBECTL_OUT=""
+kubectl() {
+  echo "$*" >> "$KUBECTL_LOG"
+  case "$*" in
+    *"spec.rules[0].host"*) echo "promed.caytu.link" ;;
+    *"status.loadBalancer.ingress[0].hostname"*) echo "k8s-caytu-abc.us-east-1.elb.amazonaws.com" ;;
+    *"get pods"*) echo '{"items":[{"metadata":{"name":"backend-1"},"spec":{"containers":[{"n":1}]},"status":{"phase":"Running","containerStatuses":[{"ready":true,"restartCount":0}]}}]}' ;;
+    *) : ;;
+  esac
+}
+API_RC=0; API_OUT=""
+heartbeat
+# The rule's host, not the balancer's own name: the certificate is for that one.
+grep -q '"publicUrl":"https://promed.caytu.link"' "$API_LOG" \
+  && ok "the address is reported" || bad "no address in $(cat "$API_LOG")"
+# The balancer's own name too: it answers before the CNAME does, which is the
+# window somebody watching a build is in.
+grep -q '"directUrl":"https://k8s-caytu-abc.us-east-1.elb.amazonaws.com"' "$API_LOG" \
+  && ok "the balancer's own name is reported" || bad "no balancer name reported"
+
+echo
+echo "a cluster with no ingress reports no address, rather than a broken one"
+kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
+: > "$API_LOG"
+heartbeat
+grep -q "publicUrl" "$API_LOG" && bad "invented an address" || ok "says nothing"
 
 echo
 echo "a bootstrap that fails does not go on to seal"

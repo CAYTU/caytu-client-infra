@@ -134,8 +134,41 @@ pod_json() {
     }]' || echo '[]'
 }
 
+# Where this deployment answers, from the ingress itself.
+#
+# Reported every heartbeat rather than once at build time, so a cluster built
+# before anything reported an address gets one, and a balancer that is replaced
+# does not leave the console pointing at a name that has moved. The rule's host
+# is the answer, not the balancer's own name: that is what the certificate is
+# for, so it is the only address a browser will accept.
+ingress_url() {
+  local host
+  host="$(kubectl -n "$NAMESPACE" get ingress \
+    -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 0
+  printf 'https://%s' "$host"
+}
+
+# The balancer's own name, which answers before DNS does.
+#
+# Reported alongside the friendly name for the same reason a machine reports its
+# IP as well as its hostname: the CNAME and the certificate arrive later, and
+# this is the address that works in the meantime. A browser warns on it, because
+# the certificate is for the friendly name.
+balancer_url() {
+  local host
+  host="$(kubectl -n "$NAMESPACE" get ingress \
+    -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 0
+  printf 'https://%s' "$host"
+}
+
 heartbeat() {
+  # Empty is not "[]": kubectl answering with nothing leaves jq nothing to read,
+  # and the whole payload then fails to build, so a cluster the agent could not
+  # list reported nothing at all rather than reporting that it is unwell.
   local pods; pods="$(pod_json)"
+  [[ -n "$pods" ]] || pods='[]'
   # A cluster where every pod is up is running. Anything else is still
   # provisioning as far as the console is concerned, which is more honest than
   # reporting running for a deployment that serves nothing.
@@ -144,7 +177,10 @@ heartbeat() {
 
   local payload
   payload="$(jq -nc --argjson p "$pods" --argjson bad "${bad:-0}" \
-    '{clusterPods:$p} + (if $bad == 0 then {status:"running"} else {} end)')"
+    --arg u "$(ingress_url)" --arg d "$(balancer_url)" \
+    '{clusterPods:$p} + (if $bad == 0 then {status:"running"} else {} end)
+                      + (if $u == "" then {} else {publicUrl:$u} end)
+                      + (if $d == "" then {} else {directUrl:$d} end)')"
   api PATCH "/api/billings/instances/${INSTANCE_ID}/state" "$payload" >/dev/null
 }
 
