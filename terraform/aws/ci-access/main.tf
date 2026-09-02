@@ -296,6 +296,7 @@ data "aws_iam_policy_document" "ci_access" {
     resources = [
       aws_iam_role.provisioning.arn,
       aws_iam_role.agent_publish.arn,
+      aws_iam_role.template_publish.arn,
       aws_iam_role.ci_access.arn,
     ]
   }
