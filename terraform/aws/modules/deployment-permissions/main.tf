@@ -627,6 +627,27 @@ data "aws_iam_policy_document" "cluster" {
     }
   }
 
+  # The balancer the ingress controller makes. Nothing else ever deletes it,
+  # and without this the teardown cannot even see it.
+  statement {
+    sid    = "RemoveTheClusterBalancer"
+    effect = "Allow"
+    actions = [
+      "elasticloadbalancing:DescribeLoadBalancers",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeListeners",
+      "elasticloadbalancing:DeleteLoadBalancer",
+      "elasticloadbalancing:DeleteTargetGroup",
+    ]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = var.regions
+    }
+  }
+
   # Reading its own role, which the EKS module does on every plan.
   #
   # It resolves the caller's assumed-role arn back to the role arn behind it,

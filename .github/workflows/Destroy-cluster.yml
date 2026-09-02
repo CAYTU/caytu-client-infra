@@ -258,9 +258,15 @@ jobs:
 
           [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
 
-          for arn in $(aws elbv2 describe-load-balancers --region "$REGION" \
+          # A denied describe prints to stderr and returns nothing, which
+          # looks exactly like an account with no balancers. Check the status.
+          if ! arns="$(aws elbv2 describe-load-balancers --region "$REGION" \
                 --query "LoadBalancers[?VpcId=='$vpc'].LoadBalancerArn" \
-                --output text 2>/dev/null); do
+                --output text)"; then
+            echo "::error::Cannot list load balancers. The provisioner role needs elasticloadbalancing:DescribeLoadBalancers and DeleteLoadBalancer."
+            exit 1
+          fi
+          for arn in $arns; do
             echo "deleting load balancer $arn"
             aws elbv2 delete-load-balancer --region "$REGION" \
               --load-balancer-arn "$arn" 2>&1 | tail -1 || true
@@ -268,9 +274,13 @@ jobs:
 
           # A service of type LoadBalancer with no annotations still makes one of
           # these, and it blocks a subnet exactly as an ALB does.
-          for name in $(aws elb describe-load-balancers --region "$REGION" \
+          if ! names="$(aws elb describe-load-balancers --region "$REGION" \
                 --query "LoadBalancerDescriptions[?VPCId=='$vpc'].LoadBalancerName" \
-                --output text 2>/dev/null); do
+                --output text)"; then
+            echo "::error::Cannot list classic load balancers. Same grant as above."
+            exit 1
+          fi
+          for name in $names; do
             echo "deleting classic load balancer $name"
             aws elb delete-load-balancer --region "$REGION" \
               --load-balancer-name "$name" 2>&1 | tail -1 || true
@@ -280,12 +290,19 @@ jobs:
           # interfaces and addresses are released a minute or so later, so a
           # destroy that started straight after would fail on the same subnet
           # for the same reason and look like this fix did nothing.
+          # A failed read is not a zero.
           deadline=$(( SECONDS + 300 ))
           while (( SECONDS < deadline )); do
-            left="$(aws elbv2 describe-load-balancers --region "$REGION" \
-              --query "length(LoadBalancers[?VpcId=='$vpc'])" --output text 2>/dev/null || echo 0)"
-            old="$(aws elb describe-load-balancers --region "$REGION" \
-              --query "length(LoadBalancerDescriptions[?VPCId=='$vpc'])" --output text 2>/dev/null || echo 0)"
+            if ! left="$(aws elbv2 describe-load-balancers --region "$REGION" \
+                  --query "length(LoadBalancers[?VpcId=='$vpc'])" --output text)"; then
+              echo "::error::Cannot read load balancers any more. Not calling $vpc clear on a failed read."
+              exit 1
+            fi
+            if ! old="$(aws elb describe-load-balancers --region "$REGION" \
+                  --query "length(LoadBalancerDescriptions[?VPCId=='$vpc'])" --output text)"; then
+              echo "::error::Cannot read classic load balancers any more."
+              exit 1
+            fi
             [ "${left:-0}" = "0" ] && [ "${old:-0}" = "0" ] && { echo "no load balancers left in $vpc"; break; }
             echo "${left:-0} load balancer(s) still going, waiting"
             sleep 15
@@ -375,6 +392,15 @@ jobs:
             sleep 20
           done
 
+          # Checked after the wait, not during it: an interface reads as the
+          # balancer's for a minute after it goes. Left here means it stayed.
+          elb="$(aws ec2 describe-network-interfaces --region "$REGION" \
+            --filters "Name=vpc-id,Values=$vpc" "Name=requester-id,Values=amazon-elb" \
+            --query 'length(NetworkInterfaces)' --output text 2>/dev/null || echo 0)"
+          if [ "${elb:-0}" != "0" ]; then
+            echo "::error::${elb} interface(s) in $vpc still belong to a load balancer, so one is still running."
+          fi
+
       # The pass that has to succeed. A teardown that stops half way leaves the
       # state matching neither what is there nor what is gone.
       - name: Destroy what is left
@@ -400,6 +426,8 @@ jobs:
         # step never ran to say so.
         if: always()
         working-directory: ${{ env.TF_DIR }}
+        env:
+          REGION: ${{ github.event.inputs.region }}
         run: |
           set -euo pipefail
           remaining="$(terraform state list | wc -l)"
@@ -413,7 +441,26 @@ jobs:
             if terraform state list | grep -qE 'aws_(nat_gateway|eip|eks_cluster|eks_node_group|instance|db_instance)\.'; then
               echo "::error::Something that costs money is still there: a gateway, an address, or the cluster itself."
             else
-              echo "::warning::The cluster is gone. What remains costs nothing but will block re-using this name."
+              # An orphan balancer is in no state file, so the list above
+              # cannot rule one out, and unlike the VPC it bills.
+              vpc="$(terraform state show module.vpc.aws_vpc.this[0] 2>/dev/null \
+                | grep -oE 'vpc-[0-9a-f]+' | head -1 || true)"
+              lbs=""
+              if [ -n "$vpc" ] && [ -f "$RUNNER_TEMP/cluster-creds.sh" ]; then
+                lbs="$( . "$RUNNER_TEMP/cluster-creds.sh"
+                        aws elbv2 describe-load-balancers --region "$REGION" \
+                          --query "length(LoadBalancers[?VpcId=='$vpc'])" \
+                          --output text 2>/dev/null || echo unknown )"
+              fi
+              if [ -z "$vpc" ]; then
+                echo "::warning::The cluster is gone. What remains costs nothing but will block re-using this name."
+              elif [ -z "$lbs" ] || [ "$lbs" = "unknown" ]; then
+                echo "::warning::The cluster is gone, but the name stays taken. Could not check $vpc for a load balancer from here."
+              elif [ "$lbs" != "0" ]; then
+                echo "::error::$lbs load balancer(s) still running in $vpc. That bills, and it is holding the subnets."
+              else
+                echo "::warning::The cluster is gone. What remains costs nothing but will block re-using this name."
+              fi
             fi
             exit 1
           fi
