@@ -42,14 +42,15 @@ if 'cluster' in sids and 'single' in sids:
     print(f"  cluster adds: {extra or 'NOTHING — the fragment is not landing'}")
     ok &= bool(extra)
 
-for p_ in d['Resources']['CaytuProvisionerRole']['Properties']['Policies']:
-    cluster = 'If' in p_
-    doc = p_['If'][1]['PolicyDocument']['Sub'] if cluster else p_['PolicyDocument']['Sub']
-    parsed = json.loads(render(doc))
+# The role's policies are managed, so each one stops at 6,144 rather than the
+# 10,240 a role's inline policies share. The boundary is checked above.
+for name, r in d['Resources'].items():
+    if r['Type'] != 'AWS::IAM::ManagedPolicy' or name == 'CaytuBoundary':
+        continue
+    parsed = json.loads(render(r['Properties']['PolicyDocument']['Sub']))
     size = len(json.dumps(parsed, separators=(',',':')))
-    lbl = 'cluster-inline' if cluster else 'base-inline'
-    print(f"role/{lbl:15} statements={len(parsed['Statement']):2} compact={size:5} {'OK' if size<=10240 else 'OVER 10240'}")
-    ok &= size <= 10240
+    print(f"{name:30} statements={len(parsed['Statement']):2} compact={size:5} {'OK' if size<=6144 else 'OVER 6144'}")
+    ok &= size <= 6144
 
 print("\nALL GOOD" if ok else "\nPROBLEMS FOUND")
 sys.exit(0 if ok else 1)

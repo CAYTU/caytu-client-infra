@@ -11,12 +11,14 @@ on:
       - "scripts/**"
       - "compose/nginx/**"
       - "tests/**"
+      - "cloudformation/**"
       - ".github/workflows/Tests.yml"
   pull_request:
     paths:
       - "scripts/**"
       - "compose/nginx/**"
       - "tests/**"
+      - "cloudformation/**"
       - ".github/workflows/Tests.yml"
 
 jobs:
@@ -31,6 +33,11 @@ jobs:
           for f in scripts/caytu-client scripts/bootstrap.sh scripts/lib/*.sh; do
             bash -n "$f"
           done
+
+      # The template is JSON inside YAML, so a broken policy parses here and
+      # fails only when a customer creates the stack.
+      - name: The access template
+        run: python3 scripts/verify-cloudformation.py cloudformation/caytu-provisioner-access.yaml
 
       - name: Suites
         run: |
