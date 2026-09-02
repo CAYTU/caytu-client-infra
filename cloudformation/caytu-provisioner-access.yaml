@@ -445,6 +445,23 @@ Resources:
                     }
                   },
                   {
+                    "Sid": "RemoveTheClusterBalancer",
+                    "Effect": "Allow",
+                    "Action": [
+                      "elasticloadbalancing:DescribeLoadBalancers",
+                      "elasticloadbalancing:DescribeTargetGroups",
+                      "elasticloadbalancing:DescribeListeners",
+                      "elasticloadbalancing:DeleteLoadBalancer",
+                      "elasticloadbalancing:DeleteTargetGroup"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:RequestedRegion": "${AWS::Region}"
+                      }
+                    }
+                  },
+                  {
                     "Sid": "ReadOurOwnRole",
                     "Effect": "Allow",
                     "Action": "iam:GetRole",
