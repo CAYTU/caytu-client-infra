@@ -19,7 +19,12 @@ log() { :; }
 eval "$(sed -n '/^pod_json()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^apply_settings()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^run_command()/,/^}/p'    cluster-agent/agent.sh)"
+eval "$(sed -n '/^trim_logs()/,/^}/p'      cluster-agent/agent.sh)"
+eval "$(sed -n '/^MAX_RESULT_BYTES=/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
+eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
+eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
+eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
 # Stands in for the throwaway pod. Records the command it was asked to run.
 RUN_LOG="$TMP/run.log"; RUN_RC=0
 run_with_backend_image() { local n=$1; shift; echo "$n: $*" >> "$RUN_LOG"; cat >/dev/null; return "$RUN_RC"; }
@@ -28,7 +33,14 @@ run_with_backend_image() { local n=$1; shift; echo "$n: $*" >> "$RUN_LOG"; cat >
 KUBECTL_OUT=""; KUBECTL_RC=0; KUBECTL_LOG="$TMP/kubectl.log"
 kubectl() { echo "$*" >> "$KUBECTL_LOG"; [ "$KUBECTL_RC" -ne 0 ] && return "$KUBECTL_RC"; printf '%s' "$KUBECTL_OUT"; }
 API_OUT=""; API_RC=0; API_LOG="$TMP/api.log"
-api() { echo "$1 $2 ${3:-}" >> "$API_LOG"; [ "$API_RC" -ne 0 ] && return "$API_RC"; printf '%s' "$API_OUT"; }
+# A body written as @file is read from the file, exactly as the real one does.
+api() {
+  local body="${3:-}"
+  [[ "$body" == @* ]] && body="$(cat "${body#@}")"
+  echo "$1 $2 $body" >> "$API_LOG"
+  [ "$API_RC" -ne 0 ] && return "$API_RC"
+  printf '%s' "$API_OUT"
+}
 
 echo "what is running is reported in the cluster's own words"
 KUBECTL_OUT='{"items":[
@@ -136,6 +148,63 @@ seed_the_store >/dev/null 2>&1
 [ "$ORGANIZATION_ID" = "org-from-platform" ] && ok "recovers it" || bad "got '$ORGANIZATION_ID'"
 ORGANIZATION_ID=org123
 API_OUT='{"settings":{},"secrets":{"SMS_ENCRYPTION_KEY":"k"},"files":{}}'
+
+echo
+echo "a long log still reaches the platform"
+# Linux refuses to exec an argument over 128KB, so a result passed on the
+# command line was never sent at all and the console waited for ever.
+: > "$API_LOG"; API_RC=0
+KUBECTL_OUT="$(head -c 400000 /dev/zero | tr '\0' 'x')"
+kubectl() { printf '%s' "$KUBECTL_OUT"; }
+run_command c9 logs '{"service":"backend","lines":200}'
+[ -s "$API_LOG" ] && ok "the result was delivered" || bad "nothing was sent"
+grep -qE '"status": ?"done"' "$API_LOG" && ok "reported done" || bad "not reported done"
+# Capped to what the platform stores, keeping the end: that is where a failure is.
+size="$(wc -c < "$API_LOG")"
+[ "$size" -lt 300000 ] && ok "capped to what the platform accepts" || bad "sent $size bytes"
+
+echo
+echo "a result that cannot be delivered is not called finished"
+: > "$API_LOG"; API_RC=7
+KUBECTL_OUT="some logs"
+# The agent's own logger, which the harness otherwise silences.
+log() { echo "$*"; }
+out="$(run_command c10 logs '{"service":"backend"}' 2>&1)"
+log() { :; }
+[[ "$out" == *"could not be delivered"* ]] \
+  && ok "says the console never heard" || bad "said '$out'"
+API_RC=0
+KUBECTL_OUT=""
+
+echo
+echo "the heartbeat says where the deployment answers"
+: > "$API_LOG"
+KUBECTL_OUT=""
+kubectl() {
+  echo "$*" >> "$KUBECTL_LOG"
+  case "$*" in
+    *"spec.rules[0].host"*) echo "promed.caytu.link" ;;
+    *"status.loadBalancer.ingress[0].hostname"*) echo "k8s-caytu-abc.us-east-1.elb.amazonaws.com" ;;
+    *"get pods"*) echo '{"items":[{"metadata":{"name":"backend-1"},"spec":{"containers":[{"n":1}]},"status":{"phase":"Running","containerStatuses":[{"ready":true,"restartCount":0}]}}]}' ;;
+    *) : ;;
+  esac
+}
+API_RC=0; API_OUT=""
+heartbeat
+# The rule's host, not the balancer's own name: the certificate is for that one.
+grep -q '"publicUrl":"https://promed.caytu.link"' "$API_LOG" \
+  && ok "the address is reported" || bad "no address in $(cat "$API_LOG")"
+# The balancer's own name too: it answers before the CNAME does, which is the
+# window somebody watching a build is in.
+grep -q '"directUrl":"https://k8s-caytu-abc.us-east-1.elb.amazonaws.com"' "$API_LOG" \
+  && ok "the balancer's own name is reported" || bad "no balancer name reported"
+
+echo
+echo "a cluster with no ingress reports no address, rather than a broken one"
+kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
+: > "$API_LOG"
+heartbeat
+grep -q "publicUrl" "$API_LOG" && bad "invented an address" || ok "says nothing"
 
 echo
 echo "a bootstrap that fails does not go on to seal"

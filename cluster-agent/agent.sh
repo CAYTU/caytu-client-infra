@@ -31,7 +31,19 @@ api() {
   local args=(-sS -m 30 -X "$method" "${PLATFORM_URL}${path}"
               -H "Authorization: Bearer ${TOKEN}"
               -H 'Content-Type: application/json')
-  [[ -n "$body" ]] && args+=(-d "$body")
+  # A body written as @file is read from that file rather than passed as an
+  # argument.
+  #
+  # Linux caps a single argument at 128KB, and a stack's logs are bigger than
+  # that, so curl was never even exec'd: the shell failed with "Argument list
+  # too long", the result never reached the platform, and the console sat
+  # waiting for an answer nothing had sent. Fetching logs from a cluster
+  # therefore worked only while the logs stayed small.
+  if [[ "$body" == @* ]]; then
+    args+=(--data-binary "$body")
+  elif [[ -n "$body" ]]; then
+    args+=(-d "$body")
+  fi
   curl "${args[@]}" 2>/dev/null
 }
 
@@ -122,8 +134,41 @@ pod_json() {
     }]' || echo '[]'
 }
 
+# Where this deployment answers, from the ingress itself.
+#
+# Reported every heartbeat rather than once at build time, so a cluster built
+# before anything reported an address gets one, and a balancer that is replaced
+# does not leave the console pointing at a name that has moved. The rule's host
+# is the answer, not the balancer's own name: that is what the certificate is
+# for, so it is the only address a browser will accept.
+ingress_url() {
+  local host
+  host="$(kubectl -n "$NAMESPACE" get ingress \
+    -o jsonpath='{.items[0].spec.rules[0].host}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 0
+  printf 'https://%s' "$host"
+}
+
+# The balancer's own name, which answers before DNS does.
+#
+# Reported alongside the friendly name for the same reason a machine reports its
+# IP as well as its hostname: the CNAME and the certificate arrive later, and
+# this is the address that works in the meantime. A browser warns on it, because
+# the certificate is for the friendly name.
+balancer_url() {
+  local host
+  host="$(kubectl -n "$NAMESPACE" get ingress \
+    -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+  [[ -n "$host" ]] || return 0
+  printf 'https://%s' "$host"
+}
+
 heartbeat() {
+  # Empty is not "[]": kubectl answering with nothing leaves jq nothing to read,
+  # and the whole payload then fails to build, so a cluster the agent could not
+  # list reported nothing at all rather than reporting that it is unwell.
   local pods; pods="$(pod_json)"
+  [[ -n "$pods" ]] || pods='[]'
   # A cluster where every pod is up is running. Anything else is still
   # provisioning as far as the console is concerned, which is more honest than
   # reporting running for a deployment that serves nothing.
@@ -132,7 +177,10 @@ heartbeat() {
 
   local payload
   payload="$(jq -nc --argjson p "$pods" --argjson bad "${bad:-0}" \
-    '{clusterPods:$p} + (if $bad == 0 then {status:"running"} else {} end)')"
+    --arg u "$(ingress_url)" --arg d "$(balancer_url)" \
+    '{clusterPods:$p} + (if $bad == 0 then {status:"running"} else {} end)
+                      + (if $u == "" then {} else {publicUrl:$u} end)
+                      + (if $d == "" then {} else {directUrl:$d} end)')"
   api PATCH "/api/billings/instances/${INSTANCE_ID}/state" "$payload" >/dev/null
 }
 
@@ -356,6 +404,19 @@ seed_the_store() {
   fi
 }
 
+# What the platform will accept, and nothing a terminal wrote for itself.
+#
+# The platform caps a stored result at 256KB and truncates anything longer, so
+# sending more is bytes nobody reads. The tail is kept rather than the head: the
+# end of a log is where the failure is. Escape sequences go because a colour
+# code renders as noise in the console's log view.
+MAX_RESULT_BYTES=262144
+
+trim_logs() {
+  sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g; s/\x1B\][^\x07]*\x07//g' \
+    | tail -c "$MAX_RESULT_BYTES"
+}
+
 run_command() {
   local id=$1 type=$2 params=$3
   local status="done" error="" result=""
@@ -381,10 +442,11 @@ run_command() {
       # reading when a deployment will not start was the one this could not
       # reach.
       if ! result="$(kubectl -n "$NAMESPACE" logs -l "app=${svc}" \
-          --tail="$lines" --all-containers --prefix 2>&1)" || [ -z "$result" ]; then
+          --tail="$lines" --all-containers --prefix 2>&1 | trim_logs)" \
+          || [ -z "$result" ]; then
         # Falls back to the name, for anything not labelled that way.
         result="$(kubectl -n "$NAMESPACE" logs "deployment/${svc}" \
-          --tail="$lines" --all-containers 2>&1)" || {
+          --tail="$lines" --all-containers 2>&1 | trim_logs)" || {
           status="failed"; error="could not read the logs for ${svc}"
         }
       fi
@@ -435,12 +497,26 @@ run_command() {
       ;;
   esac
 
-  local payload
-  payload="$(jq -nc --arg s "$status" --arg r "$result" --arg e "$error" \
+  # Through files, never arguments, and that goes for jq as well as for curl:
+  # the 128KB argument ceiling is the kernel's, so every process in the chain
+  # hits it. printf is a shell builtin and execs nothing, which is what makes
+  # writing the result out safe when the result is the thing that is too big.
+  local work; work="$(mktemp -d)"
+  printf '%s' "$result" > "$work/result"
+
+  jq -nc --rawfile r "$work/result" --arg s "$status" --arg e "$error" \
     '{status:$s} + (if $r == "" then {} else {result:$r} end)
-              + (if $e == "" then {} else {error:$e} end)')"
-  api PATCH "/api/billings/instances/${INSTANCE_ID}/commands/${id}" "$payload" >/dev/null
-  log "command ${type} -> ${status}${error:+: $error}"
+              + (if $e == "" then {} else {error:$e} end)' > "$work/payload"
+
+  if api PATCH "/api/billings/instances/${INSTANCE_ID}/commands/${id}" \
+      "@$work/payload" >/dev/null; then
+    log "command ${type} -> ${status}${error:+: $error}"
+  else
+    # The work happened and the console will never hear about it. Saying it
+    # finished here is how a command sits at "waiting" until it expires.
+    log "command ${type} ran, but the result could not be delivered"
+  fi
+  rm -rf "$work"
 }
 
 poll_commands() {
