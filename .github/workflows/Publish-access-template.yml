@@ -35,6 +35,26 @@ jobs:
       - name: Check it
         run: python3 scripts/verify-cloudformation.py cloudformation/caytu-provisioner-access.yaml
 
+      # An unset variable reaches the credentials action as an empty role and
+      # fails with "could not load credentials from any providers", which reads
+      # like a broken workflow rather than one nobody has bootstrapped yet.
+      - name: Has this been bootstrapped
+        id: preflight
+        env:
+          ROLE: ${{ vars.AWS_TEMPLATE_PUBLISH_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          [ -n "$ROLE" ] && exit 0
+          {
+            echo "### Not bootstrapped yet"
+            echo
+            echo "\`AWS_TEMPLATE_PUBLISH_ROLE_ARN\` is not set, so there is no role to assume."
+            echo "Apply \`terraform/aws/ci-access\` and set the variable from its"
+            echo "\`template_publish_role_arn\` output."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::AWS_TEMPLATE_PUBLISH_ROLE_ARN is not set. See the run summary."
+          exit 1
+
       # This role writes one S3 prefix and nothing else.
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
