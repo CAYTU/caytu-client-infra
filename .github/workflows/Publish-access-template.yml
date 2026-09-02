@@ -1,0 +1,54 @@
+name: Publish the access template
+
+# The one copy a customer gets.
+#
+# The console used to bundle its own and it went stale three times. It now links
+# to this object, so what a customer downloads is what this repository says.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cloudformation/**"
+      - ".github/workflows/Publish-access-template.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: us-east-1
+  BUCKET: ${{ secrets.AGENT_BUCKET || 'caytu-cli' }}
+  PREFIX: cloudformation
+
+jobs:
+  publish:
+    name: Publish access template
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # Checked before it is published. A broken template is otherwise found by
+      # a customer, creating the stack.
+      - name: Check it
+        run: python3 scripts/verify-cloudformation.py cloudformation/caytu-provisioner-access.yaml
+
+      # This role writes one S3 prefix and nothing else.
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_TEMPLATE_PUBLISH_ROLE_ARN }}
+          role-session-name: publish-access-template
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          f=cloudformation/caytu-provisioner-access.yaml
+          # Stamped as well as moving, so a customer can be pointed back at the
+          # exact template their stack was made from.
+          aws s3 cp "$f" "s3://$BUCKET/$PREFIX/caytu-provisioner-access-${GITHUB_SHA::7}.yaml" --content-type text/yaml
+          aws s3 cp "$f" "s3://$BUCKET/$PREFIX/caytu-provisioner-access.yaml" --content-type text/yaml
+          echo "Published https://$BUCKET.s3.amazonaws.com/$PREFIX/caytu-provisioner-access.yaml" >> "$GITHUB_STEP_SUMMARY"

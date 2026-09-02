@@ -171,6 +171,30 @@ resource "aws_iam_role_policy" "pipeline" {
 }
 
 # -----------------------------------------------------------------------------
+# Publishing the access template
+# -----------------------------------------------------------------------------
+resource "aws_iam_role" "template_publish" {
+  name               = "caytu-client-infra-template-publish"
+  description        = "Assumed by Publish-access-template.yml. Writes the access template and nothing else."
+  assume_role_policy = data.aws_iam_policy_document.github_assume.json
+}
+
+data "aws_iam_policy_document" "template_publish" {
+  statement {
+    sid       = "PublishTheTemplate"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["arn:${local.partition}:s3:::${var.agent_bucket}/${var.template_prefix}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "template_publish" {
+  name   = "publish"
+  role   = aws_iam_role.template_publish.id
+  policy = data.aws_iam_policy_document.template_publish.json
+}
+
+# -----------------------------------------------------------------------------
 # Publishing the agent
 # -----------------------------------------------------------------------------
 resource "aws_iam_role" "agent_publish" {
