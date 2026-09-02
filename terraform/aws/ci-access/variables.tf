@@ -87,6 +87,12 @@ variable "agent_prefix" {
   default = "agent"
 }
 
+variable "template_prefix" {
+  description = "Prefix the customer access template is published under. Public."
+  type        = string
+  default     = "cloudformation"
+}
+
 variable "hosted_dns_zone_ids" {
   description = "Zones holding hosted deployment names, typically caytu.link."
   type        = list(string)

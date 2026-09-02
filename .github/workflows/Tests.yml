@@ -11,12 +11,14 @@ on:
       - "scripts/**"
       - "compose/nginx/**"
       - "tests/**"
+      - "cloudformation/**"
       - ".github/workflows/Tests.yml"
   pull_request:
     paths:
       - "scripts/**"
       - "compose/nginx/**"
       - "tests/**"
+      - "cloudformation/**"
       - ".github/workflows/Tests.yml"
 
 jobs:

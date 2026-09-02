@@ -246,559 +246,573 @@ Resources:
             Condition:
               StringEquals:
                 sts:ExternalId: !Ref ExternalId
-      Policies:
-        # The cluster half is its own policy rather than more statements in the
-        # one below: together they run past the size limit on a single policy.
-        - !If
-          - WantsCluster
-          - PolicyName: !Sub "${RoleName}Cluster"
-            PolicyDocument: !Sub |
-              {
-                "Version": "2012-10-17",
-                "Statement": [
-                  {
-                    "Sid": "BuildTheClusterNetwork",
-                    "Effect": "Allow",
-                    "Action": [
-                      "ec2:CreateVpcEndpoint",
-                      "ec2:CreateVpc",
-                      "ec2:CreateSubnet",
-                      "ec2:CreateRouteTable",
-                      "ec2:CreateRoute",
-                      "ec2:CreateNatGateway",
-                      "ec2:CreateLaunchTemplateVersion",
-                      "ec2:CreateLaunchTemplate",
-                      "ec2:CreateInternetGateway",
-                      "ec2:AllocateAddress"
-                    ],
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "ChangeOnlyOurOwnNetwork",
-                    "Effect": "Allow",
-                    "Action": [
-                      "ec2:ReleaseAddress",
-                      "ec2:ModifyVpcAttribute",
-                      "ec2:ModifySubnetAttribute",
-                      "ec2:DisassociateRouteTable",
-                      "ec2:DisassociateAddress",
-                      "ec2:DetachInternetGateway",
-                      "ec2:DeleteVpcEndpoint",
-                      "ec2:DeleteVpc",
-                      "ec2:DeleteSubnet",
-                      "ec2:DeleteRouteTable",
-                      "ec2:DeleteRoute",
-                      "ec2:DeleteNatGateway",
-                      "ec2:DeleteLaunchTemplateVersions",
-                      "ec2:DeleteLaunchTemplate",
-                      "ec2:DeleteInternetGateway",
-                      "ec2:AttachInternetGateway",
-                      "ec2:AssociateRouteTable",
-                      "ec2:AssociateAddress"
-                    ],
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}",
-                        "aws:ResourceTag/Project": "caytu-client"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "RunTheCluster",
-                    "Effect": "Allow",
-                    "Action": [
-                      "eks:UpdateNodegroupVersion",
-                      "eks:UpdateNodegroupConfig",
-                      "eks:UpdateClusterVersion",
-                      "eks:UpdateClusterConfig",
-                      "eks:UpdateAddon",
-                      "eks:UntagResource",
-                      "eks:TagResource",
-                      "eks:ListTagsForResource",
-                      "eks:DisassociateAccessPolicy",
-                      "eks:DescribeNodegroup",
-                      "eks:DescribeCluster",
-                      "eks:DescribeAddon",
-                      "eks:DescribeAccessEntry",
-                      "eks:DeleteNodegroup",
-                      "eks:DeleteCluster",
-                      "eks:DeleteAddon",
-                      "eks:DeleteAccessEntry",
-                      "eks:CreateNodegroup",
-                      "eks:CreateCluster",
-                      "eks:CreateAddon",
-                      "eks:CreateAccessEntry",
-                      "eks:AssociateAccessPolicy"
-                    ],
-                    "Resource": [
-                      "arn:aws:eks:*:${AWS::AccountId}:nodegroup/caytu-*/*",
-                      "arn:aws:eks:*:${AWS::AccountId}:cluster/caytu-*",
-                      "arn:aws:eks:*:${AWS::AccountId}:addon/caytu-*/*",
-                      "arn:aws:eks:*:${AWS::AccountId}:access-entry/caytu-*/*"
-                    ],
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "ReadTheClusterCatalogue",
-                    "Effect": "Allow",
-                    "Action": [
-                      "eks:ListNodegroups",
-                      "eks:ListClusters",
-                      "eks:ListAssociatedAccessPolicies",
-                      "eks:ListAddons",
-                      "eks:ListAccessEntries",
-                      "eks:DescribeAddonVersions"
-                    ],
-                    "Resource": "*"
-                  },
-                  {
-                    "Sid": "ClusterIdentityProvider",
-                    "Effect": "Allow",
-                    "Action": [
-                      "iam:UpdateOpenIDConnectProviderThumbprint",
-                      "iam:TagOpenIDConnectProvider",
-                      "iam:GetOpenIDConnectProvider",
-                      "iam:DeleteOpenIDConnectProvider",
-                      "iam:CreateOpenIDConnectProvider"
-                    ],
-                    "Resource": "arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.*.amazonaws.com/id/*"
-                  },
-                  {
-                    "Sid": "ServiceLinkedRolesTheClusterNeeds",
-                    "Effect": "Allow",
-                    "Action": "iam:CreateServiceLinkedRole",
-                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
-                    "Condition": {
-                      "StringEquals": {
-                        "iam:AWSServiceName": [
-                          "eks.amazonaws.com",
-                          "eks-nodegroup.amazonaws.com",
-                          "autoscaling.amazonaws.com",
-                          "elasticloadbalancing.amazonaws.com"
-                        ]
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "ReadTheServiceLinkedRoles",
-                    "Effect": "Allow",
-                    "Action": "iam:GetRole",
-                    "Resource": [
-                      "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
-                      "arn:aws:iam::${AWS::AccountId}:role/AWSServiceRoleFor*"
-                    ]
-                  },
-                  {
-                    "Sid": "ClusterKeyAndScaling",
-                    "Effect": "Allow",
-                    "Action": [
-                      "kms:UpdateAlias",
-                      "kms:TagResource",
-                      "kms:ScheduleKeyDeletion",
-                      "kms:PutKeyPolicy",
-                      "kms:ListResourceTags",
-                      "kms:ListAliases",
-                      "kms:GetKeyRotationStatus",
-                      "kms:GetKeyPolicy",
-                      "kms:EnableKeyRotation",
-                      "kms:DeleteAlias",
-                      "kms:CreateKey",
-                      "kms:CreateAlias",
-                      "autoscaling:UpdateAutoScalingGroup",
-                      "autoscaling:Describe*",
-                      "autoscaling:DeleteTags",
-                      "autoscaling:CreateOrUpdateTags"
-                    ],
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "CertificateForTheIngress",
-                    "Effect": "Allow",
-                    "Action": [
-                      "acm:RequestCertificate",
-                      "acm:ListTagsForCertificate",
-                      "acm:ListCertificates",
-                      "acm:DescribeCertificate",
-                      "acm:DeleteCertificate",
-                      "acm:AddTagsToCertificate"
-                    ],
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "RemoveTheClusterBalancer",
-                    "Effect": "Allow",
-                    "Action": [
-                      "elasticloadbalancing:DescribeLoadBalancers",
-                      "elasticloadbalancing:DescribeTargetGroups",
-                      "elasticloadbalancing:DescribeListeners",
-                      "elasticloadbalancing:DeleteLoadBalancer",
-                      "elasticloadbalancing:DeleteTargetGroup"
-                    ],
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "ReadOurOwnRole",
-                    "Effect": "Allow",
-                    "Action": "iam:GetRole",
-                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/CaytuProvisioner"
-                  },
-                  {
-                    "Sid": "FindTheClusterLogGroup",
-                    "Effect": "Allow",
-                    "Action": "logs:DescribeLogGroups",
-                    "Resource": "*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "AttachRolesToTheCluster",
-                    "Effect": "Allow",
-                    "Action": "iam:PassRole",
-                    "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
-                    "Condition": {
-                      "StringEquals": {
-                        "iam:PassedToService": [
-                          "eks.amazonaws.com",
-                          "eks-nodegroup.amazonaws.com",
-                          "ec2.amazonaws.com"
-                        ]
-                      }
-                    }
-                  },
-                  {
-                    "Sid": "ClusterLogs",
-                    "Effect": "Allow",
-                    "Action": [
-                      "logs:TagResource",
-                      "logs:PutRetentionPolicy",
-                      "logs:ListTagsForResource",
-                      "logs:DeleteLogGroup",
-                      "logs:CreateLogGroup"
-                    ],
-                    "Resource": "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/eks/caytu-*",
-                    "Condition": {
-                      "StringEquals": {
-                        "aws:RequestedRegion": "${AWS::Region}"
-                      }
-                    }
-                  }
-                ]
-              }
-          - !Ref AWS::NoValue
-        - PolicyName: !Ref RoleName
-          PolicyDocument: !Sub |
+      # Managed, not inline: the two documents together are over the 10,240
+      # character ceiling on a role's inline policies. Terraform does the same.
+      ManagedPolicyArns: !If
+        - WantsCluster
+        - - !Ref CaytuProvisionerPolicy
+          - !Ref CaytuProvisionerClusterPolicy
+        - - !Ref CaytuProvisionerPolicy
+
+  CaytuProvisionerPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Ref RoleName
+      Description: Exactly what Caytu needs in this account.
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
             {
-              "Version": "2012-10-17",
-              "Statement": [
-                {
-                  "Sid": "WhoAmI",
-                  "Effect": "Allow",
-                  "Action": "sts:GetCallerIdentity",
-                  "Resource": "*"
-                },
-                {
-                  "Sid": "InspectTheAccount",
-                  "Effect": "Allow",
-                  "Action": [
-                    "ec2:GetEbsEncryptionByDefault",
-                    "ec2:GetEbsDefaultKmsKeyId",
-                    "ec2:Describe*"
-                  ],
-                  "Resource": "*",
-                  "Condition": {
-                    "StringEquals": {
-                      "aws:RequestedRegion": "${AWS::Region}"
-                    }
-                  }
-                },
-                {
-                  "Sid": "RunTheMachine",
-                  "Effect": "Allow",
-                  "Action": [
-                    "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
-                    "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
-                    "ec2:UnmonitorInstances",
-                    "ec2:TerminateInstances",
-                    "ec2:StopInstances",
-                    "ec2:StartInstances",
-                    "ec2:RunInstances",
-                    "ec2:RevokeSecurityGroupIngress",
-                    "ec2:RevokeSecurityGroupEgress",
-                    "ec2:ReleaseAddress",
-                    "ec2:MonitorInstances",
-                    "ec2:ModifyVolume",
-                    "ec2:ModifySecurityGroupRules",
-                    "ec2:ModifyInstanceMetadataOptions",
-                    "ec2:ModifyInstanceAttribute",
-                    "ec2:ImportKeyPair",
-                    "ec2:DisassociateAddress",
-                    "ec2:DetachVolume",
-                    "ec2:DeleteVolume",
-                    "ec2:DeleteTags",
-                    "ec2:DeleteSecurityGroup",
-                    "ec2:DeleteKeyPair",
-                    "ec2:CreateVolume",
-                    "ec2:CreateTags",
-                    "ec2:CreateSecurityGroup",
-                    "ec2:CreateKeyPair",
-                    "ec2:AuthorizeSecurityGroupIngress",
-                    "ec2:AuthorizeSecurityGroupEgress",
-                    "ec2:AttachVolume",
-                    "ec2:AssociateAddress",
-                    "ec2:AllocateAddress"
-                  ],
-                  "Resource": "*",
-                  "Condition": {
-                    "StringEquals": {
-                      "aws:RequestedRegion": "${AWS::Region}"
-                    }
-                  }
-                },
-                {
-                  "Sid": "EncryptTheRootVolume",
-                  "Effect": "Allow",
-                  "Action": [
-                    "kms:ReEncryptTo",
-                    "kms:ReEncryptFrom",
-                    "kms:GenerateDataKeyWithoutPlaintext",
-                    "kms:DescribeKey",
-                    "kms:Decrypt",
-                    "kms:CreateGrant"
-                  ],
-                  "Resource": "*",
-                  "Condition": {
-                    "StringEquals": {
-                      "kms:ViaService": [
-                        "ec2.${AWS::Region}.amazonaws.com",
-                        "s3.${AWS::Region}.amazonaws.com"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "Sid": "ManageOurOwnRoles",
-                  "Effect": "Allow",
-                  "Action": [
-                    "iam:UpdateAssumeRolePolicy",
-                    "iam:UntagRole",
-                    "iam:TagRole",
-                    "iam:PutRolePolicy",
-                    "iam:ListRoleTags",
-                    "iam:ListRolePolicies",
-                    "iam:ListInstanceProfilesForRole",
-                    "iam:ListAttachedRolePolicies",
-                    "iam:GetRolePolicy",
-                    "iam:GetRole",
-                    "iam:DetachRolePolicy",
-                    "iam:DeleteRolePolicy",
-                    "iam:DeleteRole",
-                    "iam:CreateRole",
-                    "iam:AttachRolePolicy"
-                  ],
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*"
-                },
-                {
-                  "Sid": "TheBoundaryIsNotOptional",
-                  "Effect": "Deny",
-                  "Action": "iam:CreateRole",
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
-                  "Condition": {
-                    "StringNotEquals": {
-                      "iam:PermissionsBoundary": "${CaytuBoundary}"
-                    }
-                  }
-                },
-                {
-                  "Sid": "ManageOurOwnInstanceProfiles",
-                  "Effect": "Allow",
-                  "Action": [
-                    "iam:UntagInstanceProfile",
-                    "iam:TagInstanceProfile",
-                    "iam:RemoveRoleFromInstanceProfile",
-                    "iam:GetInstanceProfile",
-                    "iam:DeleteInstanceProfile",
-                    "iam:CreateInstanceProfile",
-                    "iam:AddRoleToInstanceProfile"
-                  ],
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:instance-profile/caytu-*"
-                },
-                {
-                  "Sid": "ManageOurOwnPolicies",
-                  "Effect": "Allow",
-                  "Action": [
-                    "iam:UntagPolicy",
-                    "iam:TagPolicy",
-                    "iam:ListPolicyVersions",
-                    "iam:ListEntitiesForPolicy",
-                    "iam:GetPolicyVersion",
-                    "iam:GetPolicy",
-                    "iam:DeletePolicyVersion",
-                    "iam:DeletePolicy",
-                    "iam:CreatePolicyVersion",
-                    "iam:CreatePolicy"
-                  ],
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:policy/caytu-*"
-                },
-                {
-                  "Sid": "ReadManagedPolicies",
-                  "Effect": "Allow",
-                  "Action": [
-                    "iam:ListPolicyVersions",
-                    "iam:GetPolicyVersion",
-                    "iam:GetPolicy"
-                  ],
-                  "Resource": [
-                    "arn:aws:iam::aws:policy/*",
-                    "${CaytuBoundary}"
-                  ]
-                },
-                {
-                  "Sid": "AttachRolesToServices",
-                  "Effect": "Allow",
-                  "Action": "iam:PassRole",
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
-                  "Condition": {
-                    "StringEquals": {
-                      "iam:PassedToService": [
-                        "ec2.amazonaws.com",
-                        "credentials.iot.amazonaws.com"
-                      ]
-                    }
-                  }
-                },
-                {
-                  "Sid": "AttachTheDeviceCredentialRole",
-                  "Effect": "Allow",
-                  "Action": "iam:PassRole",
-                  "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*-iot-kvs"
-                },
-                {
-                  "Sid": "OurRegistry",
-                  "Effect": "Allow",
-                  "Action": [
-                    "ecr:UntagResource",
-                    "ecr:TagResource",
-                    "ecr:SetRepositoryPolicy",
-                    "ecr:PutLifecyclePolicy",
-                    "ecr:PutImageScanningConfiguration",
-                    "ecr:ListTagsForResource",
-                    "ecr:GetRepositoryPolicy",
-                    "ecr:GetLifecyclePolicy",
-                    "ecr:DescribeRepositories",
-                    "ecr:DeleteRepositoryPolicy",
-                    "ecr:DeleteRepository",
-                    "ecr:DeleteLifecyclePolicy",
-                    "ecr:CreateRepository"
-                  ],
-                  "Resource": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/caytu-*"
-                },
-                {
-                  "Sid": "DescribeRegistry",
-                  "Effect": "Allow",
-                  "Action": [
-                    "ecr:GetAuthorizationToken",
-                    "ecr:DescribeRegistry"
-                  ],
-                  "Resource": "*"
-                },
-                {
-                  "Sid": "BackupBucket",
-                  "Effect": "Allow",
-                  "Action": [
-                    "s3:PutLifecycleConfiguration",
-                    "s3:PutEncryptionConfiguration",
-                    "s3:PutBucketVersioning",
-                    "s3:PutBucketTagging",
-                    "s3:PutBucketPublicAccessBlock",
-                    "s3:PutBucketPolicy",
-                    "s3:ListBucket",
-                    "s3:GetReplicationConfiguration",
-                    "s3:GetLifecycleConfiguration",
-                    "s3:GetEncryptionConfiguration",
-                    "s3:GetBucketWebsite",
-                    "s3:GetBucketVersioning",
-                    "s3:GetBucketTagging",
-                    "s3:GetBucketRequestPayment",
-                    "s3:GetBucketPublicAccessBlock",
-                    "s3:GetBucketPolicy",
-                    "s3:GetBucketObjectLockConfiguration",
-                    "s3:GetBucketLogging",
-                    "s3:GetBucketLocation",
-                    "s3:GetBucketCORS",
-                    "s3:GetBucketAcl",
-                    "s3:GetAccelerateConfiguration",
-                    "s3:DeleteBucketPolicy",
-                    "s3:DeleteBucket",
-                    "s3:CreateBucket"
-                  ],
-                  "Resource": [
-                    "arn:aws:s3:::caytu-*/*",
-                    "arn:aws:s3:::caytu-*"
-                  ]
-                },
-                {
-                  "Sid": "DeviceAuth",
-                  "Effect": "Allow",
-                  "Action": [
-                    "iot:UpdateRoleAlias",
-                    "iot:UntagResource",
-                    "iot:TagResource",
-                    "iot:ListTagsForResource",
-                    "iot:ListPolicyVersions",
-                    "iot:GetPolicy",
-                    "iot:DescribeRoleAlias",
-                    "iot:DeleteRoleAlias",
-                    "iot:DeletePolicyVersion",
-                    "iot:DeletePolicy",
-                    "iot:CreateRoleAlias",
-                    "iot:CreatePolicy"
-                  ],
-                  "Resource": [
-                    "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:rolealias/caytu-*",
-                    "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:policy/caytu-*"
-                  ]
-                },
-                {
-                  "Sid": "IotEndpoint",
-                  "Effect": "Allow",
-                  "Action": "iot:DescribeEndpoint",
-                  "Resource": "*",
-                  "Condition": {
-                    "StringEquals": {
-                      "aws:RequestedRegion": "${AWS::Region}"
-                    }
-                  }
+              "Sid": "WhoAmI",
+              "Effect": "Allow",
+              "Action": "sts:GetCallerIdentity",
+              "Resource": "*"
+            },
+            {
+              "Sid": "InspectTheAccount",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:GetEbsEncryptionByDefault",
+                "ec2:GetEbsDefaultKmsKeyId",
+                "ec2:Describe*"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
                 }
+              }
+            },
+            {
+              "Sid": "RunTheMachine",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+                "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+                "ec2:UnmonitorInstances",
+                "ec2:TerminateInstances",
+                "ec2:StopInstances",
+                "ec2:StartInstances",
+                "ec2:RunInstances",
+                "ec2:RevokeSecurityGroupIngress",
+                "ec2:RevokeSecurityGroupEgress",
+                "ec2:ReleaseAddress",
+                "ec2:MonitorInstances",
+                "ec2:ModifyVolume",
+                "ec2:ModifySecurityGroupRules",
+                "ec2:ModifyInstanceMetadataOptions",
+                "ec2:ModifyInstanceAttribute",
+                "ec2:ImportKeyPair",
+                "ec2:DisassociateAddress",
+                "ec2:DetachVolume",
+                "ec2:DeleteVolume",
+                "ec2:DeleteTags",
+                "ec2:DeleteSecurityGroup",
+                "ec2:DeleteKeyPair",
+                "ec2:CreateVolume",
+                "ec2:CreateTags",
+                "ec2:CreateSecurityGroup",
+                "ec2:CreateKeyPair",
+                "ec2:AuthorizeSecurityGroupIngress",
+                "ec2:AuthorizeSecurityGroupEgress",
+                "ec2:AttachVolume",
+                "ec2:AssociateAddress",
+                "ec2:AllocateAddress"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "EncryptTheRootVolume",
+              "Effect": "Allow",
+              "Action": [
+                "kms:ReEncryptTo",
+                "kms:ReEncryptFrom",
+                "kms:GenerateDataKeyWithoutPlaintext",
+                "kms:DescribeKey",
+                "kms:Decrypt",
+                "kms:CreateGrant"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": [
+                    "ec2.${AWS::Region}.amazonaws.com",
+                    "s3.${AWS::Region}.amazonaws.com"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "ManageOurOwnRoles",
+              "Effect": "Allow",
+              "Action": [
+                "iam:UpdateAssumeRolePolicy",
+                "iam:UntagRole",
+                "iam:TagRole",
+                "iam:PutRolePolicy",
+                "iam:ListRoleTags",
+                "iam:ListRolePolicies",
+                "iam:ListInstanceProfilesForRole",
+                "iam:ListAttachedRolePolicies",
+                "iam:GetRolePolicy",
+                "iam:GetRole",
+                "iam:DetachRolePolicy",
+                "iam:DeleteRolePolicy",
+                "iam:DeleteRole",
+                "iam:CreateRole",
+                "iam:AttachRolePolicy"
+              ],
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*"
+            },
+            {
+              "Sid": "TheBoundaryIsNotOptional",
+              "Effect": "Deny",
+              "Action": "iam:CreateRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+              "Condition": {
+                "StringNotEquals": {
+                  "iam:PermissionsBoundary": "${CaytuBoundary}"
+                }
+              }
+            },
+            {
+              "Sid": "ManageOurOwnInstanceProfiles",
+              "Effect": "Allow",
+              "Action": [
+                "iam:UntagInstanceProfile",
+                "iam:TagInstanceProfile",
+                "iam:RemoveRoleFromInstanceProfile",
+                "iam:GetInstanceProfile",
+                "iam:DeleteInstanceProfile",
+                "iam:CreateInstanceProfile",
+                "iam:AddRoleToInstanceProfile"
+              ],
+              "Resource": "arn:aws:iam::${AWS::AccountId}:instance-profile/caytu-*"
+            },
+            {
+              "Sid": "ManageOurOwnPolicies",
+              "Effect": "Allow",
+              "Action": [
+                "iam:UntagPolicy",
+                "iam:TagPolicy",
+                "iam:ListPolicyVersions",
+                "iam:ListEntitiesForPolicy",
+                "iam:GetPolicyVersion",
+                "iam:GetPolicy",
+                "iam:DeletePolicyVersion",
+                "iam:DeletePolicy",
+                "iam:CreatePolicyVersion",
+                "iam:CreatePolicy"
+              ],
+              "Resource": "arn:aws:iam::${AWS::AccountId}:policy/caytu-*"
+            },
+            {
+              "Sid": "ReadManagedPolicies",
+              "Effect": "Allow",
+              "Action": [
+                "iam:ListPolicyVersions",
+                "iam:GetPolicyVersion",
+                "iam:GetPolicy"
+              ],
+              "Resource": [
+                "arn:aws:iam::aws:policy/*",
+                "${CaytuBoundary}"
               ]
+            },
+            {
+              "Sid": "AttachRolesToServices",
+              "Effect": "Allow",
+              "Action": "iam:PassRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": [
+                    "ec2.amazonaws.com",
+                    "credentials.iot.amazonaws.com"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "AttachTheDeviceCredentialRole",
+              "Effect": "Allow",
+              "Action": "iam:PassRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*-iot-kvs"
+            },
+            {
+              "Sid": "OurRegistry",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:UntagResource",
+                "ecr:TagResource",
+                "ecr:SetRepositoryPolicy",
+                "ecr:PutLifecyclePolicy",
+                "ecr:PutImageScanningConfiguration",
+                "ecr:ListTagsForResource",
+                "ecr:GetRepositoryPolicy",
+                "ecr:GetLifecyclePolicy",
+                "ecr:DescribeRepositories",
+                "ecr:DeleteRepositoryPolicy",
+                "ecr:DeleteRepository",
+                "ecr:DeleteLifecyclePolicy",
+                "ecr:CreateRepository"
+              ],
+              "Resource": "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/caytu-*"
+            },
+            {
+              "Sid": "DescribeRegistry",
+              "Effect": "Allow",
+              "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:DescribeRegistry"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "BackupBucket",
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutLifecycleConfiguration",
+                "s3:PutEncryptionConfiguration",
+                "s3:PutBucketVersioning",
+                "s3:PutBucketTagging",
+                "s3:PutBucketPublicAccessBlock",
+                "s3:PutBucketPolicy",
+                "s3:ListBucket",
+                "s3:GetReplicationConfiguration",
+                "s3:GetLifecycleConfiguration",
+                "s3:GetEncryptionConfiguration",
+                "s3:GetBucketWebsite",
+                "s3:GetBucketVersioning",
+                "s3:GetBucketTagging",
+                "s3:GetBucketRequestPayment",
+                "s3:GetBucketPublicAccessBlock",
+                "s3:GetBucketPolicy",
+                "s3:GetBucketObjectLockConfiguration",
+                "s3:GetBucketLogging",
+                "s3:GetBucketLocation",
+                "s3:GetBucketCORS",
+                "s3:GetBucketAcl",
+                "s3:GetAccelerateConfiguration",
+                "s3:DeleteBucketPolicy",
+                "s3:DeleteBucket",
+                "s3:CreateBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::caytu-*/*",
+                "arn:aws:s3:::caytu-*"
+              ]
+            },
+            {
+              "Sid": "DeviceAuth",
+              "Effect": "Allow",
+              "Action": [
+                "iot:UpdateRoleAlias",
+                "iot:UntagResource",
+                "iot:TagResource",
+                "iot:ListTagsForResource",
+                "iot:ListPolicyVersions",
+                "iot:GetPolicy",
+                "iot:DescribeRoleAlias",
+                "iot:DeleteRoleAlias",
+                "iot:DeletePolicyVersion",
+                "iot:DeletePolicy",
+                "iot:CreateRoleAlias",
+                "iot:CreatePolicy"
+              ],
+              "Resource": [
+                "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:rolealias/caytu-*",
+                "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:policy/caytu-*"
+              ]
+            },
+            {
+              "Sid": "IotEndpoint",
+              "Effect": "Allow",
+              "Action": "iot:DescribeEndpoint",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
             }
+          ]
+        }
+
+  # The cluster half is its own policy rather than more statements in the one
+  # above: together they run past the 6,144 character limit on a policy.
+  CaytuProvisionerClusterPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: WantsCluster
+    Properties:
+      ManagedPolicyName: !Sub "${RoleName}Cluster"
+      Description: The extra permissions an EKS cluster needs in this account.
+      PolicyDocument: !Sub |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "BuildTheClusterNetwork",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:CreateVpcEndpoint",
+                "ec2:CreateVpc",
+                "ec2:CreateSubnet",
+                "ec2:CreateRouteTable",
+                "ec2:CreateRoute",
+                "ec2:CreateNatGateway",
+                "ec2:CreateLaunchTemplateVersion",
+                "ec2:CreateLaunchTemplate",
+                "ec2:CreateInternetGateway",
+                "ec2:AllocateAddress"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "ChangeOnlyOurOwnNetwork",
+              "Effect": "Allow",
+              "Action": [
+                "ec2:ReleaseAddress",
+                "ec2:ModifyVpcAttribute",
+                "ec2:ModifySubnetAttribute",
+                "ec2:DisassociateRouteTable",
+                "ec2:DisassociateAddress",
+                "ec2:DetachInternetGateway",
+                "ec2:DeleteVpcEndpoint",
+                "ec2:DeleteVpc",
+                "ec2:DeleteSubnet",
+                "ec2:DeleteRouteTable",
+                "ec2:DeleteRoute",
+                "ec2:DeleteNatGateway",
+                "ec2:DeleteLaunchTemplateVersions",
+                "ec2:DeleteLaunchTemplate",
+                "ec2:DeleteInternetGateway",
+                "ec2:AttachInternetGateway",
+                "ec2:AssociateRouteTable",
+                "ec2:AssociateAddress"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}",
+                  "aws:ResourceTag/Project": "caytu-client"
+                }
+              }
+            },
+            {
+              "Sid": "RunTheCluster",
+              "Effect": "Allow",
+              "Action": [
+                "eks:UpdateNodegroupVersion",
+                "eks:UpdateNodegroupConfig",
+                "eks:UpdateClusterVersion",
+                "eks:UpdateClusterConfig",
+                "eks:UpdateAddon",
+                "eks:UntagResource",
+                "eks:TagResource",
+                "eks:ListTagsForResource",
+                "eks:DisassociateAccessPolicy",
+                "eks:DescribeNodegroup",
+                "eks:DescribeCluster",
+                "eks:DescribeAddon",
+                "eks:DescribeAccessEntry",
+                "eks:DeleteNodegroup",
+                "eks:DeleteCluster",
+                "eks:DeleteAddon",
+                "eks:DeleteAccessEntry",
+                "eks:CreateNodegroup",
+                "eks:CreateCluster",
+                "eks:CreateAddon",
+                "eks:CreateAccessEntry",
+                "eks:AssociateAccessPolicy"
+              ],
+              "Resource": [
+                "arn:aws:eks:*:${AWS::AccountId}:nodegroup/caytu-*/*",
+                "arn:aws:eks:*:${AWS::AccountId}:cluster/caytu-*",
+                "arn:aws:eks:*:${AWS::AccountId}:addon/caytu-*/*",
+                "arn:aws:eks:*:${AWS::AccountId}:access-entry/caytu-*/*"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "ReadTheClusterCatalogue",
+              "Effect": "Allow",
+              "Action": [
+                "eks:ListNodegroups",
+                "eks:ListClusters",
+                "eks:ListAssociatedAccessPolicies",
+                "eks:ListAddons",
+                "eks:ListAccessEntries",
+                "eks:DescribeAddonVersions"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "ClusterIdentityProvider",
+              "Effect": "Allow",
+              "Action": [
+                "iam:UpdateOpenIDConnectProviderThumbprint",
+                "iam:TagOpenIDConnectProvider",
+                "iam:GetOpenIDConnectProvider",
+                "iam:DeleteOpenIDConnectProvider",
+                "iam:CreateOpenIDConnectProvider"
+              ],
+              "Resource": "arn:aws:iam::${AWS::AccountId}:oidc-provider/oidc.eks.*.amazonaws.com/id/*"
+            },
+            {
+              "Sid": "ServiceLinkedRolesTheClusterNeeds",
+              "Effect": "Allow",
+              "Action": "iam:CreateServiceLinkedRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
+              "Condition": {
+                "StringEquals": {
+                  "iam:AWSServiceName": [
+                    "eks.amazonaws.com",
+                    "eks-nodegroup.amazonaws.com",
+                    "autoscaling.amazonaws.com",
+                    "elasticloadbalancing.amazonaws.com"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "ReadTheServiceLinkedRoles",
+              "Effect": "Allow",
+              "Action": "iam:GetRole",
+              "Resource": [
+                "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/*",
+                "arn:aws:iam::${AWS::AccountId}:role/AWSServiceRoleFor*"
+              ]
+            },
+            {
+              "Sid": "ClusterKeyAndScaling",
+              "Effect": "Allow",
+              "Action": [
+                "kms:UpdateAlias",
+                "kms:TagResource",
+                "kms:ScheduleKeyDeletion",
+                "kms:PutKeyPolicy",
+                "kms:ListResourceTags",
+                "kms:ListAliases",
+                "kms:GetKeyRotationStatus",
+                "kms:GetKeyPolicy",
+                "kms:EnableKeyRotation",
+                "kms:DeleteAlias",
+                "kms:CreateKey",
+                "kms:CreateAlias",
+                "autoscaling:UpdateAutoScalingGroup",
+                "autoscaling:Describe*",
+                "autoscaling:DeleteTags",
+                "autoscaling:CreateOrUpdateTags"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "CertificateForTheIngress",
+              "Effect": "Allow",
+              "Action": [
+                "acm:RequestCertificate",
+                "acm:ListTagsForCertificate",
+                "acm:ListCertificates",
+                "acm:DescribeCertificate",
+                "acm:DeleteCertificate",
+                "acm:AddTagsToCertificate"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "RemoveTheClusterBalancer",
+              "Effect": "Allow",
+              "Action": [
+                "elasticloadbalancing:DescribeLoadBalancers",
+                "elasticloadbalancing:DescribeTargetGroups",
+                "elasticloadbalancing:DescribeListeners",
+                "elasticloadbalancing:DeleteLoadBalancer",
+                "elasticloadbalancing:DeleteTargetGroup"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "ReadOurOwnRole",
+              "Effect": "Allow",
+              "Action": "iam:GetRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/CaytuProvisioner"
+            },
+            {
+              "Sid": "FindTheClusterLogGroup",
+              "Effect": "Allow",
+              "Action": "logs:DescribeLogGroups",
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            },
+            {
+              "Sid": "AttachRolesToTheCluster",
+              "Effect": "Allow",
+              "Action": "iam:PassRole",
+              "Resource": "arn:aws:iam::${AWS::AccountId}:role/caytu-*",
+              "Condition": {
+                "StringEquals": {
+                  "iam:PassedToService": [
+                    "eks.amazonaws.com",
+                    "eks-nodegroup.amazonaws.com",
+                    "ec2.amazonaws.com"
+                  ]
+                }
+              }
+            },
+            {
+              "Sid": "ClusterLogs",
+              "Effect": "Allow",
+              "Action": [
+                "logs:TagResource",
+                "logs:PutRetentionPolicy",
+                "logs:ListTagsForResource",
+                "logs:DeleteLogGroup",
+                "logs:CreateLogGroup"
+              ],
+              "Resource": "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/eks/caytu-*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:RequestedRegion": "${AWS::Region}"
+                }
+              }
+            }
+          ]
+        }
 
   # A role your own people assume to reach the cluster with kubectl.
   #

@@ -34,12 +34,13 @@ variable "agent_prefix" {
 }
 
 variable "public_objects" {
-  description = "Keys and prefixes that are meant to be world readable: the apt repository and the installer."
+  description = "Keys and prefixes that are meant to be world readable: the apt repository, the installer, and the customer access template."
   type        = list(string)
   default = [
     "dists/*",
     "pool/*",
     "dist/*",
+    "cloudformation/*",
     "caytu-archive-keyring.gpg",
     "install.sh",
     "setup.sh",
