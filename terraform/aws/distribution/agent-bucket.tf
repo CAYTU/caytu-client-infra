@@ -89,3 +89,16 @@ resource "aws_s3_bucket_policy" "agent" {
     )
   })
 }
+
+# The console reads the access template from the browser, so the object needs
+# CORS. Read only, and only for objects that are public anyway.
+resource "aws_s3_bucket_cors_configuration" "agent_bucket" {
+  bucket = var.agent_bucket
+
+  cors_rule {
+    allowed_methods = ["GET", "HEAD"]
+    allowed_origins = ["*"]
+    allowed_headers = ["*"]
+    max_age_seconds = 3600
+  }
+}
