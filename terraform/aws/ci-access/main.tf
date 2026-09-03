@@ -171,30 +171,6 @@ resource "aws_iam_role_policy" "pipeline" {
 }
 
 # -----------------------------------------------------------------------------
-# Publishing the access template
-# -----------------------------------------------------------------------------
-resource "aws_iam_role" "template_publish" {
-  name               = "caytu-client-infra-template-publish"
-  description        = "Assumed by Publish-access-template.yml. Writes the access template and nothing else."
-  assume_role_policy = data.aws_iam_policy_document.github_assume.json
-}
-
-data "aws_iam_policy_document" "template_publish" {
-  statement {
-    sid       = "PublishTheTemplate"
-    effect    = "Allow"
-    actions   = ["s3:PutObject", "s3:GetObject"]
-    resources = ["arn:${local.partition}:s3:::${var.agent_bucket}/${var.template_prefix}/*"]
-  }
-}
-
-resource "aws_iam_role_policy" "template_publish" {
-  name   = "publish"
-  role   = aws_iam_role.template_publish.id
-  policy = data.aws_iam_policy_document.template_publish.json
-}
-
-# -----------------------------------------------------------------------------
 # Publishing the agent
 # -----------------------------------------------------------------------------
 resource "aws_iam_role" "agent_publish" {
@@ -211,6 +187,17 @@ data "aws_iam_policy_document" "agent_publish" {
     resources = ["arn:${local.partition}:s3:::${var.agent_bucket}/${var.agent_prefix}/*"]
   }
 
+  # The customer access template, published by the same workflow family. A role
+  # of its own would need iam:CreateRole, which the applier is not granted, so
+  # this cannot be bootstrapped from CI. The role's description still says the
+  # agent only: changing it needs iam:UpdateRole, which the applier lacks too.
+  statement {
+    sid       = "PublishTheAccessTemplate"
+    effect    = "Allow"
+    actions   = ["s3:PutObject", "s3:GetObject"]
+    resources = ["arn:${local.partition}:s3:::${var.agent_bucket}/${var.template_prefix}/*"]
+  }
+
   statement {
     sid       = "SeeTheBucket"
     effect    = "Allow"
@@ -220,7 +207,7 @@ data "aws_iam_policy_document" "agent_publish" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["${var.agent_prefix}/*"]
+      values   = ["${var.agent_prefix}/*", "${var.template_prefix}/*"]
     }
   }
 }
@@ -296,7 +283,6 @@ data "aws_iam_policy_document" "ci_access" {
     resources = [
       aws_iam_role.provisioning.arn,
       aws_iam_role.agent_publish.arn,
-      aws_iam_role.template_publish.arn,
       aws_iam_role.ci_access.arn,
     ]
   }
