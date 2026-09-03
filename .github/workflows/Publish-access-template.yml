@@ -41,25 +41,25 @@ jobs:
       - name: Has this been bootstrapped
         id: preflight
         env:
-          ROLE: ${{ vars.AWS_TEMPLATE_PUBLISH_ROLE_ARN }}
+          ROLE: ${{ vars.AWS_AGENT_PUBLISH_ROLE_ARN }}
         run: |
           set -euo pipefail
           [ -n "$ROLE" ] && exit 0
           {
             echo "### Not bootstrapped yet"
             echo
-            echo "\`AWS_TEMPLATE_PUBLISH_ROLE_ARN\` is not set, so there is no role to assume."
+            echo "\`AWS_AGENT_PUBLISH_ROLE_ARN\` is not set, so there is no role to assume."
             echo "Apply \`terraform/aws/ci-access\` and set the variable from its"
-            echo "\`template_publish_role_arn\` output."
+            echo "\`agent_publish_role_arn\` output."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::AWS_TEMPLATE_PUBLISH_ROLE_ARN is not set. See the run summary."
+          echo "::error::AWS_AGENT_PUBLISH_ROLE_ARN is not set. See the run summary."
           exit 1
 
       # This role writes one S3 prefix and nothing else.
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_TEMPLATE_PUBLISH_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_AGENT_PUBLISH_ROLE_ARN }}
           role-session-name: publish-access-template
           aws-region: ${{ env.AWS_REGION }}
 
