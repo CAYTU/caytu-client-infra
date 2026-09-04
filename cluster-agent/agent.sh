@@ -344,7 +344,16 @@ take_a_shard_of_our_own() {
     log "could not store this deployment's shard, so the baked one stays"
     return 0
   }
-  log "took this deployment's own store shard"
+
+  # Now, not after sealing. The bootstrap that follows runs in a throwaway pod
+  # and picks the new shard up from the secret, while the workloads already
+  # running still hold the baked one in their environment. Sealing is what used
+  # to restart them, and it returns early when the console holds no secrets,
+  # which is every new cluster. The backend was then deriving a different key
+  # from the store it had just been given: keyring unreadable, every service
+  # failing closed, and nothing on the next pass to put it right.
+  kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+  log "took this deployment's own store shard and restarted the workloads"
 }
 
 # Make sure this deployment has an encrypted store, and that it holds what the

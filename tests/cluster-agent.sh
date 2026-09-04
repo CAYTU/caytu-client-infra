@@ -348,9 +348,15 @@ grep -q "secret-shard" "$API_LOG" && bad "re-keyed an older cluster" || ok "an o
 KUBECTL_OUT="$(jq -nc --arg w "$(b64 1)" '{data: {CAYTU_STORE_SHARD_WANTED: $w}}')"
 API_OUT='{"shard":"new-shard"}'
 take_a_shard_of_our_own
-declare -f take_a_shard_of_our_own | head -20; grep -q "instances/abc123/secret-shard" "$API_LOG" && ok "a new cluster asks for its own" || bad "never asked"
+grep -q "instances/abc123/secret-shard" "$API_LOG" && ok "a new cluster asks for its own" || bad "never asked"
 if grep -q "patch secret" "$KUBECTL_LOG" && grep -q "$(b64 new-shard)" "$KUBECTL_LOG"; then
   ok "and the shard is written into the secret"
+  # The pods already running hold the baked shard in their environment, and
+  # sealing, which used to be what restarted them, does not run on a cluster
+  # whose console holds no secrets.
+  grep -q "rollout restart deployment" "$KUBECTL_LOG" \
+    && ok "and the workloads are restarted onto it" \
+    || bad "left the workloads on the baked shard"
 else
   bad "the shard was not written"
 fi
