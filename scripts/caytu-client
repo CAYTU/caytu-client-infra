@@ -1985,6 +1985,24 @@ apply_instance_access() {
   # feeds the variable that exists rather than a second one beside it.
   local acme; acme="$(printf '%s' "$record" | jq -r '.access.acmeEmail // empty')"
   [[ -n "$acme" ]] && env_upsert "$env_file" CAYTU_LETSENCRYPT_EMAIL "$acme"
+
+  # And the scheme every public URL is built from, which has to agree with the
+  # TLS mode just written.
+  #
+  # The env file ships http, so a site that chose a certificate served TLS on
+  # 443 while the frontend had been told its API base was http://. The login
+  # then died in a CORS preflight redirect, which names neither cause. The ssl
+  # subcommands keep these two in step when an operator flips modes by hand;
+  # nothing did when the record decided it at provision.
+  local tls; tls="$(printf '%s' "$record" | jq -r '.access.tls // empty')"
+  case "$tls" in
+    # Nothing recorded, so nothing to reconcile: leave whatever the host has.
+    "") ;;
+    none) env_upsert "$env_file" CAYTU_SCHEME http
+          env_upsert "$env_file" CAYTU_WS_SCHEME ws ;;
+    *)    env_upsert "$env_file" CAYTU_SCHEME https
+          env_upsert "$env_file" CAYTU_WS_SCHEME wss ;;
+  esac
 }
 
 # The name clients use to reach this deployment.

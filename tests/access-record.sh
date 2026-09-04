@@ -96,6 +96,21 @@ check "the dns provider is written" "cloudflare" "$(env_get "$env_file" CAYTU_AC
 check "the contact address feeds the existing variable" \
   "ops@acme.example" "$(env_get "$env_file" CAYTU_LETSENCRYPT_EMAIL)"
 
+# The frontend builds every public URL from these, so a record that chose a
+# certificate and an env file still saying http is the mixed scheme that broke
+# login through a CORS preflight redirect.
+check "a record with TLS sets the scheme to match" \
+  "https" "$(env_get "$env_file" CAYTU_SCHEME)"
+check "and the websocket scheme with it" \
+  "wss" "$(env_get "$env_file" CAYTU_WS_SCHEME)"
+
+: > "$d/.env.plain"
+apply_instance_access "$d/.env.plain" \
+  '{"placement":"self-hosted","access":{"resolution":"ip","tls":"none","edge":"bundled-nginx","hostPlatform":"linux-docker"}}'
+check "a record with no TLS says http" \
+  "http" "$(env_get "$d/.env.plain" CAYTU_SCHEME)"
+check "and ws" "ws" "$(env_get "$d/.env.plain" CAYTU_WS_SCHEME)"
+
 check "the scheme comes back out of the env file" \
   "https" "$(printf 'CAYTU_ACCESS_TLS=byo\nCAYTU_ACCESS_EDGE=external-proxy\n' > "$d/.env.x"; access_scheme "$d/.env.x" lan.acme.internal)"
 
