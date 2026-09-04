@@ -49,20 +49,23 @@ mode() { printf 'CAYTU_ACCESS_TLS=%s\nCAYTU_ACCESS_EDGE=%s\n' "$1" "${2:-bundled
 
 : > "$env_file"
 check "hosting we run still defaults to http-01" \
-  "letsencrypt-http" "$(cert_mode_for "$env_file")"
+  "letsencrypt-http" "$(TARGET=cloud cert_mode_for "$env_file")"
 mode byo
 check "the record's mode wins" "byo" "$(cert_mode_for "$env_file")"
 
 # A record written before the platform recorded access at all. Defaulting these
 # to http-01 is what sent a LAN box to wait on a challenge it could never get.
-printf 'CAYTU_PLACEMENT=self-hosted\n' > "$env_file"
+: > "$env_file"
 check "an on-premise host with no record serves plain http" \
+  "none" "$(cert_mode_for "$env_file")"
+printf 'CAYTU_PLACEMENT=self-hosted\n' > "$env_file"
+check "and a record that only says where it lives still does" \
   "none" "$(cert_mode_for "$env_file")"
 check "the same record off-prem still falls back to self-signed" \
   "self-signed" "$(TARGET=cloud cert_mode_for "$env_file")"
 printf 'CAYTU_PLACEMENT=managed\n' > "$env_file"
 check "and hosting we run still falls back to http-01" \
-  "letsencrypt-http" "$(cert_mode_for "$env_file")"
+  "letsencrypt-http" "$(TARGET=cloud cert_mode_for "$env_file")"
 printf 'CAYTU_PLACEMENT=self-hosted\nCAYTU_ACCESS_TLS=byo\n' > "$env_file"
 check "an explicit choice still beats the fallback" "byo" "$(cert_mode_for "$env_file")"
 

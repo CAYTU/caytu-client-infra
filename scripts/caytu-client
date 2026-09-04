@@ -680,10 +680,14 @@ cert_mode_for() {
   local env_file=$1
   local tls; tls="$(env_get "$env_file" CAYTU_ACCESS_TLS || true)"
   if [[ -z "$tls" ]]; then
-    case "$(env_get "$env_file" CAYTU_PLACEMENT || true)" in
-      ""|managed) tls="letsencrypt-http" ;;
-      *) [[ "$TARGET" == "onprem" ]] && tls="none" || tls="self-signed" ;;
-    esac
+    if [[ "$TARGET" == "onprem" ]]; then
+      tls="none"
+    else
+      case "$(env_get "$env_file" CAYTU_PLACEMENT || true)" in
+        ""|managed) tls="letsencrypt-http" ;;
+        *) tls="self-signed" ;;
+      esac
+    fi
   fi
   printf '%s' "$tls"
 }
