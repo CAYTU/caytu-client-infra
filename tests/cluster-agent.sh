@@ -24,6 +24,7 @@ eval "$(sed -n '/^publish_platform_credentials()/,/^}/p' cluster-agent/agent.sh)
 eval "$(sed -n '/^trim_logs()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^MAX_RESULT_BYTES=/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
+eval "$(sed -n '/^take_a_shard_of_our_own()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
@@ -316,6 +317,49 @@ out="$(seed_the_store 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && ok "reports it did not finish" || bad "claimed success"
 grep -q -- "--seal-secrets" "$RUN_LOG" && bad "sealed without a keyring" || ok "did not try to seal"
 RUN_RC=0
+
+echo
+echo "a shard of this deployment's own"
+
+b64() { printf '%s' "$1" | base64 -w0; }
+
+# Earlier cases left a kubectl that answers nothing, and this reads the secret
+# before it decides.
+KUBECTL_RC=0; API_RC=0
+kubectl() { echo "$*" >> "$KUBECTL_LOG"; printf '%s' "$KUBECTL_OUT"; }
+
+# Already keyed. Taking another would make every sealed row unreadable.
+: > "$API_LOG"; : > "$KUBECTL_LOG"
+KUBECTL_OUT="$(jq -nc --arg k "$(b64 old-shard)" --arg w "$(b64 1)" \
+  '{data: {CAYTU_SECRET_STORE_KEY: $k, CAYTU_STORE_SHARD_WANTED: $w}}')"
+API_OUT='{"shard":"new-shard"}'
+take_a_shard_of_our_own
+grep -q "secret-shard" "$API_LOG" && bad "asked for a shard it already has" || ok "an existing key is left alone"
+grep -q "patch secret" "$KUBECTL_LOG" && bad "patched over the existing key" || ok "and nothing is patched"
+
+# No flag: a cluster built before this, which may already hold sealed rows.
+: > "$API_LOG"; : > "$KUBECTL_LOG"
+KUBECTL_OUT='{"data":{"JWT_SECRET":"eA=="}}'
+take_a_shard_of_our_own
+grep -q "secret-shard" "$API_LOG" && bad "re-keyed an older cluster" || ok "an older cluster keeps the baked shard"
+
+# A new cluster, which is the whole point.
+: > "$API_LOG"; : > "$KUBECTL_LOG"
+KUBECTL_OUT="$(jq -nc --arg w "$(b64 1)" '{data: {CAYTU_STORE_SHARD_WANTED: $w}}')"
+API_OUT='{"shard":"new-shard"}'
+take_a_shard_of_our_own
+declare -f take_a_shard_of_our_own | head -20; grep -q "instances/abc123/secret-shard" "$API_LOG" && ok "a new cluster asks for its own" || bad "never asked"
+if grep -q "patch secret" "$KUBECTL_LOG" && grep -q "$(b64 new-shard)" "$KUBECTL_LOG"; then
+  ok "and the shard is written into the secret"
+else
+  bad "the shard was not written"
+fi
+
+# 204: a record with no shard. The baked one still works, so not a fault.
+: > "$KUBECTL_LOG"
+API_OUT=''
+take_a_shard_of_our_own
+grep -q "patch secret" "$KUBECTL_LOG" && bad "wrote an empty shard" || ok "no shard on the record writes nothing"
 
 echo
 echo "$P passed, $F failed"

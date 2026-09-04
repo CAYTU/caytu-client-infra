@@ -424,6 +424,12 @@ jobs:
             echo "TURN_SECRET=$(openssl rand -hex 32)"
             echo "SIGNALING_AUTH_TOKEN=$(openssl rand -hex 32)"
             echo "JWT_SECRET=$(openssl rand -hex 64)"
+            # Says this cluster is new, so the agent may take a shard of its own
+            # for the secret store before anything is sealed with the one baked
+            # into the image. A cluster built before this has no flag and keeps
+            # the baked shard: changing the key under rows already sealed would
+            # make every one of them unreadable.
+            echo "CAYTU_STORE_SHARD_WANTED=1"
           } > "$overlay/secrets.env"
 
           # The version the record names, not whatever latest points at. A single
