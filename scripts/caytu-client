@@ -2262,6 +2262,11 @@ MAX_RESULT_BYTES=262144
 # Set by a command that leaves this host with nothing left to run. The agent
 # reads it after the result has been delivered, so the console still hears back.
 AGENT_STOP_REASON=""
+# How long the agent keeps polling after a teardown or a purge before deciding
+# there is nothing left. "Terminate, then destroy" is two commands queued
+# seconds apart by a person, and leaving between them is what orphans the second.
+AGENT_DRAIN_SECONDS="${CAYTU_AGENT_DRAIN_SECONDS:-60}"
+AGENT_QUIET_SINCE=""
 
 # How many commands the last poll actually ran. The agent will not stop on a
 # teardown while work is still arriving: "terminate, then destroy" queues a
@@ -2832,15 +2837,31 @@ instance_agent() {
     # after the teardown, so the agent drains first and only leaves on a pass
     # that found nothing. Otherwise it walks out on work it was sent.
     if [[ -n "$AGENT_STOP_REASON" ]]; then
+      # Quiet for a while, not quiet once.
+      #
+      # COMMANDS_EXECUTED is reset at the top of every poll, so "nothing ran
+      # this pass" was true three seconds after a teardown, and the agent left.
+      # The console queues the purge behind the teardown at human speed, ten or
+      # twenty seconds later, so a destroy from the console tore the stack down
+      # and then orphaned the purge: containers gone, volumes and images left,
+      # and a record stuck at "being removed" until somebody started an agent
+      # again. Draining for a minute of genuine silence covers that gap, and
+      # costs a minute on a host that really has finished.
       if [[ "$COMMANDS_EXECUTED" -gt 0 ]]; then
-        : # something ran this pass; check again before deciding to stop
-      elif [[ -t 1 ]]; then
-        ok "$AGENT_STOP_REASON done; nothing left to watch on this host"
-        return 0
-      else
+        AGENT_QUIET_SINCE=$SECONDS
+      elif [[ -z "${AGENT_QUIET_SINCE:-}" ]]; then
+        AGENT_QUIET_SINCE=$SECONDS
+      elif (( SECONDS - AGENT_QUIET_SINCE >= AGENT_DRAIN_SECONDS )); then
+        if [[ -t 1 ]]; then
+          ok "$AGENT_STOP_REASON done; nothing left to watch on this host"
+          return 0
+        fi
         info "$AGENT_STOP_REASON done; waiting for the next instance"
         AGENT_STOP_REASON=""
+        AGENT_QUIET_SINCE=""
       fi
+    else
+      AGENT_QUIET_SINCE=""
     fi
 
     [[ "$once" -eq 1 ]] && return 0

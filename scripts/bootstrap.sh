@@ -331,13 +331,19 @@ else
       sudo -u "$DEPLOY_USER" caytu-client -t onprem enroll "$CAYTU_CODE" \
         --platform "$CAYTU_PLATFORM"
 
+      # `agent up`, which is a container, not `instance agent`, which is a loop
+      # in this shell. The loop dies with the terminal that started it, and a
+      # deployment whose agent is gone answers nothing the console asks: no
+      # logs, no settings, no purge. This path is the one most hosts take.
       log "starting the agent, which brings the deployment up"
-      sudo -u "$DEPLOY_USER" caytu-client -t onprem instance agent
+      sudo -u "$DEPLOY_USER" caytu-client -t onprem agent up \
+        || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
+      log "the deployment comes up in the background; follow it with 'caytu-client -t onprem agent logs'"
       log "done"
     else
       log "done. Create a code in the console under Billings > Instances, then:"
       log "  caytu-client -t onprem enroll <CODE> --platform <your platform url>"
-      log "  caytu-client -t onprem instance agent"
+      log "  caytu-client -t onprem agent up"
       log ""
       log "Or re-run this with the code and it will do both:"
       log "  ... | sudo CAYTU_CODE=<CODE> CAYTU_PLATFORM=<url> bash"
