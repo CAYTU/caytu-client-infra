@@ -2443,6 +2443,22 @@ command_execute() {
           "$(jq -n --arg v "$tag" '{version:$v}')"
       fi
       ;;
+    restart)
+      # `compose restart`, not `up --force-recreate`: a restart brings the
+      # stack back as it is configured now, and re-reading the env file is what
+      # apply-settings is for. Conflating the two means a restart quietly
+      # applies an edit nobody chose to push yet.
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        printf 'this host runs a different deployment now' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+        skipped=1
+      elif compose restart > "$work/restart.log" 2>&1; then
+        printf 'the stack was restarted' > "$work/result"
+      else
+        status="failed"
+        error="the stack did not come back: $(compose_failure_reason "$work/restart.log")"
+      fi
+      ;;
     teardown)
       # Containers, not data. A billing decision is not consent to destroy a
       # customer's database, and `down --volumes` has no undo.

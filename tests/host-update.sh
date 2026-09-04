@@ -106,5 +106,23 @@ command_execute "$ENV" tok abc123 '{"id":"c5","type":"update","params":{}}'
 [ ! -s "$COMPOSE_LOG" ] && good "without touching the stack" || bad "ran compose anyway"
 
 echo
+echo "a restart brings the stack back without re-reading the env file"
+fresh
+command_execute "$ENV" tok abc123 '{"id":"c6","type":"restart","params":{}}'
+[ "$(status_of)" = "done" ] && good "reported done" || bad "reported $(status_of)"
+grep -q "compose restart" "$COMPOSE_LOG" && good "restarted" || bad "did not restart"
+# Applying settings is a separate command; a restart that re-read the env file
+# would push an edit nobody chose to push.
+grep -q "force-recreate" "$COMPOSE_LOG" && bad "recreated on the current env" || good "and does not recreate"
+
+echo
+echo "a restart for a deployment this host no longer runs changes nothing"
+fresh
+TARGETS_RC=1
+command_execute "$ENV" tok abc123 '{"id":"c7","type":"restart","params":{}}'
+[ ! -s "$COMPOSE_LOG" ] && good "the stack is untouched" || bad "restarted someone else's stack"
+TARGETS_RC=0
+
+echo
 echo "$P passed, $F failed"
 [ "$F" -eq 0 ]
