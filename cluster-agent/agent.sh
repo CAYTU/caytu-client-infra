@@ -666,6 +666,17 @@ run_command() {
       fi
       ;;
 
+    restart)
+      # Deployments only. mongo, redis and minio are StatefulSets holding the
+      # data, and rolling them to clear a wedged frontend is a much bigger
+      # promise than the operator made.
+      if kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1; then
+        result="every workload is restarting; the data is untouched"
+      else
+        status="failed"; error="the workloads could not be restarted"
+      fi
+      ;;
+
     teardown)
       # Workloads, not data. Scaled to zero rather than deleted, because the
       # volumes stay and a restore is a scale back up. Ending a billing

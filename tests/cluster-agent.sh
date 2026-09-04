@@ -99,6 +99,14 @@ grep -q "delete namespace" "$KUBECTL_LOG" && bad "teardown deleted the namespace
 grep -q "delete namespace" "$KUBECTL_LOG" && ok "purge removes everything" || bad "purge did not"
 
 echo
+echo "a restart rolls the workloads and leaves the data alone"
+: > "$KUBECTL_LOG"; KUBECTL_RC=0
+run_command c12 restart '{}'
+grep -q "rollout restart deployment" "$KUBECTL_LOG" && ok "the workloads roll" || bad "nothing rolled"
+grep -qE "rollout restart statefulset|delete|--replicas" "$KUBECTL_LOG" \
+  && bad "touched the data tier" || ok "mongo, redis and minio are left alone"
+
+echo
 echo "a command a cluster cannot do is refused, not ignored"
 : > "$API_LOG"; run_command c3 resend-invite '{}'
 grep -qE '"status": ?"failed"' "$API_LOG" && ok "reported failed" || bad "not reported as failed"
