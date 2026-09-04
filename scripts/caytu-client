@@ -2590,7 +2590,26 @@ forget_instance() {
 command_targets_current_stack() {
   local env_file=$1 instance_id=$2
   local current; current="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
-  [[ -n "$current" && "$current" == "$instance_id" ]]
+  [[ -n "$current" && "$current" == "$instance_id" ]] && return 0
+
+  # Nothing runs here now, and this host ran that deployment before.
+  #
+  # Teardown clears CAYTU_INSTANCE_ID, so "terminate, then destroy" always
+  # arrived as a purge for a deployment the host no longer claimed, and was
+  # skipped as somebody else's. Every on-premise destroy therefore stopped the
+  # containers and left the volumes and images behind, while the console waited
+  # for a removal that had already declined to happen.
+  #
+  # Still refused when this host has since been given another deployment: then
+  # CAYTU_INSTANCE_ID names that one, the ids differ, and the guard does the job
+  # it was written for.
+  if [[ -z "$current" ]]; then
+    local known; known="$(env_get "$env_file" CAYTU_KNOWN_INSTANCE_IDS || true)"
+    case " $known " in
+      *" $instance_id "*) return 0 ;;
+    esac
+  fi
+  return 1
 }
 
 # Claims and runs whatever is waiting, one per instance per pass. Silent when
