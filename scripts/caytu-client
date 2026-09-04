@@ -2171,7 +2171,9 @@ instance_provision() {
     instance_report "$env_file" "$id" \
       "$(jq -n --arg u "$deployment_url" --arg d "$(direct_url)" \
             --argjson h "$(host_profile)" --arg s "$seeded" \
+            --arg v "$(env_get "$env_file" IMAGE_TAG || true)" \
         '{status:"running", provisioningPercent:100, hostProfile:$h}
+         + (if $v == "" then {} else {version:$v} end)
          + (if $u == "" then {} else {publicUrl:$u} end)
          + (if $d == "" then {} else {directUrl:$d} end)
          + (if $s == "" then {lastError:"the secret store is not seeded, so this deployment cannot be licensed"} else {} end)')"
@@ -2363,9 +2365,11 @@ command_execute() {
         # values arrive through the env file, and a plain restart reuses the
         # container they are already baked into, so nothing would change and
         # this would report success having done nothing.
-        if ! compose up -d --force-recreate >/dev/null 2>&1; then
+        # Kept, not discarded: compose_failure_reason reads a log, and calling
+        # it with nothing to read reported the failure with no reason attached.
+        if ! compose up -d --force-recreate > "$work/up.log" 2>&1; then
           status="failed"
-          error="the settings were written but the stack did not come back: $(compose_failure_reason)"
+          error="the settings were written but the stack did not come back: $(compose_failure_reason "$work/up.log")"
         else
           printf '%s setting(s) written and the stack restarted on them' "$outcome" > "$work/result"
         fi
@@ -2374,6 +2378,51 @@ command_execute() {
         # a successful apply that changed nothing without saying so.
         skipped=1
         printf '%s' "$outcome" > "$work/result"
+      fi
+      ;;
+    update)
+      # Move this host onto another release.
+      #
+      # The version is written where every other part of the stack already reads
+      # it from, so a reboot or a later provision brings the same one back. The
+      # images are pulled before anything is recreated: a tag that cannot be
+      # pulled must leave the deployment exactly as it was, rather than stopping
+      # it and then discovering there is nothing to start.
+      local tag previous
+      tag="$(printf '%s' "$params" | jq -r '.tag // empty')"
+      previous="$(env_get "$env_file" IMAGE_TAG || true)"
+
+      if [[ -z "$tag" ]]; then
+        status="failed"; error="no version was named"
+      elif ! command_targets_current_stack "$env_file" "$instance_id"; then
+        # Same guard as teardown, for the same reason: this host may have moved
+        # on, and updating whatever is running now was not what was asked.
+        printf 'this host runs a different deployment now' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+        skipped=1
+      elif ! env_upsert "$env_file" IMAGE_TAG "$tag"; then
+        status="failed"; error="the version could not be written to this host's configuration"
+      elif ! compose pull > "$work/pull.log" 2>&1; then
+        [[ -n "$previous" ]] && env_upsert "$env_file" IMAGE_TAG "$previous"
+        status="failed"
+        error="$tag could not be pulled: $(compose_failure_reason "$work/pull.log"). The deployment was left running $previous."
+      elif ! compose up -d > "$work/up.log" 2>&1; then
+        local why; why="$(compose_failure_reason "$work/up.log")"
+        # Back to what was working before anything else is attempted. A host
+        # left on a version that will not start serves nothing, and nobody asked
+        # for that.
+        if [[ -n "$previous" ]]; then
+          env_upsert "$env_file" IMAGE_TAG "$previous"
+          compose up -d >/dev/null 2>&1 || true
+        fi
+        status="failed"
+        error="$tag did not come up: $why. Rolled back to ${previous:-the previous version}."
+      else
+        printf 'the stack is now running %s' "$tag" > "$work/result"
+        # Reported straight away: the record should say what is running as soon
+        # as it is true, rather than at whatever the next report happens to be.
+        instance_report "$env_file" "$instance_id" \
+          "$(jq -n --arg v "$tag" '{version:$v}')"
       fi
       ;;
     teardown)
