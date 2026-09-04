@@ -116,6 +116,57 @@ enrol() {
   log "enrolled, credential stored in $CREDENTIAL_SECRET"
 }
 
+# Add or replace keys in the deployment's secret, leaving the rest alone.
+#
+# A merge patch, not `create --dry-run | apply`. Apply prunes: the secret was
+# created by kustomize with every key in its last-applied annotation, so
+# applying a document holding one key deletes the others. That is the database
+# password, the JWT secret and the signalling token, gone, on a command whose
+# whole job was to write a licence id.
+secret_put() {
+  local patch; patch="$(jq -nc '$ARGS.positional as $kv
+    | reduce range(0; ($kv | length); 2) as $i ({}; .[$kv[$i]] = $kv[$i + 1])
+    | {stringData: .}' --args "$@")"
+  kubectl -n "$NAMESPACE" patch secret "$SECRET_NAME" --type=merge -p "$patch" \
+    >/dev/null 2>&1
+}
+
+# What the deployment needs to speak to the platform at all.
+#
+# The build writes a domain and a billings URL into the cluster's secret and
+# stops there, so the backend came up with no deployment id and no credential.
+# Everything that depends on those is then silently skipped: the licence it is
+# running on is never reported, usage is never metered, and the administrator's
+# claim link is never sent, which is why a cluster's invitation email never
+# arrived and its licence read "unknown" on the console for ever.
+#
+# The agent is the only thing in the cluster that holds both: the id it was
+# started with, and the credential it earned at enrolment.
+publish_platform_credentials() {
+  [[ -n "${TOKEN:-}" ]] || return 0
+
+  local current_id current_token
+  current_id="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.CAYTU_INSTANCE_ID}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  current_token="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.CAYTU_METERING_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+
+  # Written once and then left alone. These arrive through the environment, so
+  # rewriting them on every pass would roll the whole stack every pass.
+  [[ "$current_id" == "$INSTANCE_ID" && "$current_token" == "$TOKEN" ]] && return 0
+
+  if ! secret_put CAYTU_INSTANCE_ID "$INSTANCE_ID" CAYTU_METERING_TOKEN "$TOKEN"; then
+    log "could not write the platform credential into $SECRET_NAME"
+    return 1
+  fi
+
+  # The values reach a container through its environment, so a running pod
+  # cannot see them. Without this the write is real and has no effect until
+  # something else happens to restart the stack.
+  kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+  log "wrote the platform credential into $SECRET_NAME and restarted the workloads"
+}
+
 # ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
@@ -459,9 +510,7 @@ run_command() {
       lic="$(printf '%s' "$params" | jq -r '.licenseId // empty')"
       if [[ -z "$lic" ]]; then
         status="failed"; error="no licence was named"
-      elif ! kubectl -n "$NAMESPACE" create secret generic "$SECRET_NAME" \
-          --from-literal="CAYTU_LICENSE_ID=${lic}" --dry-run=client -o yaml \
-          | kubectl apply -f - >/dev/null 2>&1; then
+      elif ! secret_put CAYTU_LICENSE_ID "$lic"; then
         status="failed"; error="the licence could not be written to the cluster"
       elif ! kubectl -n "$NAMESPACE" rollout restart deployment/backend >/dev/null 2>&1; then
         status="failed"; error="the licence is configured but the backend did not restart"
@@ -548,6 +597,10 @@ if [[ -z "$TOKEN" ]]; then
 fi
 
 log "agent up for ${INSTANCE_ID} in ${NAMESPACE}"
+
+# Before anything else it might do: a backend with no credential cannot report
+# its licence, cannot meter, and cannot mail the administrator their link.
+publish_platform_credentials || true
 
 # Once, at startup. A deployment with an empty store cannot serve anything, so
 # this is not something to wait for a console command to trigger.

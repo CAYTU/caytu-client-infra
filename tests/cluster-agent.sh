@@ -19,6 +19,8 @@ log() { :; }
 eval "$(sed -n '/^pod_json()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^apply_settings()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^run_command()/,/^}/p'    cluster-agent/agent.sh)"
+eval "$(sed -n '/^secret_put()/,/^}/p'     cluster-agent/agent.sh)"
+eval "$(sed -n '/^publish_platform_credentials()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^trim_logs()/,/^}/p'      cluster-agent/agent.sh)"
 eval "$(sed -n '/^MAX_RESULT_BYTES=/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^seed_the_store()/,/^}/p'  cluster-agent/agent.sh)"
@@ -101,7 +103,7 @@ echo
 echo "a licence names itself and never carries its token"
 : > "$API_LOG"; : > "$KUBECTL_LOG"
 run_command c4 install-license '{"licenseId":"lic-9"}'
-grep -q "CAYTU_LICENSE_ID=lic-9" "$KUBECTL_LOG" && ok "the id is written" || bad "id not written"
+grep -q '"CAYTU_LICENSE_ID":"lic-9"' "$KUBECTL_LOG" && ok "the id is written" || bad "id not written"
 grep -q "rollout restart deployment/backend" "$KUBECTL_LOG" && ok "the backend is rolled" || bad "backend not rolled"
 
 echo
@@ -205,6 +207,46 @@ kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
 : > "$API_LOG"
 heartbeat
 grep -q "publicUrl" "$API_LOG" && bad "invented an address" || ok "says nothing"
+
+echo
+echo "the workloads are given the platform credential"
+# Without these the backend reports no licence, meters nothing, and never mails
+# the administrator their claim link.
+: > "$KUBECTL_LOG"
+INSTANCE_ID=abc123; TOKEN=tok-123
+kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
+publish_platform_credentials
+grep -q "patch secret caytu-secrets --type=merge" "$KUBECTL_LOG" \
+  && ok "written as a merge, not a replace" || bad "did not patch the secret"
+grep -q "CAYTU_INSTANCE_ID.*abc123" "$KUBECTL_LOG" && ok "the deployment id" || bad "no instance id"
+grep -q "CAYTU_METERING_TOKEN.*tok-123" "$KUBECTL_LOG" && ok "and the credential" || bad "no token"
+# They reach a container through its environment, so a running pod cannot see
+# them until it restarts.
+grep -q "rollout restart deployment" "$KUBECTL_LOG" && ok "and the stack is rolled" || bad "no restart"
+
+echo
+echo "and only once"
+: > "$KUBECTL_LOG"
+kubectl() {
+  echo "$*" >> "$KUBECTL_LOG"
+  case "$*" in
+    *CAYTU_INSTANCE_ID*) printf 'abc123' | base64 ;;
+    *CAYTU_METERING_TOKEN*) printf 'tok-123' | base64 ;;
+  esac
+}
+publish_platform_credentials
+grep -q "patch secret" "$KUBECTL_LOG" && bad "wrote them again" || ok "leaves a stack it already told"
+grep -q "rollout restart" "$KUBECTL_LOG" && bad "restarted the stack for nothing" || ok "and does not restart it"
+
+echo
+echo "a licence is written without taking the other secrets with it"
+: > "$KUBECTL_LOG"
+kubectl() { echo "$*" >> "$KUBECTL_LOG"; :; }
+run_command c11 install-license '{"licenseId":"lic-9"}'
+grep -q "patch secret caytu-secrets --type=merge" "$KUBECTL_LOG" \
+  && ok "merged in" || bad "still replaces the whole secret"
+grep -q "create secret generic" "$KUBECTL_LOG" \
+  && bad "apply would prune every other key" || ok "nothing is pruned"
 
 echo
 echo "a bootstrap that fails does not go on to seal"
