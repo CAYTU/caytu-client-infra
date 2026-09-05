@@ -211,6 +211,7 @@ jobs:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
           ASSUME_ROLE_ARN: ${{ steps.target.outputs.assume_role_arn }}
           ASSUME_EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+          WEB_IDENTITY_TOKEN_FILE: ${{ steps.target.outputs.web_identity_token_file }}
           PERMISSIONS_BOUNDARY: ${{ steps.target.outputs.permissions_boundary }}
           CERT_ARN: ${{ github.event.inputs.certificate_arn }}
           NODE_TYPE: ${{ github.event.inputs.node_instance_type }}
@@ -254,6 +255,7 @@ jobs:
             -var "name_prefix=caytu-${SUBDOMAIN}" \
             -var "assume_role_arn=${ASSUME_ROLE_ARN}" \
             -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}" \
+            -var "web_identity_token_file=${WEB_IDENTITY_TOKEN_FILE:-}" \
             -var "domain_name=${SUBDOMAIN}.caytu.link" \
             -var "route53_zone_name=caytu.link" \
             -var "certificate_arn=${CERT_ARN}" \
@@ -284,14 +286,27 @@ jobs:
         env:
           ROLE: ${{ steps.target.outputs.assume_role_arn }}
           EXTERNAL_ID: ${{ steps.target.outputs.external_id }}
+          TOKEN_FILE: ${{ steps.target.outputs.web_identity_token_file }}
         run: |
           set -euo pipefail
-          creds="$(aws sts assume-role \
-            --role-arn "$ROLE" \
-            --role-session-name "cluster-kubectl-${{ github.event.inputs.subdomain }}" \
-            --external-id "$EXTERNAL_ID" \
-            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
-            --output text)"
+          # Two ways in, and the account chose which when it created its stack.
+          # An external id means a role in our account is trusted; a token file
+          # means this run's own GitHub token is, and nothing standing is.
+          if [ -n "$TOKEN_FILE" ]; then
+            creds="$(aws sts assume-role-with-web-identity \
+              --role-arn "$ROLE" \
+              --role-session-name "cluster-kubectl-${{ github.event.inputs.subdomain }}" \
+              --web-identity-token "$(cat "$TOKEN_FILE")" \
+              --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+              --output text)"
+          else
+            creds="$(aws sts assume-role \
+              --role-arn "$ROLE" \
+              --role-session-name "cluster-kubectl-${{ github.event.inputs.subdomain }}" \
+              --external-id "$EXTERNAL_ID" \
+              --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+              --output text)"
+          fi
 
           read -r key secret token <<< "$creds"
           # Masked before they are written anywhere, or a later command that

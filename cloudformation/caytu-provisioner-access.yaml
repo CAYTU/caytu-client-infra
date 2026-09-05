@@ -10,6 +10,8 @@ Metadata:
     ParameterGroups:
       - Label: { default: From the Caytu console }
         Parameters: [ExternalId, CaytuPrincipalArn, Topology]
+      - Label: { default: How Caytu proves who it is }
+        Parameters: [TrustGitHubDirectly, GitHubOidcProvider, CaytuBuildSubjects]
 
 Parameters:
   ExternalId:
@@ -40,8 +42,42 @@ Parameters:
       identity provider and a key, so it grants more than one machine does.
       Choosing cluster here does not create one.
 
+  TrustGitHubDirectly:
+    Type: String
+    Default: "no"
+    AllowedValues: ["no", "yes"]
+    Description: >
+      no  - Caytu's build reaches this account through a role in Caytu's own
+            account, which is what the external id above protects.
+      yes - it presents a token GitHub mints for the one workflow run instead,
+            and nothing in Caytu's account can reach this one at all. The
+            external id is then unused.
+
+  GitHubOidcProvider:
+    Type: String
+    Default: create
+    AllowedValues: [create, already-there]
+    Description: >
+      An AWS account may hold only one identity provider for
+      token.actions.githubusercontent.com. Pick already-there if you run GitHub
+      Actions in this account, or the stack fails creating a second one. Ignored
+      unless the answer above is yes.
+
+  CaytuBuildSubjects:
+    Type: CommaDelimitedList
+    Default: "repo:CAYTU@90842686/caytu-client-infra@1308651827:ref:refs/heads/main,repo:CAYTU/caytu-client-infra:ref:refs/heads/main"
+    Description: >
+      Which GitHub workflow may assume the role: Caytu's provisioning repository,
+      on its main branch, and nothing else. Two entries because GitHub is moving
+      from the readable repository name to one with ids embedded, and which a
+      repository sends is not ours to choose.
+
 Conditions:
   WantsCluster: !Equals [!Ref Topology, cluster]
+  TrustsGitHub: !Equals [!Ref TrustGitHubDirectly, "yes"]
+  MakesOidcProvider: !And
+    - !Condition TrustsGitHub
+    - !Equals [!Ref GitHubOidcProvider, create]
 
 Resources:
   # The ceiling on every role Caytu creates here. The policy below refuses
@@ -228,6 +264,17 @@ Resources:
                         },
           - ""
 
+  # Only when this account has none. There may be one per URL, so a second
+  # would fail the stack on an account that already runs GitHub Actions.
+  CaytuGitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakesOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      # No longer checked by AWS for this issuer, and still required here.
+      ThumbprintList: ["6938fd4d98bab03faadb97b34396831e3780aea1"]
+
   CaytuProvisionerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -237,15 +284,33 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # Two conditions, not one. The account alone would let anything in
-          # Caytu's account assume this; the external id is what stops that.
-          - Effect: Allow
-            Principal:
-              AWS: !Ref CaytuPrincipalArn
-            Action: [sts:AssumeRole, sts:TagSession]
-            Condition:
-              StringEquals:
-                sts:ExternalId: !Ref ExternalId
+          # One way in, whichever was chosen. Keeping both would leave the one
+          # nobody picked open, which is the opposite of the point.
+          - !If
+            - TrustsGitHub
+            # A token minted for a single workflow run, and only for Caytu's
+            # provisioning repository on main. Nothing standing, so there is no
+            # credential in Caytu's account that reaches this one.
+            - Effect: Allow
+              Principal:
+                Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+              Action: sts:AssumeRoleWithWebIdentity
+              Condition:
+                StringEquals:
+                  "token.actions.githubusercontent.com:aud": sts.amazonaws.com
+                # The workflow and the branch, not just the repository. A token
+                # from any other branch would otherwise be enough.
+                StringLike:
+                  "token.actions.githubusercontent.com:sub": !Ref CaytuBuildSubjects
+            # Two conditions, not one. The account alone would let anything in
+            # Caytu's account assume this; the external id is what stops that.
+            - Effect: Allow
+              Principal:
+                AWS: !Ref CaytuPrincipalArn
+              Action: [sts:AssumeRole, sts:TagSession]
+              Condition:
+                StringEquals:
+                  sts:ExternalId: !Ref ExternalId
       # Managed, not inline: the two documents together are over the 10,240
       # character ceiling on a role's inline policies. Terraform does the same.
       ManagedPolicyArns: !If
