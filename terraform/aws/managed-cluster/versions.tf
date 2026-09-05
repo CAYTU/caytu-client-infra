@@ -41,9 +41,8 @@ provider "aws" {
   # profile there sends terraform looking for a file that is not present.
   profile = var.aws_profile != "" ? var.aws_profile : null
 
-  # Present only when the cluster belongs in someone else's account, and one of
-  # two shapes: a role in our account that theirs trusts, or a token GitHub
-  # minted for this run that theirs trusts directly. Never both.
+  # Only for someone else's account, and one shape or the other: a role of
+  # ours that theirs trusts, or a token minted for this run. Never both.
   dynamic "assume_role" {
     for_each = var.assume_role_arn != "" && var.web_identity_token_file == "" ? [1] : []
     content {

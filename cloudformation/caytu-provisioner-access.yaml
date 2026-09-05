@@ -264,8 +264,7 @@ Resources:
                         },
           - ""
 
-  # Only when this account has none. There may be one per URL, so a second
-  # would fail the stack on an account that already runs GitHub Actions.
+  # Only when this account has none: one per URL, so a second fails the stack.
   CaytuGitHubOidcProvider:
     Type: AWS::IAM::OIDCProvider
     Condition: MakesOidcProvider
@@ -284,13 +283,12 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # One way in, whichever was chosen. Keeping both would leave the one
-          # nobody picked open, which is the opposite of the point.
+          # One way in, whichever was chosen. Keeping both would leave the
+          # unused one open.
           - !If
             - TrustsGitHub
-            # A token minted for a single workflow run, and only for Caytu's
-            # provisioning repository on main. Nothing standing, so there is no
-            # credential in Caytu's account that reaches this one.
+            # A token minted for one workflow run. Nothing standing in
+            # Caytu's account reaches this one.
             - Effect: Allow
               Principal:
                 Federated: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
@@ -298,8 +296,7 @@ Resources:
               Condition:
                 StringEquals:
                   "token.actions.githubusercontent.com:aud": sts.amazonaws.com
-                # The workflow and the branch, not just the repository. A token
-                # from any other branch would otherwise be enough.
+                # The branch too: a token from any other would otherwise do.
                 StringLike:
                   "token.actions.githubusercontent.com:sub": !Ref CaytuBuildSubjects
             # Two conditions, not one. The account alone would let anything in

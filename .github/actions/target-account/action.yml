@@ -15,9 +15,8 @@ inputs:
     default: ""
   external_id:
     description: >
-      Value that account's trust policy demands, masked before anything can
-      print it. Empty for an account that trusts GitHub directly, where the
-      token's subject is what constrains the assume instead.
+      Value that account's trust policy demands, masked before anything prints
+      it. Empty means the account trusts GitHub directly.
     required: false
     default: ""
   permissions_boundary:
@@ -39,9 +38,7 @@ outputs:
     description: "False for a customer account, where Session Manager is the way in."
     value: ${{ steps.resolve.outputs.create_ssh_key_pair }}
   web_identity_token_file:
-    description: >
-      A token GitHub minted for this run, on disk, for an account that trusts
-      GitHub directly. Empty when the account trusts a role in our account.
+    description: "A token minted for this run, on disk. Empty on the external id path."
     value: ${{ steps.resolve.outputs.web_identity_token_file }}
 
 runs:
@@ -72,9 +69,8 @@ runs:
           exit 0
         fi
 
-        # An account that trusts GitHub directly has no external id to give: the
-        # token's subject is what its trust policy checks. So the id is the one
-        # value that may be absent, and its absence is the choice itself.
+        # The id is the one value that may be absent: no id means the account
+        # trusts GitHub directly, and its absence is the choice.
         for pair in "role_arn:$ROLE" "permissions_boundary:$BOUNDARY"; do
           if [ -z "${pair#*:}" ]; then
             echo "::error::account $TARGET was requested but ${pair%%:*} is empty. Re-check the access recorded on the deployment."
@@ -89,8 +85,7 @@ runs:
           *) echo "::error::the role is not in account $TARGET"; exit 1 ;;
         esac
 
-        # Minted here rather than in each workflow, so all three step into an
-        # account the same way. Good for the run and nothing longer.
+        # Minted here so all three workflows step in the same way.
         token_file=""
         if [ -z "$EXT" ]; then
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then

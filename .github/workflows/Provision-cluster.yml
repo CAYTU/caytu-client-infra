@@ -289,9 +289,7 @@ jobs:
           TOKEN_FILE: ${{ steps.target.outputs.web_identity_token_file }}
         run: |
           set -euo pipefail
-          # Two ways in, and the account chose which when it created its stack.
-          # An external id means a role in our account is trusted; a token file
-          # means this run's own GitHub token is, and nothing standing is.
+          # Whichever the account chose when it made its stack.
           if [ -n "$TOKEN_FILE" ]; then
             creds="$(aws sts assume-role-with-web-identity \
               --role-arn "$ROLE" \
