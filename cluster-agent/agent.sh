@@ -314,28 +314,22 @@ apply_settings() {
   echo "$count"
 }
 
-# A key of this deployment's own, rather than the one every image shares.
-#
-# The single machine path takes this at provision and writes it to the env file.
-# A cluster had nobody doing it, so every one of them sealed with the shard
-# baked into the backend image: one key across every customer.
-#
-# Only before the store exists. The key is what the rows are sealed with, so
-# changing it later makes all of them unreadable. Hence ahead of the bootstrap,
-# and only on a cluster the build marked as new.
+# A key of this deployment's own, not the shard baked into the image and shared
+# across customers. Only before the store exists: the key is what the rows are
+# sealed with, so changing it later makes all of them unreadable.
 take_a_shard_of_our_own() {
   local secret
   secret="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" -o json 2>/dev/null)" || return 0
 
   # Set already, and never replaced.
   printf '%s' "$secret" | jq -e '.data.CAYTU_SECRET_STORE_KEY' >/dev/null 2>&1 && return 0
-  # No flag means a cluster that predates this and may already hold sealed rows.
+  # No flag: an older cluster, which may already hold sealed rows.
   printf '%s' "$secret" | jq -e '.data.CAYTU_STORE_SHARD_WANTED' >/dev/null 2>&1 || return 0
 
   local shard
   shard="$(api GET "/api/billings/instances/${INSTANCE_ID}/secret-shard" \
     | jq -r '.shard // empty' 2>/dev/null || true)"
-  # 204 for a record with no shard, which is not a fault: the baked one works.
+  # 204 means no shard on the record; the baked one still works.
   [[ -n "$shard" ]] || return 0
 
   kubectl -n "$NAMESPACE" patch secret "$SECRET_NAME" --type merge -p "$(
