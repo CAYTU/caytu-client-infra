@@ -138,13 +138,10 @@ patches:
       # Perf: deregistration draining, sticky sessions for WS, health-check
       # config to fail fast, and access logs to S3 (optional).
       #
-      # No backend-protocol-version here, so the balancer speaks HTTP/1.1 to the
-      # pods. HTTP2 means cleartext h2c, which none of these serve: express,
-      # next and minio all answer HTTP/1.1 and nothing else. Setting it made
-      # every target group fail its health check at the protocol, before the
-      # path was ever read, and the balancer served 502 for the whole site.
-      # This is the hop inside the VPC; the browser still arrives over TLS, and
-      # routing.http2.enabled below is what gives it HTTP/2.
+      # No backend-protocol-version, so the balancer speaks HTTP/1.1 to the
+      # pods. HTTP2 there means cleartext h2c, which none of them serve, and
+      # every health check failed at the protocol. The browser side is
+      # unaffected: routing.http2.enabled below is what gives it HTTP/2.
       - op: add
         path: /metadata/annotations/alb.ingress.kubernetes.io~1target-group-attributes
         value: "deregistration_delay.timeout_seconds=30,stickiness.enabled=true,stickiness.type=lb_cookie,stickiness.lb_cookie.duration_seconds=3600"
@@ -167,21 +164,17 @@ patches:
       - op: remove
         path: /spec/rules/0/http/paths/2
 
-  # Health checks the two odd ones out actually answer.
-  #
   # One healthcheck-path on the ingress lands on every target group, and only
-  # backend and mqtt-streamer serve /health. The controller reads these same
-  # annotations off a Service and applies them to that service's target group,
-  # which is the only way to say something different per backend.
+  # backend and mqtt-streamer serve /health. The controller reads the same
+  # annotations off a Service, which is the only way to differ per backend.
   - target: { kind: Service, name: frontend }
     patch: |-
       - op: add
         path: /metadata/annotations
         value:
           alb.ingress.kubernetes.io/healthcheck-path: /api/health
-  # Both minio ports check the API port: 9001 is the console, which has no
-  # health endpoint of its own, and the question either one answers is whether
-  # this pod is alive.
+  # Both minio ports check 9000: the console has no health endpoint, and the
+  # question either answers is whether the pod is alive.
   - target: { kind: Service, name: minio }
     patch: |-
       - op: add

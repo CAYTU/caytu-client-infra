@@ -511,10 +511,8 @@ jobs:
 
           echo "${SUBDOMAIN}.caytu.link -> $host"
 
-      # A hostname in the ingress status only says a balancer exists. Whether
-      # anything answers behind it is a different question, and the one the
-      # person waiting actually asked. A build once went green on a site that
-      # served 502 from every path, because this step was not here.
+      # A hostname only says a balancer exists. A build once went green on a
+      # site that served 502 from every path.
       - name: Wait for the site to answer
         env:
           SUBDOMAIN: ${{ github.event.inputs.subdomain }}
@@ -524,9 +522,8 @@ jobs:
           code=000
           for _ in $(seq 1 30); do
             code="$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$url" || echo 000)"
-            # Whatever the application chose to send means it was reached: a
-            # login redirect and a 403 both count. Only the balancer's own
-            # errors and a dead connection do not.
+            # Anything the app sent means it was reached, a 403 included. Only
+            # the balancer's own errors and a dead connection do not.
             case "$code" in 000|50[0-9]) ;; *) break ;; esac
             sleep 10
           done
