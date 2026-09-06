@@ -177,32 +177,26 @@ ENVEOF
 
   # Keep a docker login to our registry alive on the host.
   #
-  # The agent runs in a docker:cli container with no aws, and alpine's aws-cli
-  # is broken on that image, so the login cannot happen where the pull is
-  # started. It happens here instead, and the agent container mounts the result.
-  # The token lasts twelve hours, hence the timer rather than a one-off at boot.
-  account="$(curl -fsS -m 5 http://169.254.169.254/latest/dynamic/instance-identity/document \
-    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
-      http://169.254.169.254/latest/api/token \
-      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null \
-    | grep -o '"accountId"[^,]*' | cut -d'"' -f4 || true)"
-  region="$(curl -fsS -m 5 http://169.254.169.254/latest/meta-data/placement/region \
-    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
-      http://169.254.169.254/latest/api/token \
-      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null || true)"
-
-  # Ours, not this machine's. The account read above is where the machine runs,
-  # which is our account for hosting we run and the customer's for a deployment
-  # in theirs. Logging in there authenticated against repositories that exist
-  # and are empty, while compose pulled from ours with no credentials at all,
-  # so every pull failed and the rest reported a cancelled context.
+  # The agent runs in a docker:cli container with the host's docker config
+  # mounted read-only, so the login has to happen out here where the file is
+  # writable. The token lasts twelve hours, hence the timer rather than a
+  # one-off at boot.
   #
-  # The region is ours for the same reason: ECR is regional and the images are
-  # in one region, whatever region the machine sits in.
+  # Unconditional: earlier this block was gated on IMDS returning an account
+  # (i.e. "this is an AWS host"), which meant customer-owned hardware never
+  # got the script at all and the agent's own in-container login couldn't
+  # persist against the read-only mount. The generated script handles both
+  # cases — AWS identity first, platform-issued credential otherwise —
+  # so gating it by machine type served no purpose.
+  #
+  # Registry + region are ours (image_account/image_region), not the host's:
+  # ECR is regional and the images live in one region, whatever region the
+  # machine sits in. Overridable via CAYTU_IMAGE_ACCOUNT / CAYTU_IMAGE_REGION
+  # for a fork that mirrors the images elsewhere.
   image_account="${CAYTU_IMAGE_ACCOUNT:-688544396352}"
   image_region="${CAYTU_IMAGE_REGION:-us-east-1}"
 
-  if [[ -n "$account" && -n "$region" ]]; then
+  if true; then
     registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
     region="$image_region"
 
