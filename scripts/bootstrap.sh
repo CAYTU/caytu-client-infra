@@ -177,30 +177,39 @@ ENVEOF
 
   # Keep a docker login to our registry alive on the host.
   #
-  # The agent runs in a docker:cli container with the host's docker config
-  # mounted read-only, so the login has to happen out here where the file is
-  # writable. The token lasts twelve hours, hence the timer rather than a
-  # one-off at boot.
+  # The agent runs in a docker:cli container with no aws, and alpine's aws-cli
+  # is broken on that image, so the login cannot happen where the pull is
+  # started. It happens here instead, and the agent container mounts the result.
+  # The token lasts twelve hours, hence the timer rather than a one-off at boot.
+  account="$(curl -fsS -m 5 http://169.254.169.254/latest/dynamic/instance-identity/document \
+    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
+      http://169.254.169.254/latest/api/token \
+      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null \
+    | grep -o '"accountId"[^,]*' | cut -d'"' -f4 || true)"
+  region="$(curl -fsS -m 5 http://169.254.169.254/latest/meta-data/placement/region \
+    -H "X-aws-ec2-metadata-token: $(curl -fsS -m 5 -X PUT \
+      http://169.254.169.254/latest/api/token \
+      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null)" 2>/dev/null || true)"
+
+  # Ours, not this machine's. The account read above is where the machine runs,
+  # which is our account for hosting we run and the customer's for a deployment
+  # in theirs. Logging in there authenticated against repositories that exist
+  # and are empty, while compose pulled from ours with no credentials at all,
+  # so every pull failed and the rest reported a cancelled context.
   #
-  # Unconditional: earlier this block was gated on IMDS returning an account
-  # (i.e. "this is an AWS host"), which meant customer-owned hardware never
-  # got the script at all and the agent's own in-container login couldn't
-  # persist against the read-only mount. The generated script handles both
-  # cases — AWS identity first, platform-issued credential otherwise —
-  # so gating it by machine type served no purpose.
-  #
-  # Registry + region are ours (image_account/image_region), not the host's:
-  # ECR is regional and the images live in one region, whatever region the
-  # machine sits in. Overridable via CAYTU_IMAGE_ACCOUNT / CAYTU_IMAGE_REGION
-  # for a fork that mirrors the images elsewhere.
+  # The region is ours for the same reason: ECR is regional and the images are
+  # in one region, whatever region the machine sits in.
   image_account="${CAYTU_IMAGE_ACCOUNT:-688544396352}"
   image_region="${CAYTU_IMAGE_REGION:-us-east-1}"
 
-  if true; then
-    registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
-    region="$image_region"
+  # Installed on every host, not just EC2. The script below tries the machine's
+  # own AWS identity first and falls back to a password the platform mints, and
+  # on-prem hardware has no identity at all: gating this on IMDS answering left
+  # exactly those hosts with no login and every pull failing.
+  registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
+  region="$image_region"
 
-    cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
+  cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
 #!/bin/bash
 # Refresh the docker login for our registry, tried in two ways.
 #
@@ -283,9 +292,9 @@ else
 fi
 exit 1
 ECRLOGIN
-    chmod +x /usr/local/bin/caytu-ecr-login
+  chmod +x /usr/local/bin/caytu-ecr-login
 
-    cat > /etc/systemd/system/caytu-ecr-login.service <<'ECRSVC'
+  cat > /etc/systemd/system/caytu-ecr-login.service <<'ECRSVC'
 [Unit]
 Description=Refresh the docker login for the Caytu registry
 After=network-online.target docker.service
@@ -296,9 +305,9 @@ Type=oneshot
 User=DEPLOY_USER_PLACEHOLDER
 ExecStart=/usr/local/bin/caytu-ecr-login
 ECRSVC
-    sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
+  sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
 
-    cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
+  cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
 [Unit]
 Description=Keep the Caytu registry login fresh
 
@@ -311,25 +320,37 @@ Persistent=true
 WantedBy=timers.target
 ECRTIMER
 
-    systemctl daemon-reload
-    systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
-    # Now, because provisioning starts within the minute and needs the login.
-    if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
-      log "logged in to $registry"
-    else
-      log "WARNING: could not log in to $registry; image pulls will be denied"
-    fi
+  systemctl daemon-reload
+  systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
+  # Now, because provisioning starts within the minute and needs the login.
+  if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
+    log "logged in to $registry"
+  else
+    log "WARNING: could not log in to $registry; image pulls will be denied"
   fi
 
   run_as() { sudo -u "$DEPLOY_USER" env \
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
 
+  # The agent container mounts this to get the registry login, and its default
+  # is /home/ubuntu, which only exists on a cloud image. On any other host the
+  # mount resolves to a directory docker invents, so the pull it starts has no
+  # credentials however well the host itself is logged in.
+  mkdir -p "/home/$DEPLOY_USER/.docker"
+  chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.docker"
+  env_line="CAYTU_DOCKER_CONFIG=/home/$DEPLOY_USER/.docker"
+
   if run_as caytu-client --target onprem init >/dev/null 2>&1 \
      && run_as caytu-client --target onprem enroll-self; then
     log "enrolled; starting the provisioner"
     # From here it is the path a customer's own host already follows: the agent
     # claims the deployment it was created for and provisions it.
+    onprem_env="$DEPLOY_DIR/compose/.env.onprem"
+    if [[ -f "$onprem_env" ]] && ! grep -q '^CAYTU_DOCKER_CONFIG=' "$onprem_env"; then
+      printf '%s\n' "$env_line" >> "$onprem_env"
+    fi
+
     run_as caytu-client --target onprem agent up \
       || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
   else
