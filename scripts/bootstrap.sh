@@ -238,49 +238,55 @@ if command -v aws >/dev/null 2>&1; then
   fi
 fi
 
-# Path 2: platform-minted credential. Requires enrolment, so the metering
-# token and platform url have to exist on this machine.
-platform_url=""
-[ -r /etc/caytu-client/deployment.env ] && . /etc/caytu-client/deployment.env
-platform_url="\${CAYTU_PLATFORM_URL%/}"
-
-token=""
+# Path 2: platform-minted credential, per configured target.
+#
+# A host can carry more than one target (\`.env.<target>\` per deployment it
+# manages). Each target has its own platform URL and metering token, and a
+# token minted for one platform is a 401 at another — so URL and token have
+# to be read together from the SAME env file. Any target's success is enough
+# for docker: it's the same shared Caytu ECR every deployment pulls from.
+attempted=0
 for env_file in "\$DEPLOY_DIR/compose"/.env.*; do
   [ -f "\$env_file" ] || continue
   case "\$env_file" in *.example) continue ;; esac
-  t="\$(sed -n 's/^CAYTU_METERING_TOKEN=\\(.*\\)\$/\\1/p' "\$env_file" | head -1)"
-  if [ -n "\$t" ]; then token="\$t"; break; fi
+
+  platform_url=""
+  for key in PLATFORM_HOST_URL CAYTU_PLATFORM_URL CAYTU_BILLINGS_URL; do
+    v="\$(sed -n "s|^\${key}=\\(.*\\)\$|\\1|p" "\$env_file" | head -1)"
+    if [ -n "\$v" ]; then platform_url="\${v%/}"; break; fi
+  done
+  token="\$(sed -n 's/^CAYTU_METERING_TOKEN=\\(.*\\)\$/\\1/p' "\$env_file" | head -1)"
+
+  if [ -z "\$platform_url" ] || [ -z "\$token" ]; then continue; fi
+  attempted=\$((attempted + 1))
+
+  body="\$(curl -fsS -m 20 \\
+    "\$platform_url/api/billings/instances/registry-credentials" \\
+    -H "Authorization: Bearer \$token" 2>/dev/null || true)"
+  [ -z "\$body" ] && { log "no response from \$platform_url"; continue; }
+
+  user="\$(printf '%s' "\$body" | jq -r '.username // empty')"
+  pass="\$(printf '%s' "\$body" | jq -r '.password // empty')"
+  host="\$(printf '%s' "\$body" | jq -r '.registry // empty')"
+  target_registry="\${host:-\$REGISTRY}"
+
+  if [ -z "\$user" ] || [ -z "\$pass" ]; then
+    log "\$platform_url returned no username/password"
+    continue
+  fi
+
+  if printf '%s' "\$pass" | docker login --username "\$user" --password-stdin "\$target_registry" >/dev/null 2>&1; then
+    log "logged in to \$target_registry (platform-issued via \$(basename "\$env_file"))"
+    exit 0
+  fi
+  log "docker login rejected the credential from \$platform_url"
 done
 
-if [ -z "\$platform_url" ] || [ -z "\$token" ]; then
+if [ "\$attempted" -eq 0 ]; then
   log "no aws identity and no enrolment token — nothing to try"
-  exit 1
+else
+  log "tried \$attempted target(s), none succeeded"
 fi
-
-body="\$(curl -fsS -m 20 \\
-  "\$platform_url/api/billings/instances/registry-credentials" \\
-  -H "Authorization: Bearer \$token" 2>/dev/null || true)"
-if [ -z "\$body" ]; then
-  log "platform did not return registry credentials"
-  exit 1
-fi
-
-user="\$(printf '%s' "\$body" | jq -r '.username // empty')"
-pass="\$(printf '%s' "\$body" | jq -r '.password // empty')"
-host="\$(printf '%s' "\$body" | jq -r '.registry // empty')"
-[ -n "\$host" ] && REGISTRY="\$host"
-
-if [ -z "\$user" ] || [ -z "\$pass" ]; then
-  log "platform response missing username/password"
-  exit 1
-fi
-
-if printf '%s' "\$pass" | docker login --username "\$user" --password-stdin "\$REGISTRY" >/dev/null 2>&1; then
-  log "logged in to \$REGISTRY (platform-issued)"
-  exit 0
-fi
-
-log "docker login rejected the platform credential"
 exit 1
 ECRLOGIN
     chmod +x /usr/local/bin/caytu-ecr-login
