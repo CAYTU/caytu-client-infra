@@ -204,3 +204,13 @@ variable "iam_permissions_boundary" {
   type        = string
   default     = ""
 }
+
+variable "web_identity_token_file" {
+  description = <<-EOT
+    A token GitHub minted for this run, on disk, for a customer account whose
+    role trusts GitHub directly rather than a role in ours. Set together with
+    assume_role_arn and instead of assume_role_external_id.
+  EOT
+  type        = string
+  default     = ""
+}

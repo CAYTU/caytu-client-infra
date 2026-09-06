@@ -14,7 +14,10 @@ inputs:
     required: false
     default: ""
   external_id:
-    description: "Value that account's trust policy demands. Masked before anything can print it."
+    description: >
+      Value that account's trust policy demands, masked before anything can
+      print it. Empty for an account that trusts GitHub directly, where the
+      token's subject is what constrains the assume instead.
     required: false
     default: ""
   permissions_boundary:
@@ -35,6 +38,11 @@ outputs:
   create_ssh_key_pair:
     description: "False for a customer account, where Session Manager is the way in."
     value: ${{ steps.resolve.outputs.create_ssh_key_pair }}
+  web_identity_token_file:
+    description: >
+      A token GitHub minted for this run, on disk, for an account that trusts
+      GitHub directly. Empty when the account trusts a role in our account.
+    value: ${{ steps.resolve.outputs.web_identity_token_file }}
 
 runs:
   using: composite
@@ -59,12 +67,15 @@ runs:
             echo "external_id="
             echo "permissions_boundary="
             echo "create_ssh_key_pair=true"
+            echo "web_identity_token_file="
           } >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
-        # All three, or the apply gets partway and fails on CreateRole.
-        for pair in "role_arn:$ROLE" "external_id:$EXT" "permissions_boundary:$BOUNDARY"; do
+        # An account that trusts GitHub directly has no external id to give: the
+        # token's subject is what its trust policy checks. So the id is the one
+        # value that may be absent, and its absence is the choice itself.
+        for pair in "role_arn:$ROLE" "permissions_boundary:$BOUNDARY"; do
           if [ -z "${pair#*:}" ]; then
             echo "::error::account $TARGET was requested but ${pair%%:*} is empty. Re-check the access recorded on the deployment."
             exit 1
@@ -78,10 +89,33 @@ runs:
           *) echo "::error::the role is not in account $TARGET"; exit 1 ;;
         esac
 
+        # Minted here rather than in each workflow, so all three step into an
+        # account the same way. Good for the run and nothing longer.
+        token_file=""
+        if [ -z "$EXT" ]; then
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::account $TARGET trusts GitHub directly, but this job cannot mint a token. The workflow needs permissions: id-token: write."
+            exit 1
+          fi
+          token="$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com" | jq -r '.value // empty')"
+          if [ -z "$token" ]; then
+            echo "::error::GitHub did not return a token for account $TARGET"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          token_file="$RUNNER_TEMP/web-identity-token"
+          printf '%s' "$token" > "$token_file"
+          chmod 600 "$token_file"
+          echo "Acting in $TARGET with a token minted for this run"
+        else
+          echo "Acting in $TARGET"
+        fi
+
         {
           echo "assume_role_arn=$ROLE"
           echo "external_id=$EXT"
           echo "permissions_boundary=$BOUNDARY"
           echo "create_ssh_key_pair=false"
+          echo "web_identity_token_file=$token_file"
         } >> "$GITHUB_OUTPUT"
-        echo "Acting in $TARGET"

@@ -41,13 +41,24 @@ provider "aws" {
   # profile there sends terraform looking for a file that is not present.
   profile = var.aws_profile != "" ? var.aws_profile : null
 
-  # Present only when the cluster belongs in someone else's account.
+  # Present only when the cluster belongs in someone else's account, and one of
+  # two shapes: a role in our account that theirs trusts, or a token GitHub
+  # minted for this run that theirs trusts directly. Never both.
   dynamic "assume_role" {
-    for_each = var.assume_role_arn != "" ? [1] : []
+    for_each = var.assume_role_arn != "" && var.web_identity_token_file == "" ? [1] : []
     content {
       role_arn     = var.assume_role_arn
       external_id  = var.assume_role_external_id != "" ? var.assume_role_external_id : null
       session_name = "caytu-provision-${var.name_prefix}"
+    }
+  }
+
+  dynamic "assume_role_with_web_identity" {
+    for_each = var.assume_role_arn != "" && var.web_identity_token_file != "" ? [1] : []
+    content {
+      role_arn                = var.assume_role_arn
+      web_identity_token_file = var.web_identity_token_file
+      session_name            = "caytu-provision-${var.name_prefix}"
     }
   }
 
