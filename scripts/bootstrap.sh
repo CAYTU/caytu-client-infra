@@ -208,11 +208,80 @@ ENVEOF
 
     cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
 #!/bin/bash
-# Refresh the docker login for our registry. No credential is stored: the
-# instance role grants the pull and the token it returns is short lived.
+# Refresh the docker login for our registry, tried in two ways.
+#
+#   1. The host's own AWS identity: an instance role on a hosted machine,
+#      or a machine-configured profile. When it works, no round trip.
+#   2. A short-lived password minted by the platform, using the enrolment
+#      token as authentication. This is the path that works on a customer's
+#      own hardware, where the host holds no AWS credential.
+#
+# The systemd timer that runs this used to call \`aws ecr get-login-password\`
+# unconditionally. Any host without a working AWS credential (customer boxes
+# provisioned with baked keys that were later rotated, on-prem hosts, etc.)
+# then had its docker login expire twelve hours after the last successful
+# refresh, and every pull started failing with "no basic auth credentials".
 set -e
-aws ecr get-login-password --region $region \
-  | docker login --username AWS --password-stdin $registry
+
+REGISTRY="$registry"
+REGION="$region"
+DEPLOY_DIR="$DEPLOY_DIR"
+
+log() { printf '[caytu-ecr-login] %s\n' "\$*"; }
+
+# Path 1: the host's own AWS identity.
+if command -v aws >/dev/null 2>&1; then
+  if aws ecr get-login-password --region "\$REGION" 2>/dev/null \\
+       | docker login --username AWS --password-stdin "\$REGISTRY" >/dev/null 2>&1; then
+    log "logged in to \$REGISTRY (aws identity)"
+    exit 0
+  fi
+fi
+
+# Path 2: platform-minted credential. Requires enrolment, so the metering
+# token and platform url have to exist on this machine.
+platform_url=""
+[ -r /etc/caytu-client/deployment.env ] && . /etc/caytu-client/deployment.env
+platform_url="\${CAYTU_PLATFORM_URL%/}"
+
+token=""
+for env_file in "\$DEPLOY_DIR/compose"/.env.*; do
+  [ -f "\$env_file" ] || continue
+  case "\$env_file" in *.example) continue ;; esac
+  t="\$(sed -n 's/^CAYTU_METERING_TOKEN=\\(.*\\)\$/\\1/p' "\$env_file" | head -1)"
+  if [ -n "\$t" ]; then token="\$t"; break; fi
+done
+
+if [ -z "\$platform_url" ] || [ -z "\$token" ]; then
+  log "no aws identity and no enrolment token — nothing to try"
+  exit 1
+fi
+
+body="\$(curl -fsS -m 20 \\
+  "\$platform_url/api/billings/instances/registry-credentials" \\
+  -H "Authorization: Bearer \$token" 2>/dev/null || true)"
+if [ -z "\$body" ]; then
+  log "platform did not return registry credentials"
+  exit 1
+fi
+
+user="\$(printf '%s' "\$body" | jq -r '.username // empty')"
+pass="\$(printf '%s' "\$body" | jq -r '.password // empty')"
+host="\$(printf '%s' "\$body" | jq -r '.registry // empty')"
+[ -n "\$host" ] && REGISTRY="\$host"
+
+if [ -z "\$user" ] || [ -z "\$pass" ]; then
+  log "platform response missing username/password"
+  exit 1
+fi
+
+if printf '%s' "\$pass" | docker login --username "\$user" --password-stdin "\$REGISTRY" >/dev/null 2>&1; then
+  log "logged in to \$REGISTRY (platform-issued)"
+  exit 0
+fi
+
+log "docker login rejected the platform credential"
+exit 1
 ECRLOGIN
     chmod +x /usr/local/bin/caytu-ecr-login
 
