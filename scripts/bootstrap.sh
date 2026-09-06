@@ -202,11 +202,14 @@ ENVEOF
   image_account="${CAYTU_IMAGE_ACCOUNT:-688544396352}"
   image_region="${CAYTU_IMAGE_REGION:-us-east-1}"
 
-  if [[ -n "$account" && -n "$region" ]]; then
-    registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
-    region="$image_region"
+  # Installed on every host, not just EC2. The script below tries the machine's
+  # own AWS identity first and falls back to a password the platform mints, and
+  # on-prem hardware has no identity at all: gating this on IMDS answering left
+  # exactly those hosts with no login and every pull failing.
+  registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
+  region="$image_region"
 
-    cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
+  cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
 #!/bin/bash
 # Refresh the docker login for our registry, tried in two ways.
 #
@@ -289,9 +292,9 @@ else
 fi
 exit 1
 ECRLOGIN
-    chmod +x /usr/local/bin/caytu-ecr-login
+  chmod +x /usr/local/bin/caytu-ecr-login
 
-    cat > /etc/systemd/system/caytu-ecr-login.service <<'ECRSVC'
+  cat > /etc/systemd/system/caytu-ecr-login.service <<'ECRSVC'
 [Unit]
 Description=Refresh the docker login for the Caytu registry
 After=network-online.target docker.service
@@ -302,9 +305,9 @@ Type=oneshot
 User=DEPLOY_USER_PLACEHOLDER
 ExecStart=/usr/local/bin/caytu-ecr-login
 ECRSVC
-    sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
+  sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
 
-    cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
+  cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
 [Unit]
 Description=Keep the Caytu registry login fresh
 
@@ -317,25 +320,37 @@ Persistent=true
 WantedBy=timers.target
 ECRTIMER
 
-    systemctl daemon-reload
-    systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
-    # Now, because provisioning starts within the minute and needs the login.
-    if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
-      log "logged in to $registry"
-    else
-      log "WARNING: could not log in to $registry; image pulls will be denied"
-    fi
+  systemctl daemon-reload
+  systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
+  # Now, because provisioning starts within the minute and needs the login.
+  if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
+    log "logged in to $registry"
+  else
+    log "WARNING: could not log in to $registry; image pulls will be denied"
   fi
 
   run_as() { sudo -u "$DEPLOY_USER" env \
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
 
+  # The agent container mounts this to get the registry login, and its default
+  # is /home/ubuntu, which only exists on a cloud image. On any other host the
+  # mount resolves to a directory docker invents, so the pull it starts has no
+  # credentials however well the host itself is logged in.
+  mkdir -p "/home/$DEPLOY_USER/.docker"
+  chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.docker"
+  env_line="CAYTU_DOCKER_CONFIG=/home/$DEPLOY_USER/.docker"
+
   if run_as caytu-client --target onprem init >/dev/null 2>&1 \
      && run_as caytu-client --target onprem enroll-self; then
     log "enrolled; starting the provisioner"
     # From here it is the path a customer's own host already follows: the agent
     # claims the deployment it was created for and provisions it.
+    onprem_env="$DEPLOY_DIR/compose/.env.onprem"
+    if [[ -f "$onprem_env" ]] && ! grep -q '^CAYTU_DOCKER_CONFIG=' "$onprem_env"; then
+      printf '%s\n' "$env_line" >> "$onprem_env"
+    fi
+
     run_as caytu-client --target onprem agent up \
       || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
   else
