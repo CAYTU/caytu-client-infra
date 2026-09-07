@@ -2451,6 +2451,12 @@ command_execute() {
       tag="$(printf '%s' "$params" | jq -r '.tag // empty')"
       previous="$(env_get "$env_file" IMAGE_TAG || true)"
 
+      # Refresh the registry token before the pull. ECR tokens last twelve
+      # hours, so a deployment idle longer than that fails its next update with
+      # "authorization token has expired" even when nothing else is wrong. Same
+      # reason provision refreshes before its own pull; see that call site.
+      ecr_login_if_needed "$(env_get "$env_file" IMAGE_REGISTRY || true)"
+
       if [[ -z "$tag" ]]; then
         status="failed"; error="no version was named"
       elif ! command_targets_current_stack "$env_file" "$instance_id"; then
