@@ -3064,6 +3064,15 @@ cmd_agent() {
   local env_file; env_file="$(env_file_for)"
   local docker_cfg; docker_cfg="$(resolve_docker_config "$env_file")"
 
+  # `agent up` writes the ECR login into a root-owned directory
+  # (/var/lib/caytu-client/.docker by default), so it has to run as root.
+  # `down` and `logs` don't touch the config, but they still poke docker.sock —
+  # the same requirement applies for consistency and to fail loud instead of
+  # letting compose spew a `permission denied` half-way through.
+  if [[ $EUID -ne 0 ]]; then
+    die "caytu-client agent $sub must be run as root (or via sudo)"
+  fi
+
   case "$sub" in
     up)
       # Materialise the docker config directory before compose can, so the
