@@ -35,6 +35,10 @@ services:
       - AGENT_INTERVAL=${AGENT_INTERVAL:-30}
       # Someone is watching a spinner when this one matters, so it ticks faster.
       - AGENT_COMMAND_INTERVAL=${AGENT_COMMAND_INTERVAL:-3}
+      # Resolved on the host by `caytu-client agent up`. Without it, primary_ip
+      # inside here returns the docker bridge address and the platform is told
+      # the deployment lives on 172.18.0.x.
+      - CAYTU_HOST_IP=${CAYTU_HOST_IP:-}
     volumes:
       # The repo, because the agent runs compose from it. Same path both
       # sides, so relative binds inside it mean the same thing.

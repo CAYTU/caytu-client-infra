@@ -1278,7 +1278,13 @@ not_enrolled() {
 # that resolved nowhere and had nothing else to offer.
 
 # The address that actually carries traffic off this box, not loopback.
+#
+# CAYTU_HOST_IP is the escape hatch for the agent container: `ip route` and
+# `hostname -I` inside it see the docker bridge (172.18.0.x), which is not
+# where clients reach the deployment. `cmd_agent up` computes the real address
+# on the host and passes it in.
 primary_ip() {
+  [[ -n "${CAYTU_HOST_IP:-}" ]] && { printf '%s' "$CAYTU_HOST_IP"; return 0; }
   local ip
   ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')"
   [[ -z "$ip" ]] && ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -3092,8 +3098,12 @@ cmd_agent() {
         DOCKER_CONFIG="$docker_cfg" ecr_login_if_needed "$registry" || true
       fi
 
+      # Resolved on the host, because inside the container `primary_ip` would
+      # see the docker bridge (172.18.0.x) instead of the NIC clients hit.
+      local host_ip; host_ip="$(primary_ip)"
+
       ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
-          CAYTU_DOCKER_CONFIG="$docker_cfg" \
+          CAYTU_DOCKER_CONFIG="$docker_cfg" CAYTU_HOST_IP="$host_ip" \
           docker compose --env-file "$env_file" "${files[@]}" up -d )
       ok "provisioner agent running; new instances for this org are picked up automatically"
       ;;
