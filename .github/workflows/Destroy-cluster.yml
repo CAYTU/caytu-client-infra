@@ -433,6 +433,41 @@ jobs:
             -var "assume_role_external_id=${ASSUME_EXTERNAL_ID}" \
             -var "web_identity_token_file=${WEB_IDENTITY_TOKEN_FILE:-}"
 
+      # The storage class says Retain, so the cluster going away leaves its
+      # volumes behind. That is right for a claim being deleted and wrong here:
+      # the deployment is gone and nothing will ever mount them again. Twelve
+      # test builds left 48 volumes and 2100 GB billing in one account.
+      - name: Remove the volumes the deployment leaves behind
+        if: always()
+        env:
+          REGION: ${{ github.event.inputs.region }}
+          INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+        run: |
+          set -uo pipefail
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+
+          # Only this deployment's, and only ones nothing is using. A volume
+          # still attached belongs to something the destroy has not finished
+          # with, and deleting it would be a different bug.
+          ids="$(aws ec2 describe-volumes --region "$REGION"             --filters "Name=status,Values=available"                       "Name=tag:caytu:deployment,Values=${INSTANCE_ID}"             --query 'Volumes[].VolumeId' --output text 2>/dev/null || true)"
+
+          if [ -z "$ids" ]; then
+            # Also the case for a deployment built before the tag existed.
+            echo "no volumes tagged for ${INSTANCE_ID}"
+            exit 0
+          fi
+
+          gone=0
+          for v in $(echo "$ids" | tr '\t' '\n'); do
+            [ -n "$v" ] || continue
+            if aws ec2 delete-volume --region "$REGION" --volume-id "$v" 2>/dev/null; then
+              gone=$((gone + 1))
+            else
+              echo "::warning::could not delete $v"
+            fi
+          done
+          echo "deleted $gone volume(s)"
+
       - name: Confirm nothing is left
         # Runs even when the destroy failed, which is exactly when it is worth
         # reading. Without this it is skipped on failure, so the one step that
