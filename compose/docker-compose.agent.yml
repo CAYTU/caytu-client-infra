@@ -42,9 +42,14 @@ services:
       # The host's docker, because that is what it provisions onto.
       - /var/run/docker.sock:/var/run/docker.sock
       # The host's registry login. The pull is started in here, so the credential
-      # has to be in here, but this container has no aws to fetch one: a timer on
-      # the host keeps it fresh instead.
-      - ${CAYTU_DOCKER_CONFIG:-/home/ubuntu/.docker}:/root/.docker:ro
+      # has to be in here, but this container has no aws to fetch one: `caytu-client
+      # agent up` and the systemd timer keep the file at this path fresh.
+      #
+      # /var/lib/caytu-client/.docker is a fixed path — no user's $HOME. It used
+      # to default to /home/ubuntu/.docker, which broke on every host without
+      # an `ubuntu` user (on-prem boxes, NVIDIA Spark, anything a customer
+      # builds by hand). Overridable with CAYTU_DOCKER_CONFIG.
+      - ${CAYTU_DOCKER_CONFIG:-/var/lib/caytu-client/.docker}:/root/.docker:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

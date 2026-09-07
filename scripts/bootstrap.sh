@@ -209,6 +209,13 @@ ENVEOF
   registry="$image_account.dkr.ecr.$image_region.amazonaws.com"
   region="$image_region"
 
+  # A fixed, user-independent path — matches the compose default. Writing to
+  # $DEPLOY_USER's $HOME used to bite non-ubuntu hosts (root-only boxes, NVIDIA
+  # Spark) whose compose mount then pointed at a directory nobody had touched.
+  docker_cfg=/var/lib/caytu-client/.docker
+  mkdir -p "$docker_cfg"
+  chmod 700 "$docker_cfg"
+
   cat > /usr/local/bin/caytu-ecr-login <<ECRLOGIN
 #!/bin/bash
 # Refresh the docker login for our registry, tried in two ways.
@@ -229,6 +236,10 @@ set -e
 REGISTRY="$registry"
 REGION="$region"
 DEPLOY_DIR="$DEPLOY_DIR"
+# Scopes every docker CLI call below to a fixed directory the agent container
+# mounts read-only. Not the caller's \$HOME/.docker: that varies with sudo/su
+# and never matches the compose mount on a non-ubuntu host.
+export DOCKER_CONFIG="$docker_cfg"
 
 log() { printf '[caytu-ecr-login] %s\n' "\$*"; }
 
@@ -302,10 +313,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=DEPLOY_USER_PLACEHOLDER
+# Runs as root: the script writes to /var/lib/caytu-client/.docker (root-owned)
+# and talks to /var/run/docker.sock. No $HOME hoisting to worry about.
 ExecStart=/usr/local/bin/caytu-ecr-login
 ECRSVC
-  sed -i "s/DEPLOY_USER_PLACEHOLDER/$DEPLOY_USER/" /etc/systemd/system/caytu-ecr-login.service
 
   cat > /etc/systemd/system/caytu-ecr-login.timer <<'ECRTIMER'
 [Unit]
@@ -323,7 +334,7 @@ ECRTIMER
   systemctl daemon-reload
   systemctl enable --now caytu-ecr-login.timer >/dev/null 2>&1 || true
   # Now, because provisioning starts within the minute and needs the login.
-  if sudo -u "$DEPLOY_USER" /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
+  if /usr/local/bin/caytu-ecr-login >/dev/null 2>&1; then
     log "logged in to $registry"
   else
     log "WARNING: could not log in to $registry; image pulls will be denied"

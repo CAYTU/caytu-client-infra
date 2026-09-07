@@ -129,6 +129,32 @@ env_file_for() {
   printf '%s/.env.%s' "$COMPOSE_DIR" "$t"
 }
 
+# Where docker's config.json for this host lives.
+#
+# The agent container mounts this path read-only at /root/.docker so it can
+# reuse the login the host maintains — it cannot log in itself against a
+# read-only mount.
+#
+# A fixed path, not the caller's $HOME/.docker: the invoking account is
+# whatever combination of `sudo`, `sudo -E`, `sudo su`, or direct root login
+# the operator used, and no two of those resolve HOME the same way. A
+# well-known path avoids that class of "why did compose mount /home/ubuntu?"
+# question. Compose's own default in docker-compose.agent.yml matches.
+#
+# Overridable via CAYTU_DOCKER_CONFIG in the target's env file for the rare
+# host that keeps docker config elsewhere.
+DEFAULT_DOCKER_CONFIG=/var/lib/caytu-client/.docker
+
+resolve_docker_config() {
+  local env_file=${1:-$(env_file_for)}
+  local from_env
+  from_env="$(env_get "$env_file" CAYTU_DOCKER_CONFIG 2>/dev/null || true)"
+  if [[ -n "$from_env" ]]; then
+    printf '%s' "$from_env"; return
+  fi
+  printf '%s' "$DEFAULT_DOCKER_CONFIG"
+}
+
 # Which targets are actually set up on this machine.
 configured_targets() {
   local f name
@@ -3036,20 +3062,41 @@ cmd_agent() {
   local sub=${1:-}; shift || true
   local -a files=(-f "$COMPOSE_DIR/docker-compose.agent.yml")
   local env_file; env_file="$(env_file_for)"
+  local docker_cfg; docker_cfg="$(resolve_docker_config "$env_file")"
 
   case "$sub" in
     up)
+      # Materialise the docker config directory before compose can, so the
+      # mount source is the real one the host writes to. Compose would create
+      # the source path if missing, but with root ownership and no auth, which
+      # is what left every pull failing with "no basic auth credentials".
+      mkdir -p "$docker_cfg"
+
+      # Prime the registry login from the host. The agent container mounts
+      # $docker_cfg read-only, so it cannot run `docker login` itself — its
+      # attempt errors silently and the pull then blames a missing token.
+      # DOCKER_CONFIG scopes the login and any test pull to this directory
+      # only, so we do not touch the caller's own $HOME/.docker.
+      local registry
+      registry="$(env_get "$env_file" IMAGE_REGISTRY 2>/dev/null || true)"
+      if [[ -n "$registry" ]]; then
+        DOCKER_CONFIG="$docker_cfg" ecr_login_if_needed "$registry" || true
+      fi
+
       ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          CAYTU_DOCKER_CONFIG="$docker_cfg" \
           docker compose --env-file "$env_file" "${files[@]}" up -d )
       ok "provisioner agent running; new instances for this org are picked up automatically"
       ;;
     down)
       ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          CAYTU_DOCKER_CONFIG="$docker_cfg" \
           docker compose --env-file "$env_file" "${files[@]}" down )
       ok "provisioner agent stopped"
       ;;
     logs)
       ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
+          CAYTU_DOCKER_CONFIG="$docker_cfg" \
           docker compose --env-file "$env_file" "${files[@]}" logs -f )
       ;;
     *) die "usage: caytu-client [-t TARGET] agent <up|down|logs>" ;;
