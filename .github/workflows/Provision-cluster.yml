@@ -405,6 +405,7 @@ jobs:
           PLATFORM_URL: ${{ github.event.inputs.platform_url }}
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
+          REPORT_TOKEN: ${{ github.event.inputs.report_token }}
         run: |
           set -euo pipefail
           # Ours, never the cluster's. terraform output ecr_registry reports
@@ -425,6 +426,22 @@ jobs:
           {
             echo "CAYTU_DOMAIN=${SUBDOMAIN}.caytu.link"
             echo "CAYTU_BILLINGS_URL=${PLATFORM_URL}"
+            # The k8s ecr-refresh CronJob (in base/ecr-pull-secret.yaml) reads
+            # these to mint a docker-registry Secret every four hours: without
+            # them the initial imagePullSecret expires after twelve hours and
+            # every pod goes ImagePullBackOff. CAYTU_METERING_TOKEN is the same
+            # host credential a single-instance deployment gets from
+            # `caytu-client enroll-self`; a cluster has no host to enrol so the
+            # provisioning run's report_token is what stands in.
+            #
+            # TODO(#cluster-enrolment): report_token is minted for the length
+            # of this workflow run and may expire before the cluster is
+            # long-lived. A dedicated `POST /api/billings/instances/:id/enrol`
+            # (returning a rotating token like enroll-self does) would remove
+            # the ceiling. Until then, running the workflow again refreshes
+            # the token by re-writing this Secret.
+            echo "CAYTU_METERING_TOKEN=${REPORT_TOKEN}"
+            echo "CAYTU_PLATFORM_URL=${PLATFORM_URL}"
             # Two names for one credential. MinIO takes MINIO_ROOT_*; the
             # backend authenticates with MINIO_ACCESS_KEY and
             # MINIO_SECRET_KEY. Generating only the first pair is what made the

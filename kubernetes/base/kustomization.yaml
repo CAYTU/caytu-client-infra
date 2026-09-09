@@ -19,6 +19,21 @@ resources:
   - mqtt-streamer.yaml
   - coturn.yaml
   - ingress.yaml
+  - ecr-pull-secret.yaml
+
+# Every app Deployment pulls from Caytu's ECR. kubelet needs a docker-registry
+# Secret; caytu-ecr-pull-secret is refreshed by the Job + CronJob in
+# ecr-pull-secret.yaml. Inject the pull secret into every Deployment here
+# instead of copy-pasting it into each manifest — a new deployment only has to
+# name itself in `resources:` above to pick it up.
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: caytu-ecr-pull-secret
 
 # Overlays supply the secrets via secretGenerator (envs: [secrets.env]).
 # The base intentionally has none — trying to apply the base alone will fail

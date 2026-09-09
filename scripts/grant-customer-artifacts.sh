@@ -16,6 +16,11 @@ ACCOUNT="${1:?usage: grant-customer-artifacts.sh <aws-account-id> [prefix]}"
 PREFIX="${2:-caytu-}"
 BUCKET="${AGENT_BUCKET:-caytu-cli}"
 AGENT_PREFIX="${AGENT_PREFIX:-agent}"
+# Our images are in one region regardless of which region the customer's cluster
+# lives in. Without this, the aws CLI inherited the workflow's AWS_REGION
+# (whatever the customer picked) and every ECR call hit an empty registry:
+# `RepositoryNotFoundException` on the first repo, then exit 254.
+REGION="${CAYTU_IMAGE_REGION:-us-east-1}"
 # The cluster agent is in this list because a cluster's nodes pull it like any
 # other workload. Without it the agent pod is the one thing that cannot start,
 # and a cluster comes up unreachable.
@@ -32,9 +37,9 @@ sid="Customer${ACCOUNT}"
 cond="$(jq -nc --arg p "arn:aws:iam::${ACCOUNT}:role/${PREFIX}*" \
   '{ArnLike: {"aws:PrincipalArn": $p}}')"
 
-echo "granting ${ACCOUNT} pull on our registries"
+echo "granting ${ACCOUNT} pull on our registries in ${REGION}"
 for repo in $REPOS; do
-  current="$(aws ecr get-repository-policy --repository-name "$repo" \
+  current="$(aws ecr get-repository-policy --region "$REGION" --repository-name "$repo" \
     --query policyText --output text 2>/dev/null || echo '{"Version":"2012-10-17","Statement":[]}')"
 
   updated="$(printf '%s' "$current" | jq -c \
@@ -53,7 +58,7 @@ for repo in $REPOS; do
         Condition: $cond
       }] | .Version = "2012-10-17"')"
 
-  aws ecr set-repository-policy --repository-name "$repo" \
+  aws ecr set-repository-policy --region "$REGION" --repository-name "$repo" \
     --policy-text "$updated" >/dev/null
   echo "  $repo"
 done
