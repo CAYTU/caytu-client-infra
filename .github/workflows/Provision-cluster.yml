@@ -197,10 +197,16 @@ jobs:
             echo "::error::TF_STATE_BUCKET is not set. Building without remote state would create a cluster nothing can find again."
             exit 1
           }
+          # The state bucket is ours, in our region — not the customer's. Used
+          # to pass ${{ inputs.region }} here, which is the region the cluster
+          # is being built in; S3 answered with a 301 to the bucket's actual
+          # region and terraform init died on "requested bucket from X, actual
+          # location Y". CAYTU_IMAGE_REGION is the same region the ECR
+          # registry sits in, and both live in our account together.
           terraform init -input=false \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="key=instances/${{ github.event.inputs.instance_id }}/cluster.tfstate" \
-            -backend-config="region=${{ github.event.inputs.region }}" \
+            -backend-config="region=${CAYTU_IMAGE_REGION}" \
             ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
             -backend-config="encrypt=true"
 

@@ -51,6 +51,9 @@ permissions:
 
 env:
   TF_DIR: terraform/aws/managed-cluster
+  # Our region — where the tfstate bucket and image registry live. Not the
+  # customer's region (which comes from the workflow inputs).
+  CAYTU_IMAGE_REGION: us-east-1
 
 jobs:
   destroy:
@@ -99,10 +102,13 @@ jobs:
             echo "::error::TF_STATE_BUCKET is not set. Without the state there is nothing to destroy from, and the cluster would be left running."
             exit 1
           }
+          # The state bucket is ours, in our region — not the customer's. See
+          # the same fix in Provision-cluster.yml for why ${REGION} (the
+          # cluster's region) breaks with S3's 301-to-actual-region.
           terraform init -input=false \
             -backend-config="bucket=${TF_STATE_BUCKET}" \
             -backend-config="key=instances/${INSTANCE_ID}/cluster.tfstate" \
-            -backend-config="region=${REGION}" \
+            -backend-config="region=${CAYTU_IMAGE_REGION}" \
             ${TF_STATE_TABLE:+-backend-config="dynamodb_table=${TF_STATE_TABLE}"} \
             -backend-config="encrypt=true"
 
