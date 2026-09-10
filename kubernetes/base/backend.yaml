@@ -78,6 +78,13 @@ spec:
               valueFrom: { configMapKeyRef: { name: caytu-shared,  key: CAYTU_SCHEME } }
             - name: MINIO_PUBLIC_URL
               value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)/minio-api"
+            # Where the invite/setup/reset-password emails point. Unset
+            # defaults to http://localhost:3000 (in
+            # backend/src/config/environment.ts), so every link mailed to a
+            # user landed on the operator's own machine. Derived from the
+            # ingress URL, same as the MINIO one above.
+            - name: CLIENT_URL
+              value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)"
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits:   { cpu: "2",    memory: "2Gi"   }
