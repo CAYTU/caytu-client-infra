@@ -144,18 +144,37 @@ secret_put() {
 # started with, and the credential it earned at enrolment.
 publish_platform_credentials() {
   [[ -n "${TOKEN:-}" ]] || return 0
+  # ORGANIZATION_ID is set alongside TOKEN by enrol() and by stored_org() at
+  # startup; treat missing here as a bug worth surfacing rather than a partial
+  # write. Backend checks all three together (see license auto-provisioning);
+  # writing two of them and skipping the third leaves the backend in the same
+  # "off" state as writing nothing, so no half-measure.
+  [[ -n "${ORGANIZATION_ID:-}" ]] || {
+    log "no organization id in scope; refusing to write platform credentials without it"
+    return 1
+  }
 
-  local current_id current_token
+  local current_id current_token current_org
   current_id="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
     -o jsonpath='{.data.CAYTU_INSTANCE_ID}' 2>/dev/null | base64 -d 2>/dev/null || true)"
   current_token="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
     -o jsonpath='{.data.CAYTU_METERING_TOKEN}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  # CAYTU_ORGANIZATION_ID was added after the original two: an older cluster
+  # will have INSTANCE_ID and METERING_TOKEN in place but no org, and the
+  # backend's licence auto-provisioning is off in that state — the condition
+  # below deliberately fails and we write all three, unblocking the backfill
+  # on the next reconciliation pass.
+  current_org="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.CAYTU_ORGANIZATION_ID}' 2>/dev/null | base64 -d 2>/dev/null || true)"
 
   # Written once and then left alone. These arrive through the environment, so
   # rewriting them on every pass would roll the whole stack every pass.
-  [[ "$current_id" == "$INSTANCE_ID" && "$current_token" == "$TOKEN" ]] && return 0
+  [[ "$current_id" == "$INSTANCE_ID" && "$current_token" == "$TOKEN" \
+     && "$current_org" == "$ORGANIZATION_ID" ]] && return 0
 
-  if ! secret_put CAYTU_INSTANCE_ID "$INSTANCE_ID" CAYTU_METERING_TOKEN "$TOKEN"; then
+  if ! secret_put CAYTU_INSTANCE_ID "$INSTANCE_ID" \
+                  CAYTU_METERING_TOKEN "$TOKEN" \
+                  CAYTU_ORGANIZATION_ID "$ORGANIZATION_ID"; then
     log "could not write the platform credential into $SECRET_NAME"
     return 1
   fi
@@ -165,6 +184,76 @@ publish_platform_credentials() {
   # something else happens to restart the stack.
   kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
   log "wrote the platform credential into $SECRET_NAME and restarted the workloads"
+}
+
+# ---------------------------------------------------------------------------
+# The first sign-in.
+#
+# The backend creates a superAdmin from INITIAL_ADMIN_EMAIL on boot, and until
+# that variable is present the deployment is running but nobody can sign in:
+# no invite is sent, no set-password link is generated, the console shows a
+# green cluster and the customer has no way in. The single-machine agent
+# reads the administrator's email off the instance record and writes it into
+# the env file at provisioning. A cluster had nobody doing it, so every
+# cluster came up empty and stayed that way until an operator noticed.
+#
+# Runs after publish_platform_credentials so a first-boot rollout carries
+# both changes: the credentials come from local state and cannot fail, so
+# they never leave the stack half-configured, and the admin identity depends
+# on a platform call, so a platform outage skips it rather than blocking
+# them together.
+# ---------------------------------------------------------------------------
+
+publish_admin_identity() {
+  [[ -n "${TOKEN:-}" ]] || return 0
+
+  # Scoped to the enrolled identity's organisation, so a sibling deployment's
+  # administrator cannot silently be adopted onto this cluster.
+  local body record admin_email admin_name
+  body="$(api GET "/api/billings/instances")" || {
+    log "the platform did not answer; INITIAL_ADMIN_EMAIL not published"
+    return 1
+  }
+  record="$(printf '%s' "$body" | jq -c --arg id "$INSTANCE_ID" \
+    '.instances[]? | select(.id == $id)')"
+  [[ -n "$record" ]] || {
+    log "instance ${INSTANCE_ID} not returned by the platform"
+    return 1
+  }
+  admin_email="$(printf '%s' "$record" | jq -r '.adminEmail // empty')"
+  admin_name="$(printf '%s' "$record" | jq -r '.adminName // empty')"
+
+  # An instance with no administrator on the record is a platform-side
+  # misconfiguration. Retrying here will not fix it, and the backend cannot
+  # create a first account without it, so it is worth surfacing loudly rather
+  # than looping in silence.
+  [[ -n "$admin_email" ]] || {
+    log "instance record has no adminEmail; the backend has no first account to create"
+    return 1
+  }
+
+  local current_email current_name
+  current_email="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.INITIAL_ADMIN_EMAIL}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  current_name="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+    -o jsonpath='{.data.INITIAL_ADMIN_NAME}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+  [[ "$current_email" == "$admin_email" && "$current_name" == "$admin_name" ]] && return 0
+
+  # INITIAL_ADMIN_NAME is optional — the backend derives one from the email
+  # local-part when it is missing — so pass it only when the record has it,
+  # rather than writing an empty value that would overwrite a good one.
+  local args=(INITIAL_ADMIN_EMAIL "$admin_email")
+  [[ -n "$admin_name" ]] && args+=(INITIAL_ADMIN_NAME "$admin_name")
+  if ! secret_put "${args[@]}"; then
+    log "could not write INITIAL_ADMIN_EMAIL into $SECRET_NAME"
+    return 1
+  fi
+
+  # Only the backend reads INITIAL_ADMIN_EMAIL. Restarting the whole stack
+  # for a value one container consumes would double-roll everything
+  # publish_platform_credentials just moved.
+  kubectl -n "$NAMESPACE" rollout restart deployment/backend >/dev/null 2>&1 || true
+  log "wrote INITIAL_ADMIN_EMAIL=${admin_email} into $SECRET_NAME and restarted the backend"
 }
 
 # ---------------------------------------------------------------------------
@@ -768,6 +857,13 @@ log "agent up for ${INSTANCE_ID} in ${NAMESPACE}"
 # Before anything else it might do: a backend with no credential cannot report
 # its licence, cannot meter, and cannot mail the administrator their link.
 publish_platform_credentials || true
+
+# Reads the administrator's email off the instance record and writes it into
+# the deployment's Secret. Runs after publish_platform_credentials so a
+# platform outage here does not block the credentials that only need local
+# state, and so a first-boot rollout only tries the admin publish once the
+# credentials are already in place.
+publish_admin_identity || true
 
 # Once, at startup. A deployment with an empty store cannot serve anything, so
 # this is not something to wait for a console command to trigger.

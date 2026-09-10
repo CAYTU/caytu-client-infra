@@ -55,6 +55,19 @@ spec:
               value: "3000"
             - name: HOSTNAME
               value: "0.0.0.0"
+            # Server-side auth checks (requireAuth on pages like /space and
+            # /profile) fetch /api/auth/profile from Next.js' server runtime
+            # inside this pod. Reaching the backend through the public
+            # hostname would loop back through the ingress; skipping it stays
+            # in-cluster and keeps the cookie flowing. Without this the SSR
+            # fetch falls back to http://localhost:5000 inside the frontend
+            # container, the profile fetch fails, every SSR-authed page thinks
+            # the user is logged out, and the middleware bounces the browser
+            # from /space to /auth/login to /dashboard/overview — a redirect
+            # loop that looks like a role check but is really a missing env
+            # var.
+            - name: API_URL
+              value: "http://backend:5000"
             # layout.tsx renders these into a <script id="__RUNTIME_CONFIG__">
             # tag the browser reads on first paint. Without them the SSR falls
             # back to http://localhost:5000 and every fetch/websocket/minio URL

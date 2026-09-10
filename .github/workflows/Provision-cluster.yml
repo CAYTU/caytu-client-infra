@@ -438,6 +438,20 @@ jobs:
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
           REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+          # Caytu-managed SMTP for the invite/setup email that every new
+          # cluster's first admin needs. Non-secret pieces (host, port, user,
+          # from-address, from-name) are baked here so the deployment boots
+          # with a working provider; the password is delivered separately
+          # through the platform's S3 defaults path and sealed into the
+          # store. Missing values default the workflow to empty, which is
+          # the same as before this change — the cluster comes up without
+          # email, and the operator sets it in the Space UI.
+          CAYTU_SMTP_HOST: ${{ secrets.CAYTU_SMTP_HOST }}
+          CAYTU_SMTP_PORT: ${{ secrets.CAYTU_SMTP_PORT }}
+          CAYTU_SMTP_SECURE: ${{ secrets.CAYTU_SMTP_SECURE }}
+          CAYTU_SMTP_USER: ${{ secrets.CAYTU_SMTP_USER }}
+          CAYTU_SMTP_FROM: ${{ secrets.CAYTU_SMTP_FROM }}
+          CAYTU_SMTP_FROM_NAME: ${{ secrets.CAYTU_SMTP_FROM_NAME }}
         run: |
           set -euo pipefail
           # Ours, never the cluster's. terraform output ecr_registry reports
@@ -488,6 +502,23 @@ jobs:
             echo "TURN_SECRET=$(openssl rand -hex 32)"
             echo "SIGNALING_AUTH_TOKEN=$(openssl rand -hex 32)"
             echo "JWT_SECRET=$(openssl rand -hex 64)"
+            # The non-secret half of the Caytu-managed SMTP config, so the
+            # backend can compose an SMTP client at boot. EMAIL_PASSWORD is
+            # NOT here on purpose: it comes from the platform's S3 defaults
+            # and gets sealed into the deployment's encrypted store by the
+            # cluster-agent's seed_the_store call. Every line is written even
+            # when empty so an operator can grep the file and see what the
+            # cluster booted with; empty values mean the backend falls back
+            # to whatever SystemSettings.emailProvider the operator sets in
+            # the Space UI.
+            echo "EMAIL_HOST=${CAYTU_SMTP_HOST:-}"
+            echo "EMAIL_PORT=${CAYTU_SMTP_PORT:-587}"
+            # false for STARTTLS on port 587 (the common case), true only when
+            # the server accepts TLS at connect time — usually port 465.
+            echo "EMAIL_SECURE=${CAYTU_SMTP_SECURE:-false}"
+            echo "EMAIL_USER=${CAYTU_SMTP_USER:-}"
+            echo "EMAIL_FROM=${CAYTU_SMTP_FROM:-}"
+            echo "EMAIL_FROM_NAME=${CAYTU_SMTP_FROM_NAME:-Caytu}"
             # Says this cluster is new, so the agent may take a shard of its own
             # for the secret store before anything is sealed with the one baked
             # into the image. A cluster built before this has no flag and keeps
