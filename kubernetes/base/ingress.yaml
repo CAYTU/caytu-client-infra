@@ -31,10 +31,18 @@ spec:
             pathType: Prefix
             backend:
               service: { name: mqtt-streamer, port: { number: 8000 } }
+          # Public objects and presigned URLs — through minio-proxy, which
+          # strips the /minio-api prefix so MinIO sees the canonical
+          # /<bucket>/<key> path SigV4 was signed against. Routing to MinIO
+          # directly would break under any ingress class that cannot rewrite
+          # paths (AWS ALB, GCE) and every genuine request would 403.
           - path: /minio-api
             pathType: Prefix
             backend:
-              service: { name: minio,         port: { number: 9000 } }
+              service: { name: minio-proxy,   port: { number: 80   } }
+          # The MinIO console is a browser SPA of its own and does NOT sit
+          # under a proxy — it expects the path it is served at to be its
+          # own root and rewrites lose its assets.
           - path: /minio-console
             pathType: Prefix
             backend:

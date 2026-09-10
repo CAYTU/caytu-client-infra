@@ -18,6 +18,7 @@ resources:
   - gstreamer-recorder.yaml
   - mqtt-streamer.yaml
   - coturn.yaml
+  - minio-proxy.yaml
   - ingress.yaml
   - ecr-pull-secret.yaml
 

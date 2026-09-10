@@ -63,6 +63,21 @@ spec:
           env:
             - name: PORT
               value: "5000"
+            # The URL the browser reaches MinIO on. Presigned object URLs are
+            # signed with this host in them; unset defaults to
+            # http://localhost:9000 (in backend/src/config/environment.ts), so
+            # every logo and every recording link the frontend loaded pointed
+            # at the operator's own machine and the browser refused it.
+            # Derived from the ingress URL so a rename of CAYTU_DOMAIN moves
+            # this too. Uses the same $(VAR) interpolation as frontend.yaml —
+            # CAYTU_SCHEME/CAYTU_DOMAIN come in through envFrom above and are
+            # declared explicitly here so K8s substitution can resolve them.
+            - name: CAYTU_DOMAIN
+              valueFrom: { secretKeyRef:    { name: caytu-secrets, key: CAYTU_DOMAIN } }
+            - name: CAYTU_SCHEME
+              valueFrom: { configMapKeyRef: { name: caytu-shared,  key: CAYTU_SCHEME } }
+            - name: MINIO_PUBLIC_URL
+              value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)/minio-api"
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits:   { cpu: "2",    memory: "2Gi"   }

@@ -1,0 +1,142 @@
+# A tiny nginx sitting between the ingress and MinIO, whose only job is to
+# strip the `/minio-api` path prefix before forwarding.
+#
+# Why: the backend generates URLs of the form
+# `https://<host>/minio-api/<bucket>/<key>` (public buckets) and presigned
+# equivalents (private buckets, `?X-Amz-Signature=…`). MinIO knows nothing
+# about the prefix — it expects `/<bucket>/<key>` on the wire, and rejects
+# anything else as an unknown bucket. The docker-compose deployment strips
+# the prefix in the front-nginx location block, and the k8s self-managed
+# overlay's nginx-ingress can strip via the rewrite-target annotation. AWS
+# ALB and the GCE ingress controller cannot rewrite paths at all, which is
+# where a genuine customer request for a `logo/x.png` came back 403 and cost
+# an afternoon to trace.
+#
+# One reverse-proxy pod for every overlay is simpler than three different
+# strip mechanisms (one per ingress class), and it makes the base ingress
+# rule the same everywhere. It also keeps SigV4 intact: nginx preserves the
+# incoming `Host` header, so the canonical string MinIO computes matches
+# what the signing client signed against.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minio-proxy
+data:
+  nginx.conf: |
+    worker_processes 1;
+    events { worker_connections 1024; }
+    http {
+      # Presigned URLs are large enough that the default 1k header buffer
+      # overflows on requests with cookies attached; MinIO uploads/downloads
+      # can also exceed the default 1m body limit.
+      client_max_body_size 100m;
+      large_client_header_buffers 4 16k;
+      proxy_http_version 1.1;
+      proxy_connect_timeout 60s;
+      proxy_send_timeout 300s;
+      proxy_read_timeout 300s;
+
+      server {
+        listen 8080;
+
+        # Kubernetes health-check target. Separate from MinIO so a MinIO
+        # outage does not take the proxy pod down and vice-versa.
+        location = /healthz { return 200 "ok\n"; }
+
+        # Strip the /minio-api prefix. MinIO sees the canonical /<bucket>/<key>
+        # path the SigV4 signature was computed over. Trailing regex avoids
+        # matching /minio-api/../foo type escapes — anything past the prefix
+        # goes to $1 verbatim.
+        location ^~ /minio-api/ {
+          rewrite ^/minio-api/(.*)$ /$1 break;
+          proxy_pass http://minio:9000;
+          # Preserve the browser-facing host so SigV4 canonical string
+          # matches what the backend's signingMc signed against. Without
+          # this proxy_pass would set Host to the upstream (minio:9000)
+          # and every presigned GET would fail signature verification.
+          proxy_set_header Host              $host;
+          proxy_set_header X-Real-IP         $remote_addr;
+          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        # Anything else on this proxy is a misroute — refuse it so it does
+        # not silently reach MinIO with a random path.
+        location / { return 404; }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-proxy
+  labels:
+    app: minio-proxy
+spec:
+  selector:
+    app: minio-proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio-proxy
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: minio-proxy
+  template:
+    metadata:
+      labels:
+        app: minio-proxy
+    spec:
+      terminationGracePeriodSeconds: 15
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: { matchLabels: { app: minio-proxy } }
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          resources:
+            requests: { cpu: "10m", memory: "16Mi" }
+            limits:   { cpu: "200m", memory: "64Mi" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: minio-proxy
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: minio-proxy
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: minio-proxy

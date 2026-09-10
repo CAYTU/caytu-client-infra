@@ -189,6 +189,17 @@ patches:
         value:
           alb.ingress.kubernetes.io/healthcheck-path: /minio/health/live
           alb.ingress.kubernetes.io/healthcheck-port: "9000"
+  # /minio-api goes to the strip-prefix proxy, not MinIO directly, so the
+  # target group behind /minio-api needs its own health-check answering on
+  # the proxy's port. The MinIO paths above are irrelevant here — the proxy
+  # exposes /healthz.
+  - target: { kind: Service, name: minio-proxy }
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          alb.ingress.kubernetes.io/healthcheck-path: /healthz
+          alb.ingress.kubernetes.io/healthcheck-port: "8080"
 
   # Pin stateful workloads to the on-demand node group. Stateless deployments
   # have no selector and land on the SPOT pool (or spill to on-demand if SPOT
