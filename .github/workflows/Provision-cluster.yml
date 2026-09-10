@@ -352,6 +352,32 @@ jobs:
           REPORT_TOKEN: ${{ github.event.inputs.report_token }}
         run: /tmp/report.sh 55 "installing the ingress, metrics and autoscaler"
 
+      # AWSServiceRoleForElasticLoadBalancing has to exist once per account
+      # before the ALB controller can create load balancers, and the controller
+      # itself cannot create it: iam:CreateServiceLinkedRole is denied by the
+      # CaytuProvisionerBoundary applied to the IRSA role the controller runs
+      # as. The account's provisioner role (which this workflow assumed above)
+      # has the same action explicitly allowed for elasticloadbalancing under
+      # the "ServiceLinkedRolesTheClusterNeeds" Sid, so we make it here.
+      # Idempotent: AWS returns InvalidInput when the role already exists,
+      # which we treat as success.
+      - name: Ensure the ELB service-linked role exists
+        run: |
+          set +e
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+          out="$(aws iam create-service-linked-role \
+            --aws-service-name elasticloadbalancing.amazonaws.com \
+            --description "Enables Elastic Load Balancing to call other AWS services on your behalf." 2>&1)"
+          rc=$?
+          if [ $rc -eq 0 ]; then
+            echo "created AWSServiceRoleForElasticLoadBalancing"
+          elif echo "$out" | grep -qiE "has been taken|already exists"; then
+            echo "AWSServiceRoleForElasticLoadBalancing already exists"
+          else
+            echo "::error::create-service-linked-role failed: $out"
+            exit 1
+          fi
+
       - name: Cluster add-ons
         working-directory: ${{ env.TF_DIR }}
         run: |

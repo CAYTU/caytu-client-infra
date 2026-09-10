@@ -121,6 +121,28 @@ jobs:
           # below is a no-op, which is the expected outcome of running twice.
           terraform state list || true
 
+      # Snapshot the cluster name from state BEFORE destroy runs so the
+      # leftover-sweep at the end knows what to look for. Reads from state
+      # rather than reconstructing from subdomain: subdomain is an optional
+      # workflow input and may be blank on a re-run.
+      - name: Remember the cluster name
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          set -uo pipefail
+          name="$(terraform output -raw cluster_name 2>/dev/null || true)"
+          if [ -z "$name" ]; then
+            # Fallback: the eks module names the cluster resource explicitly.
+            name="$(terraform state show module.eks.aws_eks_cluster.this[0] 2>/dev/null \
+              | grep -oE 'name[[:space:]]*=[[:space:]]*"[^"]*"' | head -1 \
+              | sed -E 's/.*"([^"]*)".*/\1/' || true)"
+          fi
+          if [ -n "$name" ]; then
+            echo "CLUSTER_NAME=$name" >> "$GITHUB_ENV"
+            echo "cluster name: $name"
+          else
+            echo "no cluster name in state — leftover-sweep will be a no-op"
+          fi
+
       # Objects inside the cluster, which die with it.
       #
       # Terraform tries to delete them through the Kubernetes API, and by then
@@ -486,6 +508,44 @@ jobs:
             exit 1
           fi
           echo "state is empty: every resource this deployment created is gone"
+
+      # Resources terraform created but a failed-midway destroy leaves behind:
+      # the eks module's KMS alias and the cluster's CloudWatch log group.
+      # Both take the cluster's exact name, and re-provisioning the same
+      # deployment then fails on AlreadyExistsException before anything else
+      # even runs. Handled here, best-effort, so a partial destroy does not
+      # block the next provision.
+      #
+      # The KMS *key* is not deleted (only the alias) — AWS keeps deleted keys
+      # in pending-deletion for 7–30 days as a safety net, and deleting the
+      # alias frees the name terraform needs on the next create.
+      - name: Sweep leftovers a partial destroy would leave
+        if: always()
+        env:
+          REGION: ${{ github.event.inputs.region }}
+        run: |
+          set -uo pipefail
+          [ -n "${CLUSTER_NAME:-}" ] || { echo "no cluster name known, nothing to sweep"; exit 0; }
+          [ -f "$RUNNER_TEMP/cluster-creds.sh" ] && . "$RUNNER_TEMP/cluster-creds.sh"
+
+          alias_name="alias/eks/${CLUSTER_NAME}"
+          if aws kms list-aliases --region "$REGION" \
+               --query "Aliases[?AliasName=='${alias_name}'].AliasName" --output text 2>/dev/null | grep -q "$alias_name"; then
+            aws kms delete-alias --region "$REGION" --alias-name "$alias_name" 2>&1 | tail -1
+            echo "deleted orphan alias ${alias_name}"
+          fi
+
+          # EKS control-plane logs live at /aws/eks/<cluster>/cluster and each
+          # log group has an explicit name terraform creates. A second create
+          # collides on the name even after the underlying cluster is gone.
+          for lg in "/aws/eks/${CLUSTER_NAME}/cluster"; do
+            if aws logs describe-log-groups --region "$REGION" \
+                 --log-group-name-prefix "$lg" \
+                 --query 'length(logGroups)' --output text 2>/dev/null | grep -qv '^0$'; then
+              aws logs delete-log-group --region "$REGION" --log-group-name "$lg" 2>&1 | tail -1
+              echo "deleted orphan log group ${lg}"
+            fi
+          done
 
       # Written by Provision-cluster.yml after the balancer existed, so
       # Terraform never knew about it and a destroy leaves it pointing at a
