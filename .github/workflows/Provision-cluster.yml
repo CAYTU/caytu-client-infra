@@ -515,6 +515,9 @@ jobs:
           # and neither is knowable until now.
           sed -i "s|PLATFORM_URL_PLACEHOLDER|${PLATFORM_URL}|g" agent.yaml
           sed -i "s|INSTANCE_ID_PLACEHOLDER|${INSTANCE_ID}|g" agent.yaml
+          # Same placeholder in the storage class, so every volume it makes
+          # says which deployment it belongs to.
+          sed -i "s|INSTANCE_ID_PLACEHOLDER|${INSTANCE_ID}|g" storage.yaml
           kustomize edit set image \
             "caytu-client/cluster-agent=${registry}/caytu-client-cluster-agent:latest"
 

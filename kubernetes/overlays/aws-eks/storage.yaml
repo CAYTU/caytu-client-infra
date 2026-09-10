@@ -7,6 +7,7 @@
 #
 # Retain, not Delete: these volumes hold the deployment's database. Removing a
 # claim should not be able to destroy the data behind it, and there is no undo.
+# Destroying the deployment does remove them, by the tag below.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -22,3 +23,6 @@ allowVolumeExpansion: true
 parameters:
   type: gp3
   fsType: ext4
+  # A tag of ours, so a destroy can find these. The tags the driver adds name
+  # the claim, not the deployment they belong to.
+  tagSpecification_1: "caytu:deployment=INSTANCE_ID_PLACEHOLDER"

@@ -77,7 +77,10 @@ grep -q "seal-secrets" "$TMP/compose.log" && ok "the secret is sealed into the s
 
 echo
 echo "a deployment with no version pinned gets the current release"
-eval "$(sed -n '/^current_release()/,/^}/p' ../wt-infra-aws/scripts/caytu-client 2>/dev/null || sed -n '/^current_release()/,/^}/p' scripts/caytu-client)"
+# This repository's copy, not a sibling checkout's. The path here used to try
+# ../wt-infra-aws first, so on a machine that has one the test read someone
+# else's script and failed on changes it never saw.
+eval "$(sed -n '/^current_release()/,/^}/p' scripts/caytu-client)"
 printf 'CAYTU_METERING_TOKEN=ct_tok\n' > "$TMP/.env.ver"
 BODY='{"versions":[{"tag":"v1.0.4"},{"tag":"v1.0.3"}],"available":true}'; CODE=0
 [ "$(current_release "$TMP/.env.ver")" = "v1.0.4" ] && ok "takes the newest" || bad "took something else"
