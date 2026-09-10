@@ -24,3 +24,9 @@ data:
   STREAMING_PROVIDER: "self-hosted"
   STUN_URLS: "stun:coturn:3478"
   TURN_URLS: "turn:coturn:3478"
+
+  # Frontend derives its public URLs from these + CAYTU_DOMAIN (in caytu-secrets).
+  # Cluster overlays terminate TLS at the ingress, so the default is https/wss.
+  # Self-managed on a plain-HTTP LAN overrides these in its overlay.
+  CAYTU_SCHEME: "https"
+  CAYTU_WS_SCHEME: "wss"

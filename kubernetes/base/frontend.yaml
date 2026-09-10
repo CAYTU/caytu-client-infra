@@ -55,6 +55,28 @@ spec:
               value: "3000"
             - name: HOSTNAME
               value: "0.0.0.0"
+            # layout.tsx renders these into a <script id="__RUNTIME_CONFIG__">
+            # tag the browser reads on first paint. Without them the SSR falls
+            # back to http://localhost:5000 and every fetch/websocket/minio URL
+            # in the shipped HTML points at the operator's own machine.
+            #
+            # Declared here (not envFrom-only) because the derived values use
+            # $(VAR) interpolation, which K8s only resolves for env entries
+            # declared explicitly in this block — same pattern as minio.yaml.
+            - name: CAYTU_DOMAIN
+              valueFrom: { secretKeyRef:    { name: caytu-secrets, key: CAYTU_DOMAIN } }
+            - name: CAYTU_SCHEME
+              valueFrom: { configMapKeyRef: { name: caytu-shared,  key: CAYTU_SCHEME } }
+            - name: CAYTU_WS_SCHEME
+              valueFrom: { configMapKeyRef: { name: caytu-shared,  key: CAYTU_WS_SCHEME } }
+            - name: API_URL_PUBLIC
+              value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)"
+            - name: WS_URL_PUBLIC
+              value: "$(CAYTU_WS_SCHEME)://$(CAYTU_DOMAIN)"
+            - name: MINIO_URL_PUBLIC
+              value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)/minio-api"
+            - name: CLIENT_URL
+              value: "$(CAYTU_SCHEME)://$(CAYTU_DOMAIN)"
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits:   { cpu: "1",    memory: "1Gi"   }
