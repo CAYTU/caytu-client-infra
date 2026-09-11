@@ -182,7 +182,7 @@ publish_platform_credentials() {
   # The values reach a container through its environment, so a running pod
   # cannot see them. Without this the write is real and has no effect until
   # something else happens to restart the stack.
-  kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+  restart_client_workloads || true
   log "wrote the platform credential into $SECRET_NAME and restarted the workloads"
 }
 
@@ -311,6 +311,16 @@ balancer_url() {
 # StatefulSets and are not ours to move at all.
 CLIENT_WORKLOADS=(backend frontend gstreamer-recorder mqtt-streamer signaling-server)
 
+# Never `rollout restart deployment` namespace-wide: that restarts the agent too, killing the command or seed in flight.
+restart_client_workloads() {
+  local name targets=()
+  for name in "${CLIENT_WORKLOADS[@]}"; do
+    kubectl -n "$NAMESPACE" get deploy "$name" >/dev/null 2>&1 && targets+=("deployment/$name")
+  done
+  (( ${#targets[@]} )) || return 0
+  kubectl -n "$NAMESPACE" rollout restart "${targets[@]}" >/dev/null 2>&1
+}
+
 # Which release is actually in the cluster, read off the backend.
 #
 # The record says what was asked for and only this says what arrived, so an
@@ -396,7 +406,7 @@ apply_settings() {
     echo "the settings could not be written to the cluster"; return 1
   }
 
-  kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || {
+  restart_client_workloads || {
     echo "the settings were written but the workloads did not restart"; return 1
   }
 
@@ -441,7 +451,7 @@ take_a_shard_of_our_own() {
   # which is every new cluster. The backend was then deriving a different key
   # from the store it had just been given: keyring unreadable, every service
   # failing closed, and nothing on the next pass to put it right.
-  kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+  restart_client_workloads || true
   log "took this deployment's own store shard and restarted the workloads"
 }
 
@@ -606,7 +616,17 @@ seed_the_store() {
   if out="$(printf '%s' "$payload" | run_with_backend_image caytu-store-seal \
       node loader.js --seal-secrets)"; then
     log "sealed ${count} secret(s) into the store"
-    kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1 || true
+    # Sealing is idempotent, restarting is not: roll the workloads only when the payload changed.
+    local sha prev
+    sha="$(printf '%s' "$payload" | jq -cS . | sha256sum | cut -d' ' -f1)"
+    prev="$(kubectl -n "$NAMESPACE" get secret "$CREDENTIAL_SECRET" \
+      -o jsonpath='{.metadata.annotations.caytu\.io/sealed-sha256}' 2>/dev/null || true)"
+    if [[ "$sha" != "$prev" ]]; then
+      restart_client_workloads || true
+      kubectl -n "$NAMESPACE" annotate secret "$CREDENTIAL_SECRET" \
+        "caytu.io/sealed-sha256=$sha" --overwrite >/dev/null 2>&1 || true
+      log "the sealed secrets changed, so the workloads were restarted"
+    fi
   else
     log "could not seal the secrets into the store: $(printf '%s' "$out" | tail -1)"
     return 1
@@ -768,7 +788,7 @@ run_command() {
       # Deployments only. mongo, redis and minio are StatefulSets holding the
       # data, and rolling them to clear a wedged frontend is a much bigger
       # promise than the operator made.
-      if kubectl -n "$NAMESPACE" rollout restart deployment >/dev/null 2>&1; then
+      if restart_client_workloads; then
         result="every workload is restarting; the data is untouched"
       else
         status="failed"; error="the workloads could not be restarted"
