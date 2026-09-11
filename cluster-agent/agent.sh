@@ -825,17 +825,15 @@ run_command() {
 }
 
 poll_commands() {
-  local body
-  body="$(api GET "/api/billings/instances/${INSTANCE_ID}/commands?claim=true")" || return 0
-  local count
-  count="$(printf '%s' "$body" | jq -r '.commands | length' 2>/dev/null || echo 0)"
-  [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]] || return 0
-
-  local i id type params
-  for ((i = 0; i < count; i++)); do
-    id="$(printf '%s' "$body" | jq -r ".commands[$i].id")"
-    type="$(printf '%s' "$body" | jq -r ".commands[$i].type")"
-    params="$(printf '%s' "$body" | jq -c ".commands[$i].params // {}")"
+  # Claim returns one {"command": …|null} per call (same contract as scripts/caytu-client); drain until null.
+  local body command id type params
+  while body="$(api GET "/api/billings/instances/${INSTANCE_ID}/commands?claim=true")"; do
+    command="$(printf '%s' "$body" | jq -c '.command // empty' 2>/dev/null)"
+    [[ -n "$command" ]] || return 0
+    id="$(printf '%s' "$command" | jq -r '.id // ._id // empty')"
+    type="$(printf '%s' "$command" | jq -r '.type // empty')"
+    params="$(printf '%s' "$command" | jq -c '.params // {}')"
+    [[ -n "$id" && -n "$type" ]] || return 0
     run_command "$id" "$type" "$params"
   done
 }
