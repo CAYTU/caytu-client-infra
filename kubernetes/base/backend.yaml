@@ -134,10 +134,7 @@ spec:
       resource:
         name: cpu
         target: { type: Utilization, averageUtilization: 70 }
-    - type: Resource
-      resource:
-        name: memory
-        target: { type: Utilization, averageUtilization: 75 }
+    # No memory metric: per-pod memory is a fixed baseline (~69% of request), so it never drops as replicas grow and the HPA ratchets to max.
   behavior:
     scaleDown:
       # Avoid flapping — wait 5 min before scaling down after a scale-up

@@ -438,6 +438,7 @@ jobs:
           IMAGE_TAG: ${{ github.event.inputs.image_tag }}
           INSTANCE_ID: ${{ github.event.inputs.instance_id }}
           REPORT_TOKEN: ${{ github.event.inputs.report_token }}
+          REGION: ${{ github.event.inputs.region }}
           # Caytu-managed SMTP for the invite/setup email that every new
           # cluster's first admin needs. Non-secret pieces (host, port, user,
           # from-address, from-name) are baked here so the deployment boots
@@ -519,6 +520,8 @@ jobs:
             echo "EMAIL_USER=${CAYTU_SMTP_USER:-}"
             echo "EMAIL_FROM=${CAYTU_SMTP_FROM:-}"
             echo "EMAIL_FROM_NAME=${CAYTU_SMTP_FROM_NAME:-Caytu}"
+            # KVS lives in the cluster's region; unset, the backend defaults to us-east-1 and every signaling lookup misses.
+            echo "AWS_KVS_REGION=${REGION}"
             # Says this cluster is new, so the agent may take a shard of its own
             # for the secret store before anything is sealed with the one baked
             # into the image. A cluster built before this has no flag and keeps
