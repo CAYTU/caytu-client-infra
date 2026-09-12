@@ -32,6 +32,10 @@ services:
   backup:
     build:
       context: ./backup
+      args:
+        # The image the MinIO client is copied from — the same one the minio
+        # service runs, so mc matches both the server and the host's CPU.
+        MINIO_IMAGE: ${MINIO_IMAGE:-688544396352.dkr.ecr.us-east-1.amazonaws.com/caytu-client-minio}:${MINIO_VERSION:-RELEASE.2025-09-07T16-13-09Z}
     image: caytu-client/backup:latest
     depends_on:
       mongodb: { condition: service_healthy }

@@ -104,7 +104,11 @@ services:
     networks: [caytu]
 
   minio:
-    image: minio/minio:${MINIO_VERSION:-latest}
+    # Caytu's own mirror of minio/minio, multi-arch (amd64 + arm64): MinIO no
+    # longer publishes community images, and a Docker Hub tag that disappears
+    # takes the whole `docker compose pull` down with it. Set MINIO_IMAGE to
+    # use another copy (e.g. minio/minio on a host without access to our ECR).
+    image: ${MINIO_IMAGE:-688544396352.dkr.ecr.us-east-1.amazonaws.com/caytu-client-minio}:${MINIO_VERSION:-RELEASE.2025-09-07T16-13-09Z}
     volumes:
       - minio-data:/data
     environment:
@@ -122,30 +126,10 @@ services:
       start_period: 30s
     networks: [caytu]
 
-  # One-shot bucket bootstrapper. Only branding/alert sounds get anonymous
-  # download; everything else is served via short-lived presigned URLs from
-  # the backend.
-  minio-setup:
-    image: minio/mc:${MC_VERSION:-latest}
-    depends_on:
-      minio: { condition: service_healthy }
-    entrypoint: >
-      /bin/sh -c "
-      sleep 10;
-      mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
-      for b in profiles blocs devices readings audio-alerts logo kpi-media video-recordings knowledge-base dashboard-media; do
-        mc mb myminio/$$b --ignore-existing;
-      done;
-      mc anonymous set download myminio/logo;
-      mc anonymous set download myminio/audio-alerts;
-      for b in profiles blocs dashboard-media video-recordings kpi-media knowledge-base devices readings; do
-        mc anonymous set none myminio/$$b || true;
-      done;
-      echo 'MinIO setup done';
-      "
-    restart: "no"
-    logging: *default-logging
-    networks: [caytu]
+  # No bucket bootstrapper: minio/mc is no longer published on Docker Hub, and
+  # the backend already does its job — initializeBuckets() creates every
+  # missing bucket at startup and makes only logo and audio-alerts
+  # public-read (see MINIO_AUTO_INIT_BUCKETS in the backend).
 
   # ---------------------------------------------------------------------------
   # WebRTC / media
@@ -240,7 +224,6 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
     depends_on:
       minio:       { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
     restart: unless-stopped
     logging: *default-logging
     healthcheck:
@@ -405,7 +388,6 @@ services:
       mongodb:            { condition: service_healthy }
       redis:              { condition: service_healthy }
       minio:              { condition: service_healthy }
-      minio-setup:        { condition: service_completed_successfully }
       gstreamer-recorder: { condition: service_healthy }
     extra_hosts:
       - "host.docker.internal:host-gateway"
