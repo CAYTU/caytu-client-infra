@@ -606,30 +606,41 @@ seed_the_store() {
     | if $p != "" and (.env.MINIO_SECRET_KEY // "") == ""
       then .env.MINIO_SECRET_KEY = $p else . end')"
 
-  local count
-  count="$(printf '%s' "$payload" | jq '(.env | length) + (.files | length)')"
-  if [[ "${count:-0}" -eq 0 ]]; then
-    log "the console holds no secrets for this deployment"
-    return 0
+  # Non-secret settings (e.g. the IoT credential endpoint and role alias that go with the certificate) belong in the environment.
+  local settings_json key args=()
+  settings_json="$(printf '%s' "$body" | jq -c '.settings // {}')"
+  while IFS= read -r key; do
+    [[ -n "$key" ]] && args+=("$key" "$(printf '%s' "$settings_json" | jq -r --arg k "$key" '.[$k]')")
+  done < <(printf '%s' "$settings_json" | jq -r 'keys[]')
+  if (( ${#args[@]} )) && ! secret_put "${args[@]}"; then
+    log "could not write the deployment's settings into $SECRET_NAME"
+    return 1
   fi
 
-  if out="$(printf '%s' "$payload" | run_with_backend_image caytu-store-seal \
-      node loader.js --seal-secrets)"; then
-    log "sealed ${count} secret(s) into the store"
-    # Sealing is idempotent, restarting is not: roll the workloads only when the payload changed.
-    local sha prev
-    sha="$(printf '%s' "$payload" | jq -cS . | sha256sum | cut -d' ' -f1)"
-    prev="$(kubectl -n "$NAMESPACE" get secret "$CREDENTIAL_SECRET" \
-      -o jsonpath='{.metadata.annotations.caytu\.io/sealed-sha256}' 2>/dev/null || true)"
-    if [[ "$sha" != "$prev" ]]; then
-      restart_client_workloads || true
-      kubectl -n "$NAMESPACE" annotate secret "$CREDENTIAL_SECRET" \
-        "caytu.io/sealed-sha256=$sha" --overwrite >/dev/null 2>&1 || true
-      log "the sealed secrets changed, so the workloads were restarted"
+  local count
+  count="$(printf '%s' "$payload" | jq '(.env | length) + (.files | length)')"
+  if [[ "${count:-0}" -gt 0 ]]; then
+    if out="$(printf '%s' "$payload" | run_with_backend_image caytu-store-seal \
+        node loader.js --seal-secrets)"; then
+      log "sealed ${count} secret(s) into the store"
+    else
+      log "could not seal the secrets into the store: $(printf '%s' "$out" | tail -1)"
+      return 1
     fi
   else
-    log "could not seal the secrets into the store: $(printf '%s' "$out" | tail -1)"
-    return 1
+    log "the console holds no secrets for this deployment"
+  fi
+
+  # Sealing and settings writes are idempotent, restarting is not: roll the workloads only when either changed.
+  local sha prev
+  sha="$(printf '%s\n%s' "$payload" "$settings_json" | jq -cSs . | sha256sum | cut -d' ' -f1)"
+  prev="$(kubectl -n "$NAMESPACE" get secret "$CREDENTIAL_SECRET" \
+    -o jsonpath='{.metadata.annotations.caytu\.io/sealed-sha256}' 2>/dev/null || true)"
+  if [[ "$sha" != "$prev" ]]; then
+    restart_client_workloads || true
+    kubectl -n "$NAMESPACE" annotate secret "$CREDENTIAL_SECRET" \
+      "caytu.io/sealed-sha256=$sha" --overwrite >/dev/null 2>&1 || true
+    log "the deployment's secrets or settings changed, so the workloads were restarted"
   fi
 }
 

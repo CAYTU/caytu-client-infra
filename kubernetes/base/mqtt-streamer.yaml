@@ -41,6 +41,10 @@ spec:
           envFrom:
             - configMapRef: { name: caytu-shared }
             - secretRef:    { name: caytu-secrets }
+          env:
+            # Read devices from the MqttStreamerConfig collection; without it the image's baked YAML (Caytu's own IoT endpoint) is used.
+            - name: USE_MONGO_CONFIG
+              value: "true"
           resources:
             requests: { cpu: "100m", memory: "256Mi" }
             limits:   { cpu: "1",    memory: "1Gi"   }
