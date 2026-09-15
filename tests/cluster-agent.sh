@@ -12,6 +12,7 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 # The agent's own functions, without its loop.
 NAMESPACE=caytu-client
 SECRET_NAME=caytu-secrets
+CREDENTIAL_SECRET=caytu-agent-credential
 PLATFORM_URL=http://platform.test
 INSTANCE_ID=abc123
 TOKEN=tok
@@ -29,6 +30,7 @@ eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
 eval "$(sed -n '/^CLIENT_WORKLOADS=/p'      cluster-agent/agent.sh)"
+eval "$(sed -n '/^restart_client_workloads()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^running_version()/,/^}/p'  cluster-agent/agent.sh)"
 eval "$(sed -n '/^workload_trouble()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^update_release()/,/^}/p'   cluster-agent/agent.sh)"
@@ -302,6 +304,9 @@ kubectl() {
   case "$*" in
     *CAYTU_INSTANCE_ID*) printf 'abc123' | base64 ;;
     *CAYTU_METERING_TOKEN*) printf 'tok-123' | base64 ;;
+    # Part of "already told" since the org was added: without it an older
+    # cluster never gets the org backfilled.
+    *CAYTU_ORGANIZATION_ID*) printf '%s' "$ORGANIZATION_ID" | base64 ;;
   esac
 }
 publish_platform_credentials
