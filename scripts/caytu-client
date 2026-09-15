@@ -131,9 +131,9 @@ env_file_for() {
 
 # Where docker's config.json for this host lives.
 #
-# The agent container mounts this path read-only at /root/.docker so it can
-# reuse the login the host maintains — it cannot log in itself against a
-# read-only mount.
+# The agent container mounts this path, writable, at /root/.docker, so the
+# login it runs before each pull and the one the host maintains land in the
+# same file.
 #
 # A fixed path, not the caller's $HOME/.docker: the invoking account is
 # whatever combination of `sudo`, `sudo -E`, `sudo su`, or direct root login
@@ -1796,10 +1796,15 @@ ecr_login_if_needed() {
   fi
 
   # Say why. The pull that follows always blames an expired token, even when
-  # there were no credentials at all.
+  # there were no credentials at all, or docker could not save the new one.
+  local cfg="${DOCKER_CONFIG:-$HOME/.docker}"
   warn "could not log in to $registry, so the pull will be denied:"
-  warn "  no AWS identity on this host, and the platform did not issue one"
-  warn "  Check this host is enrolled, or set AWS_PROFILE to one that can read ECR."
+  if ! { mkdir -p "$cfg" && touch "$cfg/.caytu-write-test" && rm -f "$cfg/.caytu-write-test"; } 2>/dev/null; then
+    warn "  docker cannot save a login in $cfg (mounted read-only?)"
+  else
+    warn "  no AWS identity on this host, and the platform did not issue one"
+    warn "  Check this host is enrolled, or set AWS_PROFILE to one that can read ECR."
+  fi
   return 0
 }
 
@@ -3093,9 +3098,9 @@ cmd_agent() {
       # is what left every pull failing with "no basic auth credentials".
       mkdir -p "$docker_cfg"
 
-      # Prime the registry login from the host. The agent container mounts
-      # $docker_cfg read-only, so it cannot run `docker login` itself — its
-      # attempt errors silently and the pull then blames a missing token.
+      # Prime the registry login from the host, which may have an AWS identity
+      # the agent container does not. The agent logs in again from the
+      # platform before each pull, into this same directory.
       # DOCKER_CONFIG scopes the login and any test pull to this directory
       # only, so we do not touch the caller's own $HOME/.docker.
       local registry

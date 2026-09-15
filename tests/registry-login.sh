@@ -24,8 +24,13 @@ login = s.find("cat > /usr/local/bin/caytu-ecr-login")
 sys.exit(0 if guard == -1 or login < guard else 1)
 PY
 
-has "CAYTU_DOCKER_CONFIG=/home/" "the agent is pointed at the deploy user's docker config"
-hasnt 'CAYTU_DOCKER_CONFIG=/home/ubuntu/.docker"' "and not at a home that may not exist"
+# The timer writes /var/lib/caytu-client/.docker. Pointing the agent at a
+# user's home instead left it with a login nothing refreshed.
+hasnt "CAYTU_DOCKER_CONFIG=/home/" "the agent is not pointed at a home the timer never writes"
+
+# The agent logs in before every pull, which needs somewhere to save it.
+grep -qE '/root/\.docker:ro' compose/docker-compose.agent.yml \
+  && bad "the agent can save its own registry login" || ok "the agent can save its own registry login"
 has "registry-credentials" "it can ask the platform for a password"
 
 bash -n scripts/bootstrap.sh 2>/dev/null && ok "bootstrap still parses" || bad "bootstrap still parses"

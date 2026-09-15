@@ -344,24 +344,11 @@ ECRTIMER
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
 
-  # The agent container mounts this to get the registry login, and its default
-  # is /home/ubuntu, which only exists on a cloud image. On any other host the
-  # mount resolves to a directory docker invents, so the pull it starts has no
-  # credentials however well the host itself is logged in.
-  mkdir -p "/home/$DEPLOY_USER/.docker"
-  chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.docker"
-  env_line="CAYTU_DOCKER_CONFIG=/home/$DEPLOY_USER/.docker"
-
   if run_as caytu-client --target onprem init >/dev/null 2>&1 \
      && run_as caytu-client --target onprem enroll-self; then
     log "enrolled; starting the provisioner"
     # From here it is the path a customer's own host already follows: the agent
     # claims the deployment it was created for and provisions it.
-    onprem_env="$DEPLOY_DIR/compose/.env.onprem"
-    if [[ -f "$onprem_env" ]] && ! grep -q '^CAYTU_DOCKER_CONFIG=' "$onprem_env"; then
-      printf '%s\n' "$env_line" >> "$onprem_env"
-    fi
-
     run_as caytu-client --target onprem agent up \
       || log "WARNING: the agent did not start; run 'caytu-client -t onprem agent up'"
   else
