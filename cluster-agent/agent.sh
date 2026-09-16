@@ -747,6 +747,41 @@ run_command() {
       fi
       ;;
 
+    sync-basemap)
+      # The basemap is a generated ~243 MB archive the browser reads straight
+      # out of object storage. No release carries it, so a deployment that has
+      # never synced has no basemap and quietly falls back to sheets that are
+      # not licensed for commercial use.
+      #
+      # The pod does the work, not this agent: there is no host to build on
+      # here, and pulling the archive through the agent only to push it back
+      # into the cluster moves a few hundred megabytes for no reason. So
+      # `params.from` is effectively required on a cluster — it names an
+      # archive the pod can reach — and the command says so rather than
+      # failing obscurely when it is missing.
+      local from_url key_name pod
+      from_url="$(printf '%s' "$params" | jq -r '.from // empty')"
+      key_name="$(printf '%s' "$params" | jq -r '.key // "senegal.pmtiles"')"
+
+      if [ -z "$from_url" ]; then
+        status="failed"
+        error="a cluster needs params.from: a URL the backend pod can fetch the archive from"
+      elif ! pod="$(kubectl -n "$NAMESPACE" get pod -l app=backend             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || [ -z "$pod" ]; then
+        status="failed"
+        error="no backend pod to run the upload"
+      elif ! result="$(kubectl -n "$NAMESPACE" exec "$pod" -- sh -c "
+              set -e
+              curl -fSL --retry 3 -o /tmp/$key_name '$from_url'
+              node dist/scripts/upload-basemap.js --file /tmp/$key_name --force
+              rm -f /tmp/$key_name
+            " 2>&1 | trim_logs)"; then
+        status="failed"
+        error="the basemap upload failed: $(printf '%s' "$result" | tail -n 2 | tr '\n' ' ')"
+      else
+        result="basemap in place from $from_url"
+      fi
+      ;;
+
     logs)
       local svc lines
       svc="$(printf '%s' "$params" | jq -r '.service // "backend"')"

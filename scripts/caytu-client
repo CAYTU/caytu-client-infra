@@ -32,6 +32,7 @@
 #   exec <service> <cmd...>   run inside a service
 #   ssh                       open a shell on the remote host
 #   env push                  rsync .env.<target> and .env.* to remote
+#   tiles <sync|status>       put the basemap archive in MinIO (idempotent)
 #   monitor <up|down|tunnel>  monitoring overlay
 #   backup <enable|run|list|restore>  backup overlay
 #   ssl bootstrap <domain> <email>    issue initial Let's Encrypt cert (ssh/cloud)
@@ -406,6 +407,296 @@ cmd_deploy() {
   compose pull "$@"
   info "recreating services…"
   compose up -d "$@"
+}
+
+# --- tiles -------------------------------------------------------------------
+# The basemap is a single ~243 MB .pmtiles archive that the browser reads by
+# HTTP range request. It is generated, not source: too big for git, and rebuilt
+# on its own cadence rather than per release. So a deployment cannot get it by
+# pulling the repo or the images — something has to put it in MinIO, once, and
+# that something is this verb.
+#
+# Idempotent by design. It asks MinIO for the object first and does nothing if
+# it is already there, so it is safe to run on every deploy, in a provisioning
+# script, or by hand after a failed attempt.
+
+TILES_PMTILES_VERSION="1.22.0"
+
+# Run a shell command on whichever host the stack runs on: this machine for
+# local/onprem, the remote box for ssh/aws-single/gcp-single. The archive is
+# built THERE rather than here and copied in from there, so a 243 MB file never
+# crosses the operator's laptop on a remote deploy.
+tiles_host_run() {
+  case "$TARGET" in
+    local|onprem)               bash -c "$*" ;;
+    ssh|aws-single|gcp-single)  ssh_run "$*" ;;
+    *) die "tiles: no single host for target '$TARGET'" ;;
+  esac
+}
+
+# True for the Kubernetes targets, which have no host to build on and no
+# `docker compose cp` to copy with.
+tiles_is_cluster() {
+  case "$TARGET" in
+    aws-cluster|gcp-cluster|self-managed-k8s) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The backend pod, found the way k8s_exec finds it.
+tiles_k8s_pod() {
+  local ns; ns="$(_k8s_ns)"
+  local pod
+  pod="$(kubectl -n "$ns" get pod -l app=backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [[ -n "$pod" ]] || die "no backend pod found (app=backend) in namespace $ns"
+  printf '%s\n' "$pod"
+}
+
+# Put the archive in MinIO from inside the cluster.
+#
+# There is no host to build on and no compose to copy with, so the work is done
+# by the backend pod itself. Two routes, and the first is much the better one:
+#
+#   --from <url>  the pod curls the archive directly. Nothing transits the
+#                 operator's machine, which for 243 MB over `kubectl cp` is the
+#                 difference between seconds and a coffee break.
+#   otherwise     build locally, then `kubectl cp` it in. Works anywhere, but
+#                 pushes the whole archive through your terminal's connection.
+#
+# Prefer publishing a built archive somewhere the cluster can reach (S3, a
+# release asset) and using --from on clusters.
+tiles_sync_cluster() {
+  local from=$1 key=$2 bbox=$3
+  local ns; ns="$(_k8s_ns)"
+  local pod; pod="$(tiles_k8s_pod)"
+  info "backend pod: $pod (namespace $ns)"
+
+  if [[ -n "$from" ]]; then
+    info "pod is fetching $from"
+    kubectl -n "$ns" exec "$pod" -- sh -c "
+      set -e
+      curl -fSL --retry 3 -o /tmp/$key '$from'
+      node dist/scripts/upload-basemap.js --file /tmp/$key --force
+      rm -f /tmp/$key
+    " || die "in-cluster fetch/upload failed"
+  else
+    warn "no --from given: building locally and copying $key into the pod."
+    warn "On a cluster prefer: tiles sync --from <url-the-cluster-can-reach>"
+    local tmp="${TMPDIR:-/tmp}/caytu-basemap.pmtiles"
+    tiles_build_local "$tmp" "$bbox" || die "local build failed"
+    info "copying into the pod (this moves the whole archive through kubectl)"
+    kubectl -n "$ns" cp "$tmp" "$pod:/tmp/$key" || die "kubectl cp failed"
+    kubectl -n "$ns" exec "$pod" -- sh -c "
+      set -e
+      node dist/scripts/upload-basemap.js --file /tmp/$key --force
+      rm -f /tmp/$key
+    " || die "upload failed"
+    rm -f "$tmp"
+  fi
+}
+
+# Build an extract into $1 using the local machine. Shared by the cluster path;
+# the compose path builds on the target host instead.
+tiles_build_local() {
+  local out=$1 bbox=$2
+  require_cmd curl; require_cmd tar
+  local cli="${TMPDIR:-/tmp}/pmtiles"
+  if [[ ! -x "$cli" ]]; then
+    info "fetching go-pmtiles $TILES_PMTILES_VERSION"
+    curl -fsSL -o "$cli.tgz" \
+      "https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_x86_64.tar.gz" || return 1
+    tar xzf "$cli.tgz" -C "$(dirname "$cli")" pmtiles && rm -f "$cli.tgz"
+  fi
+  local build=""
+  local i d
+  for i in $(seq 0 60); do
+    d=$(date -u -d "-$i day" +%Y%m%d)
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' -r 0-100 "https://build.protomaps.com/$d.pmtiles")" == "206" ]]; then
+      build=$d; break
+    fi
+  done
+  [[ -n "$build" ]] || { err "no Protomaps build found in the last 60 days"; return 1; }
+  info "extracting $bbox from build $build"
+  "$cli" extract "https://build.protomaps.com/$build.pmtiles" "$out" --bbox="$bbox" --maxzoom=15
+}
+
+cmd_tiles() {
+  local sub=${1:-}; shift || true
+  case "$sub" in
+    sync)   tiles_sync "$@" ;;
+    status) tiles_status ;;
+    ""|-h|--help)
+      log "usage: caytu-client [-t <target>] tiles <sync|status> [options]"
+      log ""
+      log "  sync [--from <url>] [--bbox <w,s,e,n>] [--key <name>] [--force] [--set-env]"
+      log "       Put the basemap archive in MinIO. Does nothing if already present."
+      log "  status"
+      log "       Report whether the archive is in place and what the frontend points at."
+      ;;
+    *) die "unknown: caytu-client tiles $sub" ;;
+  esac
+}
+
+# Is the archive already readable at the URL the browser will use?
+tiles_status() {
+  local env_file url
+  env_file="$(env_file_for)"
+  url="$(env_get "$env_file" PMTILES_URL_PUBLIC || true)"
+
+  if [[ -z "$url" ]]; then
+    warn "PMTILES_URL_PUBLIC is unset — the map falls back to Esri's sheets,"
+    warn "which are keyless but NOT licensed for commercial use."
+    return 1
+  fi
+
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -r 0-1023 "$url" || echo 000)"
+  case "$code" in
+    206|200) ok "basemap present: $url" ;;
+    404)     err "not uploaded yet (404): $url"; log "  run: caytu-client -t $TARGET tiles sync"; return 1 ;;
+    403)     err "present but not publicly readable (403): $url"
+             log "  the 'tiles' bucket must allow anonymous GetObject"; return 1 ;;
+    000)     err "unreachable: $url"; return 1 ;;
+    *)       err "unexpected HTTP $code: $url"; return 1 ;;
+  esac
+}
+
+# Coverage is a property of the DEPLOYMENT, not of this script.
+#
+# A site in Senegal and a site covering West Africa differ only by a bounding
+# box, so it is read from .env.<target> (PMTILES_BBOX) rather than being
+# hardcoded here. The default is Senegal + Gambia with an Atlantic margin — the
+# margin matters: outside the extract there is no data at all, not even the
+# ocean polygon, so a tight coastal box renders the sea as flat background
+# instead of water.
+#
+# Widening coverage is: edit PMTILES_BBOX, then `tiles sync --key <new-name>
+# --set-env`. Use a NEW key rather than replacing the old object — uploads
+# carry a week of Cache-Control, so reusing the name leaves existing viewers on
+# the old extract until it expires. A new key changes the URL and rolls over
+# atomically.
+TILES_DEFAULT_BBOX="-19.50,11.50,-10.80,17.25"
+
+tiles_sync() {
+  local env_file_early; env_file_early="$(env_file_for)"
+  local from="" bbox="" key="" force=0 set_env=0
+  bbox="$(env_get "$env_file_early" PMTILES_BBOX || true)"
+  key="$(env_get "$env_file_early" PMTILES_KEY || true)"
+  while (($#)); do
+    case "$1" in
+      --from)    from=${2:?--from needs a URL}; shift 2 ;;
+      --bbox)    bbox=${2:?--bbox needs w,s,e,n}; shift 2 ;;
+      --key)     key=${2:?--key needs a name}; shift 2 ;;
+      --force)   force=1; shift ;;
+      --set-env) set_env=1; shift ;;
+      *) die "tiles sync: unknown option $1" ;;
+    esac
+  done
+
+  local env_file; env_file="$env_file_early"
+  [[ -f "$env_file" ]] || die "missing $env_file — run: caytu-client init"
+  [[ -n "$bbox" ]] || bbox="$TILES_DEFAULT_BBOX"
+  [[ -n "$key"  ]] || key="senegal.pmtiles"
+
+  # Skip the whole download when it is already in place.
+  if (( ! force )) && tiles_status >/dev/null 2>&1; then
+    ok "basemap already in MinIO — nothing to do (--force to replace)"
+    return 0
+  fi
+
+  if tiles_is_cluster; then
+    tiles_sync_cluster "$from" "$key" "$bbox"
+    tiles_report_url "$env_file" "$key" "$set_env"
+    return 0
+  fi
+
+  local remote_tmp="/tmp/caytu-basemap.pmtiles"
+
+  if [[ -n "$from" ]]; then
+    info "fetching archive from $from"
+    tiles_host_run "curl -fSL --retry 3 -o '$remote_tmp' '$from'" \
+      || die "download failed: $from"
+  else
+    # Build it on the host, the same way docker/tiles/build-tiles.sh does:
+    # Protomaps publishes a daily planet build and `pmtiles extract` pulls only
+    # the byte ranges covering the bbox, so this is ~35 s and ~243 MB rather
+    # than a planet download.
+    info "building the extract on the target host (needs outbound HTTPS)"
+    info "coverage: $bbox"
+    local bbox_arg="--bbox=$bbox"
+    tiles_host_run "
+      set -e
+      cd /tmp
+      if [ ! -x /tmp/pmtiles ]; then
+        curl -fsSL -o /tmp/pmtiles.tgz \
+          'https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_x86_64.tar.gz'
+        tar xzf /tmp/pmtiles.tgz -C /tmp pmtiles
+        rm -f /tmp/pmtiles.tgz
+      fi
+      build=''
+      for i in \$(seq 0 60); do
+        d=\$(date -u -d \"-\$i day\" +%Y%m%d)
+        if [ \"\$(curl -s -o /dev/null -w '%{http_code}' -r 0-100 https://build.protomaps.com/\$d.pmtiles)\" = '206' ]; then
+          build=\$d; break
+        fi
+      done
+      [ -n \"\$build\" ] || { echo 'no Protomaps build found in the last 60 days' >&2; exit 1; }
+      echo \"extracting from build \$build\"
+      /tmp/pmtiles extract https://build.protomaps.com/\$build.pmtiles '$remote_tmp' $bbox_arg --maxzoom=15
+    " || die "extract failed"
+  fi
+
+  info "copying into the backend container"
+  compose cp "$remote_tmp" "backend:/tmp/$key" || die "docker compose cp failed"
+
+  # The prod backend image runs compiled JS — no ts-node, no src/ — so this is
+  # dist/, not src/. tsconfig includes all of src, so the script is emitted.
+  info "uploading to MinIO"
+  compose exec -T backend node "dist/scripts/upload-basemap.js" --file "/tmp/$key" --force \
+    || die "upload failed"
+
+  compose exec -T backend rm -f "/tmp/$key" >/dev/null 2>&1 || true
+  tiles_host_run "rm -f '$remote_tmp'" || true
+
+  tiles_report_url "$env_file" "$key" "$set_env"
+}
+
+# Work out the browser-facing URL and either set it or print it.
+#
+# MINIO_URL_PUBLIC, not MINIO_PUBLIC_URL: the first is what the frontend hands
+# the browser, the second is what the backend talks to — routinely
+# http://minio:9000, which no browser can resolve and which an HTTPS page
+# blocks as mixed content. Getting this pair the wrong way round produces a map
+# with pins and no basemap and no error anywhere.
+tiles_report_url() {
+  local env_file=$1 key=$2 set_env=$3
+  local minio_pub url
+  minio_pub="$(env_get "$env_file" MINIO_URL_PUBLIC || true)"
+  if [[ -z "$minio_pub" ]]; then
+    local scheme domain
+    scheme="$(env_get "$env_file" CAYTU_SCHEME || echo http)"
+    domain="$(env_get "$env_file" CAYTU_DOMAIN || true)"
+    [[ -n "$domain" ]] && minio_pub="$scheme://$domain/minio-api"
+  fi
+
+  if [[ -z "$minio_pub" ]]; then
+    ok "uploaded"
+    warn "could not derive the public URL — set PMTILES_URL_PUBLIC by hand"
+    return 0
+  fi
+  url="${minio_pub%/}/tiles/$key"
+
+  if (( set_env )); then
+    env_upsert "$env_file" PMTILES_URL_PUBLIC "$url"
+    ok "uploaded; PMTILES_URL_PUBLIC set to $url"
+    info "now roll the frontend:  caytu-client -t $TARGET deploy frontend"
+  else
+    ok "uploaded"
+    log ""
+    log "Set in $env_file (or re-run with --set-env):"
+    log "  PMTILES_URL_PUBLIC=$url"
+    log "then: caytu-client -t $TARGET deploy frontend"
+  fi
 }
 
 cmd_ssh() {
@@ -2217,6 +2508,33 @@ instance_provision() {
     report_step "$env_file" "$id" "secrets" "seeding the secret store"
     if bootstrap_secret_store "$env_file"; then seeded=1; fi
 
+    # The basemap, after the stack because the upload goes through the backend
+    # container and needs MinIO answering.
+    #
+    # Best-effort, exactly like the certificate above: a deployment with no
+    # basemap still runs, still logs in, still shows every pin — the map just
+    # falls back to Esri's sheets. So this must not fail a rollout.
+    #
+    # But it IS reported rather than left silent, because that fallback is
+    # keyless and NOT licensed for commercial use, and it fails invisibly: a
+    # grey map with pins on it looks close enough to working that a site can
+    # run on it for months. Provisioning is the one moment someone is watching.
+    #
+    # The frontend is recreated afterwards because the URL is written to the
+    # env file here, after `up` already started it — the same reason
+    # install-license recreates the backend.
+    if [[ "$(env_get "$env_file" PMTILES_AUTO_SYNC || true)" != "0" ]]; then
+      report_step "$env_file" "$id" "basemap" "putting the basemap in object storage"
+      if tiles_sync --set-env >/dev/null 2>&1; then
+        compose up -d --no-deps --force-recreate frontend >/dev/null 2>&1 || true
+        ok "basemap in place"
+      else
+        report_step "$env_file" "$id" "basemap" \
+          "no basemap: the map falls back to Esri, which is not licensed for commercial use" false
+        warn "basemap sync failed — run: caytu-client -t $TARGET tiles sync"
+      fi
+    fi
+
     # Deliberately not claiming adminProvisioned here. A stack that starts is
     # not proof the named account exists: the client only bootstraps an initial
     # superAdmin when the deployment has no users at all, so re-provisioning a
@@ -2410,6 +2728,41 @@ command_execute() {
         status="failed"; error="the backend did not come back, so the licence is configured but not in use"
       else
         printf 'licence %s configured; the deployment installs it as it comes back up' "$lic" > "$work/result"
+      fi
+      ;;
+    sync-basemap)
+      # The basemap is generated, so no release carries it: a deployment that
+      # has never synced has none, and the map falls back to sheets that are
+      # not licensed for commercial use. Provisioning does this on its own, so
+      # this is for the sites that predate it, the syncs that failed, and the
+      # coverage changes.
+      #
+      # Unlike most commands here this one takes minutes — it is a few hundred
+      # megabytes — which is why it carries its own deadline on the platform.
+      local from_url key_arg
+      from_url="$(printf '%s' "$params" | jq -r '.from // empty')"
+      key_arg="$(printf '%s' "$params" | jq -r '.key // empty')"
+      local -a sync_args=(--set-env --force)
+      [[ -n "$from_url" ]] && sync_args+=(--from "$from_url")
+      [[ -n "$key_arg"  ]] && sync_args+=(--key "$key_arg")
+
+      if ! command_targets_current_stack "$env_file" "$instance_id"; then
+        printf 'this host runs a different deployment now' > "$work/result"
+        forget_instance "$env_file" "$instance_id"
+        skipped=1
+      elif tiles_sync "${sync_args[@]}" > "$work/sync.log" 2>&1; then
+        # The URL is written to the env file by --set-env, after the frontend
+        # was already started on the old value — same reason install-license
+        # recreates the backend.
+        if compose up -d --no-deps --force-recreate frontend >/dev/null 2>&1; then
+          printf 'basemap in place; the frontend now serves it' > "$work/result"
+        else
+          status="failed"
+          error="the basemap was uploaded but the frontend did not come back"
+        fi
+      else
+        status="failed"
+        error="the basemap sync failed: $(tail -n 3 "$work/sync.log" | tr '\n' ' ')"
       fi
       ;;
     apply-settings)
@@ -3608,6 +3961,7 @@ main() {
       esac ;;
     monitor)        cmd_monitor "$@" ;;
     backup)         cmd_backup "$@" ;;
+    tiles)          cmd_tiles "$@" ;;
     ssl)            cmd_ssl "$@" ;;
     secrets)        cmd_secrets "$@" ;;
     codeartifact-login) cmd_codeartifact_login "$@" ;;
