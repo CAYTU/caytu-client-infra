@@ -501,10 +501,16 @@ tiles_build_local() {
   local out=$1 bbox=$2
   require_cmd curl; require_cmd tar
   local cli="${TMPDIR:-/tmp}/pmtiles"
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64)  arch=x86_64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) err "no go-pmtiles build for $(uname -m)"; return 1 ;;
+  esac
   if [[ ! -x "$cli" ]]; then
-    info "fetching go-pmtiles $TILES_PMTILES_VERSION"
+    info "fetching go-pmtiles $TILES_PMTILES_VERSION ($arch)"
     curl -fsSL -o "$cli.tgz" \
-      "https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_x86_64.tar.gz" || return 1
+      "https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_${arch}.tar.gz" || return 1
     tar xzf "$cli.tgz" -C "$(dirname "$cli")" pmtiles && rm -f "$cli.tgz"
   fi
   local build=""
@@ -628,8 +634,17 @@ tiles_sync() {
       set -e
       cd /tmp
       if [ ! -x /tmp/pmtiles ]; then
+        # Resolved on the TARGET, not on the operator's machine: an x86 laptop
+        # deploying to a Graviton host would otherwise send it a binary its CPU
+        # cannot run, which fails as \"cannot execute binary file\" and reads
+        # like a corrupt download.
+        case \"\$(uname -m)\" in
+          x86_64|amd64)  arch=x86_64 ;;
+          aarch64|arm64) arch=arm64 ;;
+          *) echo \"no go-pmtiles build for \$(uname -m)\" >&2; exit 1 ;;
+        esac
         curl -fsSL -o /tmp/pmtiles.tgz \
-          'https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_x86_64.tar.gz'
+          \"https://github.com/protomaps/go-pmtiles/releases/download/v$TILES_PMTILES_VERSION/go-pmtiles_${TILES_PMTILES_VERSION}_Linux_\$arch.tar.gz\"
         tar xzf /tmp/pmtiles.tgz -C /tmp pmtiles
         rm -f /tmp/pmtiles.tgz
       fi
