@@ -753,27 +753,33 @@ run_command() {
       # never synced has no basemap and quietly falls back to sheets that are
       # not licensed for commercial use.
       #
-      # The pod does the work, not this agent: there is no host to build on
-      # here, and pulling the archive through the agent only to push it back
-      # into the cluster moves a few hundred megabytes for no reason. So
-      # `params.from` is effectively required on a cluster — it names an
-      # archive the pod can reach — and the command says so rather than
-      # failing obscurely when it is missing.
+      # MinIO takes the file itself, and that is deliberate.
+      #
+      # The obvious route was a small backend script. It works in development
+      # and cannot work in production: that image is bundled and obfuscated
+      # into a single bytenode file, so there is no dist/ to run anything from
+      # and `node dist/scripts/...` fails with MODULE_NOT_FOUND. The MinIO
+      # image ships `mc`, so the object store fetches and stores in one step —
+      # no bytes through this agent, and no dependence on how the app happens
+      # to be packaged.
+      #
+      # `params.from` is therefore required here: mc fetches a URL, and a
+      # cluster has no host on which to build an archive. Said plainly rather
+      # than failing obscurely when it is missing.
       local from_url key_name pod
       from_url="$(printf '%s' "$params" | jq -r '.from // empty')"
       key_name="$(printf '%s' "$params" | jq -r '.key // "senegal.pmtiles"')"
 
       if [ -z "$from_url" ]; then
         status="failed"
-        error="a cluster needs params.from: a URL the backend pod can fetch the archive from"
-      elif ! pod="$(kubectl -n "$NAMESPACE" get pod -l app=backend             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || [ -z "$pod" ]; then
+        error="a cluster needs params.from: a URL the minio pod can fetch the archive from"
+      elif ! pod="$(kubectl -n "$NAMESPACE" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || [ -z "$pod" ]; then
         status="failed"
-        error="no backend pod to run the upload"
+        error="no minio pod to take the upload"
       elif ! result="$(kubectl -n "$NAMESPACE" exec "$pod" -- sh -c "
               set -e
-              curl -fSL --retry 3 -o /tmp/$key_name '$from_url'
-              node dist/scripts/upload-basemap.js --file /tmp/$key_name --force
-              rm -f /tmp/$key_name
+              mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
+              mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" '$from_url' tilesync/tiles/$key_name
             " 2>&1 | trim_logs)"; then
         status="failed"
         error="the basemap upload failed: $(printf '%s' "$result" | tail -n 2 | tr '\n' ' ')"

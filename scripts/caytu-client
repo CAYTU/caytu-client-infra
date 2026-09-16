@@ -447,8 +447,8 @@ tiles_is_cluster() {
 tiles_k8s_pod() {
   local ns; ns="$(_k8s_ns)"
   local pod
-  pod="$(kubectl -n "$ns" get pod -l app=backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
-  [[ -n "$pod" ]] || die "no backend pod found (app=backend) in namespace $ns"
+  pod="$(kubectl -n "$ns" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [[ -n "$pod" ]] || die "no minio pod found (app=minio) in namespace $ns"
   printf '%s\n' "$pod"
 }
 
@@ -469,15 +469,17 @@ tiles_sync_cluster() {
   local from=$1 key=$2 bbox=$3
   local ns; ns="$(_k8s_ns)"
   local pod; pod="$(tiles_k8s_pod)"
-  info "backend pod: $pod (namespace $ns)"
+  info "minio pod: $pod (namespace $ns)"
 
   if [[ -n "$from" ]]; then
-    info "pod is fetching $from"
+    info "minio pod is fetching $from"
+    # mc fetches and stores in one step, so the archive never lands on a disk
+    # twice and never passes through the backend — which in production is a
+    # bundled image with no dist/ to run anything from.
     kubectl -n "$ns" exec "$pod" -- sh -c "
       set -e
-      curl -fSL --retry 3 -o /tmp/$key '$from'
-      node dist/scripts/upload-basemap.js --file /tmp/$key --force
-      rm -f /tmp/$key
+      mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
+      mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" '$from' tilesync/tiles/$key
     " || die "in-cluster fetch/upload failed"
   else
     warn "no --from given: building locally and copying $key into the pod."
@@ -488,7 +490,8 @@ tiles_sync_cluster() {
     kubectl -n "$ns" cp "$tmp" "$pod:/tmp/$key" || die "kubectl cp failed"
     kubectl -n "$ns" exec "$pod" -- sh -c "
       set -e
-      node dist/scripts/upload-basemap.js --file /tmp/$key --force
+      mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
+      mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" /tmp/$key tilesync/tiles/$key
       rm -f /tmp/$key
     " || die "upload failed"
     rm -f "$tmp"
@@ -661,16 +664,47 @@ tiles_sync() {
     " || die "extract failed"
   fi
 
-  info "copying into the backend container"
-  compose cp "$remote_tmp" "backend:/tmp/$key" || die "docker compose cp failed"
+  # Through MinIO's own client, not the backend's.
+  #
+  # The obvious route was a small backend script, and it works in development.
+  # It cannot work in production: that image is bundled and obfuscated into a
+  # single bytenode `bundle.jsc`, so there is no `dist/scripts/` to run and
+  # `node dist/scripts/...` fails with MODULE_NOT_FOUND. Anything that shells
+  # into the backend to move a file is betting on a layout only the dev image
+  # has.
+  #
+  # The MinIO image ships `mc` at /usr/bin/mc, so the object store can take the
+  # file itself. One path that works on every target, and it depends on the
+  # storage rather than on how the app happens to be packaged today.
+  #
+  # Note the image is minimal — no grep, no awk — so this stays to sh builtins
+  # and mc.
+  info "copying into the minio container"
+  compose cp "$remote_tmp" "minio:/tmp/$key" || die "docker compose cp failed"
 
-  # The prod backend image runs compiled JS — no ts-node, no src/ — so this is
-  # dist/, not src/. tsconfig includes all of src, so the script is emitted.
-  info "uploading to MinIO"
-  compose exec -T backend node "dist/scripts/upload-basemap.js" --file "/tmp/$key" --force \
-    || die "upload failed"
+    # --attr matters more than it looks.
+    #
+    # Without a Cache-Control the browser caches the archive heuristically and
+    # revalidates it with If-None-Match. MinIO then correctly answers 304 Not
+    # Modified — which has no body and no Content-Length — and the PMTiles
+    # client throws "Server returned no content-length header ... Check that
+    # your storage backend supports HTTP Byte Serving". The storage is fine;
+    # the response is a 304. That is a genuinely misleading error to debug from.
+    #
+    # `immutable` stops the revalidation rather than merely delaying it, which
+    # is safe because a rebuilt archive should go to a NEW key (see the
+    # coverage note by PMTILES_BBOX) rather than replacing this one.
+  info "uploading to the tiles bucket"
+  if ! compose exec -T minio sh -c "
+    set -e
+    mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
+    mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" /tmp/$key tilesync/tiles/$key
+    rm -f /tmp/$key
+  "; then
+    compose exec -T minio rm -f "/tmp/$key" >/dev/null 2>&1 || true
+    die "upload failed"
+  fi
 
-  compose exec -T backend rm -f "/tmp/$key" >/dev/null 2>&1 || true
   tiles_host_run "rm -f '$remote_tmp'" || true
 
   tiles_report_url "$env_file" "$key" "$set_env"
