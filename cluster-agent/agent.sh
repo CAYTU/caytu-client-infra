@@ -892,7 +892,15 @@ run_command() {
   # the 128KB argument ceiling is the kernel's, so every process in the chain
   # hits it. printf is a shell builtin and execs nothing, which is what makes
   # writing the result out safe when the result is the thing that is too big.
-  local work; work="$(mktemp -d)"
+  # /dev/shm because the runtime mounts it writable even under a read-only root
+  # filesystem: without a writable directory the payload below is never built,
+  # the answer never leaves, and the console sits on a spinner until the command
+  # expires — which is what a missing /tmp mount did to every command here.
+  local work
+  if ! work="$(mktemp -d 2>/dev/null)" && ! work="$(mktemp -d -p /dev/shm 2>/dev/null)"; then
+    log "command ${type} ran, but there is nowhere writable to build its answer"
+    return 1
+  fi
   printf '%s' "$result" > "$work/result"
 
   jq -nc --rawfile r "$work/result" --arg s "$status" --arg e "$error" \

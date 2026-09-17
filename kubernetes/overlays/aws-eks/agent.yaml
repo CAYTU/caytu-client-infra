@@ -110,3 +110,15 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
+          # Every command's answer is written to a temp file before it is sent:
+          # the result of a logs command is far larger than the 128KB a single
+          # argument may carry. With the root filesystem read-only and nothing
+          # writable mounted, mktemp failed, the payload was never built, and
+          # every command ran but reported nothing — the console showed a
+          # spinner until the command expired.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
