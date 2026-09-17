@@ -389,12 +389,19 @@ echo "the basemap is streamed into minio, because mc cannot fetch a URL"
 CURL_LOG="$TMP/curl.log"; : > "$CURL_LOG"; CURL_RC=0
 curl() { echo "$*" >> "$CURL_LOG"; [ "$CURL_RC" -ne 0 ] && return "$CURL_RC"; printf 'PMTiles'; }
 MC_SIZE='{"size":254333329}'
+INGRESS_HOST="terangajoj.caytu.link"
+CURRENT_PMTILES=""
 kubectl() {
   echo "$*" >> "$KUBECTL_LOG"
   case "$*" in
-    *"get pod"*)        printf 'minio-0' ;;
-    *"mc --json stat"*) printf '%s' "$MC_SIZE" ;;
-    *"exec -i"*)        cat >/dev/null ;;
+    # The write carries the same name as the read, so match the read first and
+    # never let an empty value leave a failing status behind.
+    *"get secret"*PMTILES_URL_PUBLIC*)
+      if [ -n "$CURRENT_PMTILES" ]; then b64 "$CURRENT_PMTILES"; fi ;;
+    *"get ingress"*)      printf '%s' "$INGRESS_HOST" ;;
+    *"get pod"*)          printf 'minio-0' ;;
+    *"mc --json stat"*)   printf '%s' "$MC_SIZE" ;;
+    *"exec -i"*)          cat >/dev/null ;;
   esac
 }
 
@@ -410,6 +417,24 @@ grep -q "tiles/senegal-2026-09.pmtiles" "$KUBECTL_LOG" \
   && ok "under the name the operator chose" || bad "ignored the key"
 grep -q '"status":"done"' "$API_LOG" \
   && ok "and reports done" || bad "reported $(tail -1 "$API_LOG")"
+
+# The archive alone changes nothing: the map keeps drawing the licensed-for-
+# nothing fallback sheets until the frontend knows where the archive is. That
+# was a kubectl command an operator had to remember.
+grep -q "patch secret caytu-secrets" "$KUBECTL_LOG" \
+  && grep -q "https://terangajoj.caytu.link/minio-api/tiles/senegal-2026-09.pmtiles" "$KUBECTL_LOG" \
+  && ok "the frontend is pointed at the new archive" || bad "nothing was pointed at it"
+grep -q "rollout restart deployment/frontend" "$KUBECTL_LOG" \
+  && ok "and rolled so it reads it" || bad "left the frontend on the old value"
+
+# Same archive as last time: rolling the frontend would be a restart for nothing.
+: > "$KUBECTL_LOG"; : > "$API_LOG"
+CURRENT_PMTILES="https://terangajoj.caytu.link/minio-api/tiles/senegal-2026-09.pmtiles"
+run_command cmd-1b sync-basemap '{"from":"https://example.test/senegal.pmtiles","key":"senegal-2026-09.pmtiles"}'
+grep -q "rollout restart deployment/frontend" "$KUBECTL_LOG" \
+  && bad "restarted the frontend for an unchanged value" \
+  || ok "an unchanged archive rolls nothing"
+CURRENT_PMTILES=""
 
 # A download that never starts must not read as a sync that worked.
 : > "$KUBECTL_LOG"; : > "$API_LOG"; : > "$CURL_LOG"; CURL_RC=1

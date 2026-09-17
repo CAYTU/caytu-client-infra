@@ -88,20 +88,33 @@ spec:
           resources:
             requests: { cpu: "250m", memory: "512Mi" }
             limits:   { cpu: "2",    memory: "2Gi"   }
+          # timeoutSeconds is spelled out on every probe below. Left unset it
+          # defaults to 1, and a one-second budget is what restarted the backend
+          # fleet repeatedly: /health awaits Redis, a CPU-heavy A2UI refresh
+          # delayed the reply past 1s, and the kubelet killed healthy pods. Each
+          # restart was a window of 502s at the ALB.
+          #
+          # Liveness and startup ask /health/live, which is static and answers
+          # without touching Redis or Mongo. Readiness keeps the dependency-aware
+          # /health: a pod that cannot reach Redis should leave the load balancer
+          # pool, but it should not be destroyed and recreated.
           startupProbe:
-            httpGet: { path: /health, port: 5000 }
+            httpGet: { path: /health/live, port: 5000 }
             failureThreshold: 30
             periodSeconds: 5
+            timeoutSeconds: 5
           readinessProbe:
             httpGet: { path: /health, port: 5000 }
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+            timeoutSeconds: 5
           livenessProbe:
-            httpGet: { path: /health, port: 5000 }
+            httpGet: { path: /health/live, port: 5000 }
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 5
+            timeoutSeconds: 5
           # Give in-flight requests time to drain before SIGKILL
           lifecycle:
             preStop:

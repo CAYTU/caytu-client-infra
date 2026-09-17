@@ -798,7 +798,27 @@ run_command() {
         status="failed"
         error="the archive arrived truncated (${size:-0} bytes): check the URL is still valid"
       else
-        result="basemap in place from $from_url"
+        # The archive is in place, and the map still draws Esri's sheets until
+        # the frontend knows where it is. That last step was a kubectl command
+        # an operator had to remember, so the agent does it: the URL is this
+        # deployment's own ingress, which is where the browser reaches MinIO.
+        local public_url current base
+        base="$(ingress_url)"
+        public_url="${base}/minio-api/tiles/$key_name"
+        current="$(kubectl -n "$NAMESPACE" get secret "$SECRET_NAME" \
+          -o jsonpath='{.data.PMTILES_URL_PUBLIC}' 2>/dev/null | base64 -d 2>/dev/null || true)"
+        if [[ -z "$base" ]]; then
+          result="basemap in place from $from_url, but this deployment has no ingress to serve it from"
+        elif [[ "$current" == "$public_url" ]]; then
+          # Same archive name as last time: the frontend already points here and
+          # rolling it would be a restart for nothing.
+          result="basemap in place; the map already points at $key_name"
+        elif secret_put PMTILES_URL_PUBLIC "$public_url" \
+             && kubectl -n "$NAMESPACE" rollout restart deployment/frontend >/dev/null 2>&1; then
+          result="basemap in place and the map now draws from $key_name"
+        else
+          result="basemap in place from $from_url, but the frontend could not be pointed at it"
+        fi
       fi
       ;;
 
