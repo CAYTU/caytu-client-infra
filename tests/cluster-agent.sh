@@ -29,6 +29,8 @@ eval "$(sed -n '/^ingress_url()/,/^}/p'     cluster-agent/agent.sh)"
 eval "$(sed -n '/^balancer_url()/,/^}/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^heartbeat()/,/^}/p'       cluster-agent/agent.sh)"
 eval "$(sed -n '/^CLIENT_WORKLOADS=/p'      cluster-agent/agent.sh)"
+eval "$(sed -n '/^restart_client_workloads()/,/^}/p' cluster-agent/agent.sh)"
+eval "$(sed -n '/^CREDENTIAL_SECRET=/p'    cluster-agent/agent.sh)"
 eval "$(sed -n '/^running_version()/,/^}/p'  cluster-agent/agent.sh)"
 eval "$(sed -n '/^workload_trouble()/,/^}/p' cluster-agent/agent.sh)"
 eval "$(sed -n '/^update_release()/,/^}/p'   cluster-agent/agent.sh)"
@@ -302,6 +304,10 @@ kubectl() {
   case "$*" in
     *CAYTU_INSTANCE_ID*) printf 'abc123' | base64 ;;
     *CAYTU_METERING_TOKEN*) printf 'tok-123' | base64 ;;
+    # The org id came after the other two. A stack that already holds all three
+    # is the only one left alone: one still missing it keeps the backend's
+    # licence auto-provisioning off, so that write is worth the restart.
+    *CAYTU_ORGANIZATION_ID*) printf 'org123' | base64 ;;
   esac
 }
 publish_platform_credentials
@@ -374,6 +380,57 @@ fi
 API_OUT=''
 take_a_shard_of_our_own
 grep -q "patch secret" "$KUBECTL_LOG" && bad "wrote an empty shard" || ok "no shard on the record writes nothing"
+
+echo
+echo "the basemap is streamed into minio, because mc cannot fetch a URL"
+# mc's SOURCE is a local path or an alias, never a URL: `mc cp <url> …` read the
+# URL as a missing file and every cluster sync failed. The agent curls it here
+# and pipes it in there, so nothing lands on a disk on the way.
+CURL_LOG="$TMP/curl.log"; : > "$CURL_LOG"; CURL_RC=0
+curl() { echo "$*" >> "$CURL_LOG"; [ "$CURL_RC" -ne 0 ] && return "$CURL_RC"; printf 'PMTiles'; }
+MC_SIZE='{"size":254333329}'
+kubectl() {
+  echo "$*" >> "$KUBECTL_LOG"
+  case "$*" in
+    *"get pod"*)        printf 'minio-0' ;;
+    *"mc --json stat"*) printf '%s' "$MC_SIZE" ;;
+    *"exec -i"*)        cat >/dev/null ;;
+  esac
+}
+
+: > "$KUBECTL_LOG"; : > "$API_LOG"
+run_command cmd-1 sync-basemap '{"from":"https://example.test/senegal.pmtiles","key":"senegal-2026-09.pmtiles"}'
+grep -q "https://example.test/senegal.pmtiles" "$CURL_LOG" \
+  && ok "the agent fetches the archive" || bad "never fetched"
+grep -q "mc pipe" "$KUBECTL_LOG" \
+  && ok "and writes it from stdin" || bad "no mc pipe"
+grep -q "mc cp" "$KUBECTL_LOG" \
+  && bad "still asks mc to fetch the URL" || ok "never asks mc to fetch a URL"
+grep -q "tiles/senegal-2026-09.pmtiles" "$KUBECTL_LOG" \
+  && ok "under the name the operator chose" || bad "ignored the key"
+grep -q '"status":"done"' "$API_LOG" \
+  && ok "and reports done" || bad "reported $(tail -1 "$API_LOG")"
+
+# A download that never starts must not read as a sync that worked.
+: > "$KUBECTL_LOG"; : > "$API_LOG"; : > "$CURL_LOG"; CURL_RC=1
+run_command cmd-2 sync-basemap '{"from":"https://example.test/gone.pmtiles"}'
+grep -q '"status":"failed"' "$API_LOG" \
+  && ok "a failed download is a failed command" || bad "a dead URL reported success"
+CURL_RC=0
+
+# Worse than none: the browser reads the archive by range request and would
+# draw a blank map from a stream that died halfway.
+: > "$KUBECTL_LOG"; : > "$API_LOG"; MC_SIZE='{"size":512}'
+run_command cmd-3 sync-basemap '{"from":"https://example.test/short.pmtiles"}'
+grep -q "truncated" "$API_LOG" \
+  && ok "a truncated archive is refused" || bad "kept a truncated archive"
+MC_SIZE='{"size":254333329}'
+
+# Said plainly rather than failing obscurely inside the pod.
+: > "$KUBECTL_LOG"; : > "$API_LOG"
+run_command cmd-4 sync-basemap '{}'
+grep -q "params.from" "$API_LOG" \
+  && ok "a cluster says it needs a URL" || bad "no URL went unexplained"
 
 echo
 echo "$P passed, $F failed"

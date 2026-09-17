@@ -753,15 +753,19 @@ run_command() {
       # never synced has no basemap and quietly falls back to sheets that are
       # not licensed for commercial use.
       #
-      # MinIO takes the file itself, and that is deliberate.
+      # The bytes are streamed: curl here, `mc pipe` in the MinIO pod.
       #
       # The obvious route was a small backend script. It works in development
       # and cannot work in production: that image is bundled and obfuscated
       # into a single bytenode file, so there is no dist/ to run anything from
-      # and `node dist/scripts/...` fails with MODULE_NOT_FOUND. The MinIO
-      # image ships `mc`, so the object store fetches and stores in one step —
-      # no bytes through this agent, and no dependence on how the app happens
-      # to be packaged.
+      # and `node dist/scripts/...` fails with MODULE_NOT_FOUND.
+      #
+      # The next attempt was `mc cp <url> alias/tiles/<key>`, so the object
+      # store would fetch it itself and no bytes would pass through here. mc
+      # cannot do that: its SOURCE is a local path or an alias, never a URL, so
+      # every cluster sync failed on a URL mc read as a missing file. curl
+      # fetches and `mc pipe` writes stdin to the object — nothing lands on a
+      # disk on the way, and neither end depends on how the app is packaged.
       #
       # `params.from` is therefore required here: mc fetches a URL, and a
       # cluster has no host on which to build an archive. Said plainly rather
@@ -776,13 +780,23 @@ run_command() {
       elif ! pod="$(kubectl -n "$NAMESPACE" get pod -l app=minio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || [ -z "$pod" ]; then
         status="failed"
         error="no minio pod to take the upload"
-      elif ! result="$(kubectl -n "$NAMESPACE" exec "$pod" -- sh -c "
+      elif ! result="$({ curl -fsSL --max-time 1800 "$from_url" \
+              | kubectl -n "$NAMESPACE" exec -i "$pod" -- sh -c "
               set -e
               mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
-              mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" '$from_url' tilesync/tiles/$key_name
-            " 2>&1 | trim_logs)"; then
+              mc pipe --attr \"Cache-Control=public,max-age=604800,immutable\" tilesync/tiles/$key_name
+            "; } 2>&1 | trim_logs)"; then
         status="failed"
         error="the basemap upload failed: $(printf '%s' "$result" | tail -n 2 | tr '\n' ' ')"
+      # A stream that dies mid-transfer still leaves an object behind, and a
+      # short one is worse than none: the browser reads the archive by range
+      # request and would draw a blank map from it. The real one is ~243 MB.
+      elif size="$(kubectl -n "$NAMESPACE" exec "$pod" -- sh -c "
+              mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
+              mc --json stat tilesync/tiles/$key_name
+            " 2>/dev/null | jq -r '.size // 0')" && [ "${size:-0}" -lt 1000000 ]; then
+        status="failed"
+        error="the archive arrived truncated (${size:-0} bytes): check the URL is still valid"
       else
         result="basemap in place from $from_url"
       fi

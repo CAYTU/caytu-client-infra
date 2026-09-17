@@ -472,14 +472,16 @@ tiles_sync_cluster() {
   info "minio pod: $pod (namespace $ns)"
 
   if [[ -n "$from" ]]; then
-    info "minio pod is fetching $from"
-    # mc fetches and stores in one step, so the archive never lands on a disk
-    # twice and never passes through the backend — which in production is a
-    # bundled image with no dist/ to run anything from.
-    kubectl -n "$ns" exec "$pod" -- sh -c "
+    info "streaming $from into the minio pod"
+    # curl here, `mc pipe` there. mc cannot fetch a URL — its SOURCE is a local
+    # path or an alias — so `mc cp <url> …` read the URL as a missing file and
+    # every sync with --from failed. Streamed, the archive still never lands on
+    # a disk on the way, and it never touches the backend, which in production
+    # is a bundled image with no dist/ to run anything from.
+    curl -fSL --retry 3 "$from" | kubectl -n "$ns" exec -i "$pod" -- sh -c "
       set -e
       mc alias set tilesync \"http://127.0.0.1:9000\" \"\$MINIO_ROOT_USER\" \"\$MINIO_ROOT_PASSWORD\" >/dev/null
-      mc cp --attr \"Cache-Control=public,max-age=604800,immutable\" '$from' tilesync/tiles/$key
+      mc pipe --attr \"Cache-Control=public,max-age=604800,immutable\" tilesync/tiles/$key
     " || die "in-cluster fetch/upload failed"
   else
     warn "no --from given: building locally and copying $key into the pod."
