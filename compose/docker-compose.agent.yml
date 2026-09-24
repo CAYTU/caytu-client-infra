@@ -45,15 +45,20 @@ services:
       - ${CAYTU_INFRA_REPO:-..}:${CAYTU_INFRA_REPO:-/repo}
       # The host's docker, because that is what it provisions onto.
       - /var/run/docker.sock:/var/run/docker.sock
-      # The host's registry login. The pull is started in here, so the credential
-      # has to be in here, but this container has no aws to fetch one: `caytu-client
-      # agent up` and the systemd timer keep the file at this path fresh.
+      # The registry login. The pull is started in here, so the credential has to
+      # be in here, and this container has no aws to fetch one — it trades its
+      # enrolment token for a password instead, which is why this is writable.
+      #
+      # It used to be read-only, with `caytu-client agent up` priming it from
+      # the host. An ECR password lasts twelve hours and nothing renewed it, so
+      # every pull after that failed until somebody re-ran that command as root.
+      # This is the agent's own directory, not a user's ~/.docker.
       #
       # /var/lib/caytu-client/.docker is a fixed path — no user's $HOME. It used
       # to default to /home/ubuntu/.docker, which broke on every host without
       # an `ubuntu` user (on-prem boxes, NVIDIA Spark, anything a customer
       # builds by hand). Overridable with CAYTU_DOCKER_CONFIG.
-      - ${CAYTU_DOCKER_CONFIG:-/var/lib/caytu-client/.docker}:/root/.docker:ro
+      - ${CAYTU_DOCKER_CONFIG:-/var/lib/caytu-client/.docker}:/root/.docker
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

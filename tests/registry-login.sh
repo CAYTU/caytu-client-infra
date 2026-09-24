@@ -24,9 +24,33 @@ login = s.find("cat > /usr/local/bin/caytu-ecr-login")
 sys.exit(0 if guard == -1 or login < guard else 1)
 PY
 
-has "CAYTU_DOCKER_CONFIG=/home/" "the agent is pointed at the deploy user's docker config"
-hasnt 'CAYTU_DOCKER_CONFIG=/home/ubuntu/.docker"' "and not at a home that may not exist"
+# One directory, or the timer refreshes a login nobody mounts. It named the
+# deploy user's home while the timer wrote to /var/lib/caytu-client/.docker, so
+# the agent's copy went stale twelve hours after `agent up` primed it.
+hasnt 'CAYTU_DOCKER_CONFIG=/home/' "the agent is not pointed at a user's home"
+has 'CAYTU_DOCKER_CONFIG=\${docker_cfg' "it is pointed at the directory the timer refreshes"
 has "registry-credentials" "it can ask the platform for a password"
+
+echo
+echo "the agent can keep its own login fresh"
+# An ECR password lasts twelve hours. Read-only, the container could not renew
+# it and every pull after that failed until somebody re-ran `agent up` as root.
+grep -q ':/root/.docker:ro' compose/docker-compose.agent.yml \
+  && bad "the agent's docker config is mounted read-only" \
+  || ok "the agent's docker config is writable"
+
+# IMAGE_REGISTRY is written when an instance is picked up, which is after the
+# agent starts: a fresh host logged in to nothing and its first pull failed.
+python3 - <<'PYCHECK' && ok "agent up primes a login before any instance exists" || bad "agent up primes a login before any instance exists"
+import sys
+s = open("scripts/caytu-client").read()
+start = s.find("cmd_agent()")
+if start == -1:
+    sys.exit(1)
+block = s[start:s.find("\n}\n", start)]
+up = block[block.find("    up)"):block.find("    down)")]
+sys.exit(0 if "caytu_registry" in up and "ecr_login_if_needed" in up else 1)
+PYCHECK
 
 bash -n scripts/bootstrap.sh 2>/dev/null && ok "bootstrap still parses" || bad "bootstrap still parses"
 

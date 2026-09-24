@@ -344,13 +344,12 @@ ECRTIMER
     CAYTU_INSTANCE_ID="$CAYTU_INSTANCE_ID" \
     CAYTU_PLATFORM_URL="${CAYTU_PLATFORM_URL:-}" "$@"; }
 
-  # The agent container mounts this to get the registry login, and its default
-  # is /home/ubuntu, which only exists on a cloud image. On any other host the
-  # mount resolves to a directory docker invents, so the pull it starts has no
-  # credentials however well the host itself is logged in.
-  mkdir -p "/home/$DEPLOY_USER/.docker"
-  chown "$DEPLOY_USER:$DEPLOY_USER" "/home/$DEPLOY_USER/.docker"
-  env_line="CAYTU_DOCKER_CONFIG=/home/$DEPLOY_USER/.docker"
+  # The one directory the timer above refreshes, which is also what the agent's
+  # compose file defaults to. This used to name the deploy user's home instead:
+  # `agent up` primed that copy once, nothing renewed it, and twelve hours later
+  # every pull failed with "no basic auth credentials" while the timer kept a
+  # perfectly fresh login in a directory nobody mounted.
+  env_line="CAYTU_DOCKER_CONFIG=${docker_cfg:-/var/lib/caytu-client/.docker}"
 
   if run_as caytu-client --target onprem init >/dev/null 2>&1 \
      && run_as caytu-client --target onprem enroll-self; then

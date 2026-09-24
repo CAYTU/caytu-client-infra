@@ -2140,8 +2140,10 @@ ecr_login_if_needed() {
   # Say why. The pull that follows always blames an expired token, even when
   # there were no credentials at all.
   warn "could not log in to $registry, so the pull will be denied:"
-  warn "  no AWS identity on this host, and the platform did not issue one"
-  warn "  Check this host is enrolled, or set AWS_PROFILE to one that can read ECR."
+  warn "  no AWS identity here, and the platform's credential could not be used."
+  warn "  On a host: check it is enrolled, or set AWS_PROFILE to one that can read ECR."
+  warn "  In the agent container: its /root/.docker is the host's, so run"
+  warn "  'caytu-client -t $TARGET agent up' as root on the host to refresh the login."
   return 0
 }
 
@@ -3502,11 +3504,14 @@ cmd_agent() {
       # attempt errors silently and the pull then blames a missing token.
       # DOCKER_CONFIG scopes the login and any test pull to this directory
       # only, so we do not touch the caller's own $HOME/.docker.
+      # Falling back to our own registry matters on a fresh host: IMAGE_REGISTRY
+      # is written when the agent picks an instance up, which is after this
+      # runs, so the first pull of a brand-new site went out with an empty
+      # config and failed with "no basic auth credentials".
       local registry
       registry="$(env_get "$env_file" IMAGE_REGISTRY 2>/dev/null || true)"
-      if [[ -n "$registry" ]]; then
-        DOCKER_CONFIG="$docker_cfg" ecr_login_if_needed "$registry" || true
-      fi
+      [[ -n "$registry" ]] || registry="$(caytu_registry)"
+      DOCKER_CONFIG="$docker_cfg" ecr_login_if_needed "$registry" || true
 
       # Resolved on the host, because inside the container `primary_ip` would
       # see the docker bridge (172.18.0.x) instead of the NIC clients hit.
