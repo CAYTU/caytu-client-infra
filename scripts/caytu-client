@@ -3005,6 +3005,23 @@ command_execute() {
 
 # Every instance this host has provisioned, newest last, space separated.
 #
+# Which deployment this host may take, out of what the platform is offering.
+#
+# Its own first: a deployment names the host that runs it, and one host runs one
+# deployment. A deployment naming nobody is taken only by a host that runs
+# nothing yet, which is how a single-host organization keeps working and how an
+# organization that grew a second machine stops having its first host collect
+# everything within thirty seconds of it being created.
+claimable_instance() {
+  local body=$1 host_id=$2 mine=$3
+  printf '%s' "$body" | jq -r --arg host "$host_id" --arg mine "$mine" '
+    [ .instances[]?
+      | select(.status == "provisioning" and (.provisioningPercent // 0) == 0)
+      | select((($host != "") and ((.hostId // "") == $host))
+               or (((.hostId // "") == "") and ($mine == "")))
+    ] | .[0].id // empty'
+}
+
 # The agent used to poll only CAYTU_INSTANCE_ID, which made it the agent for one
 # instance rather than for the machine. Two consequences, both seen in the wild:
 # a purge queued against an instance already torn down was never claimed by
@@ -3223,7 +3240,7 @@ instance_agent() {
   # interval, so a freshly started agent picks up waiting work immediately.
   local since_sweep=$interval
   # So the empty-list warning is said once rather than every sweep.
-  local reported_empty=0
+  local reported_empty=0 reported_foreign=0
   local fingerprint; fingerprint="$(script_fingerprint)"
 
   while true; do
@@ -3253,10 +3270,22 @@ instance_agent() {
         -H "Authorization: Bearer $token" 2>/dev/null)"; then
 
         # Anything past 0% has been claimed by someone; leave it alone.
-        local pending
-        pending="$(printf '%s' "$body" | jq -r '
+        #
+        # And only what belongs here. Every agent in the organization used to
+        # take the first deployment waiting, so a second machine, enrolled for a
+        # second site, never got it: the first host was already polling and had
+        # it within thirty seconds. A deployment now names its host, and one
+        # that names nobody is only taken by a host that runs nothing yet —
+        # which keeps a single-host organization working exactly as before.
+        local host_id mine
+        host_id="$(env_get "$env_file" CAYTU_HOST_ID || true)"
+        mine="$(env_get "$env_file" CAYTU_INSTANCE_ID || true)"
+
+        local waiting pending
+        waiting="$(printf '%s' "$body" | jq -r '
           [.instances[]? | select(.status == "provisioning" and (.provisioningPercent // 0) == 0)]
-          | .[0].id // empty')"
+          | length')"
+        pending="$(claimable_instance "$body" "$host_id" "$mine")"
 
         # Said once, and only when there is genuinely nothing. Silence here is
         # indistinguishable from a broken agent, which is exactly how an hour
@@ -3267,6 +3296,14 @@ instance_agent() {
           warn "no instances in organization ${org:-unknown}. If one is waiting, this host is enrolled somewhere else: re-enroll it from the console."
         fi
         [[ "$total" -gt 0 ]] && reported_empty=0
+
+        # Waiting, but for another machine. Silence here reads as a broken
+        # agent, and the operator is usually looking at the wrong host's log.
+        if [[ -z "$pending" && "$waiting" -gt 0 && "$reported_foreign" -eq 0 ]]; then
+          reported_foreign=1
+          warn "${waiting} deployment(s) waiting, none for this host. A deployment names the host that runs it, and a host runs one at a time."
+        fi
+        [[ -n "$pending" || "$waiting" -eq 0 ]] && reported_foreign=0
 
         if [[ -n "$pending" ]]; then
           info "picking up instance $pending"
