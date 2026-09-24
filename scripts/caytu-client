@@ -1621,10 +1621,11 @@ not_enrolled() {
 
 # The address that actually carries traffic off this box, not loopback.
 #
-# CAYTU_HOST_IP is the escape hatch for the agent container: `ip route` and
-# `hostname -I` inside it see the docker bridge (172.18.0.x), which is not
-# where clients reach the deployment. `cmd_agent up` computes the real address
-# on the host and passes it in.
+# CAYTU_HOST_IP is an operator's override, for a host whose outbound route is
+# not the address clients reach it on. The agent container used to depend on it
+# — on the docker bridge it would otherwise report 172.18.0.x — but it now
+# shares the host's network namespace and resolves this itself, which is what
+# keeps the answer true after a DHCP lease moves.
 primary_ip() {
   [[ -n "${CAYTU_HOST_IP:-}" ]] && { printf '%s' "$CAYTU_HOST_IP"; return 0; }
   local ip
@@ -3513,12 +3514,14 @@ cmd_agent() {
       [[ -n "$registry" ]] || registry="$(caytu_registry)"
       DOCKER_CONFIG="$docker_cfg" ecr_login_if_needed "$registry" || true
 
-      # Resolved on the host, because inside the container `primary_ip` would
-      # see the docker bridge (172.18.0.x) instead of the NIC clients hit.
-      local host_ip; host_ip="$(primary_ip)"
-
+      # No host address passed in: the agent container shares the host's network
+      # namespace, so it resolves the real one on every heartbeat. Passing it
+      # here froze it at start, and a DHCP lease that moved afterwards left the
+      # platform with an address nothing answered on. CAYTU_HOST_IP in
+      # .env.<target> still overrides, for a host whose outbound route is not
+      # the address clients use.
       ( cd "$COMPOSE_DIR" && CAYTU_TARGET="$TARGET" CAYTU_INFRA_REPO="$REPO_ROOT" \
-          CAYTU_DOCKER_CONFIG="$docker_cfg" CAYTU_HOST_IP="$host_ip" \
+          CAYTU_DOCKER_CONFIG="$docker_cfg" \
           docker compose --env-file "$env_file" "${files[@]}" up -d )
       ok "provisioner agent running; new instances for this org are picked up automatically"
       ;;

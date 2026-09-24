@@ -18,6 +18,15 @@ services:
   provisioner-agent:
     image: docker:${DOCKER_CLI_VERSION:-27-cli}
     restart: unless-stopped
+    # The host's network and hostname, because this container reports both to
+    # the platform. On the bridge, `ip route` here answers 172.18.0.x and
+    # `hostname` answers the container id, so the address had to be resolved on
+    # the host and passed in — and it then stayed frozen at whatever it was when
+    # the container started. A DHCP lease moving underneath it left the console
+    # pointing at an address nothing answered on, beside a live heartbeat.
+    # Nothing is published from here, so there is no port to collide.
+    network_mode: host
+    uts: host
     # Mounted at its host path, not /repo. The daemon doing the mounting is
     # the host's, so a service bind like ./nginx/nginx.conf resolves out
     # there: a path that exists only in here becomes a directory the host
@@ -35,9 +44,10 @@ services:
       - AGENT_INTERVAL=${AGENT_INTERVAL:-30}
       # Someone is watching a spinner when this one matters, so it ticks faster.
       - AGENT_COMMAND_INTERVAL=${AGENT_COMMAND_INTERVAL:-3}
-      # Resolved on the host by `caytu-client agent up`. Without it, primary_ip
-      # inside here returns the docker bridge address and the platform is told
-      # the deployment lives on 172.18.0.x.
+      # An override for the address reported to the platform, and empty unless
+      # somebody sets it in .env.<target>. With the host's network above, the
+      # agent resolves the real one itself; this stays for the host whose
+      # outbound route is not the address clients reach it on.
       - CAYTU_HOST_IP=${CAYTU_HOST_IP:-}
     volumes:
       # The repo, because the agent runs compose from it. Same path both
