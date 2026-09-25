@@ -313,6 +313,13 @@ cmd_install() {
   mkdir -p "$(dirname "$dest")"
   ln -sf "$SCRIPT_PATH" "$dest"
   ok "linked $dest -> $SCRIPT_PATH"
+  # A bootstrapped host already has the client in /usr/local/bin. ~/.local/bin
+  # comes first in a login shell, so this link is what decides which copy runs;
+  # when it points at a tree that later moves, the command reads as missing.
+  local system="/usr/local/bin/caytu-client"
+  if [[ -e "$system" && "$(readlink -f "$system")" != "$SCRIPT_PATH" ]]; then
+    warn "$system points at $(readlink -f "$system"); $dest now shadows it"
+  fi
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) warn "add \$HOME/.local/bin to your PATH" ;;
@@ -655,7 +662,13 @@ tiles_sync() {
       fi
       build=''
       for i in \$(seq 0 60); do
-        d=\$(date -u -d \"-\$i day\" +%Y%m%d)
+        # GNU first, then busybox's epoch form: an Alpine host (and the agent
+        # container itself) rejects \"-1 day\" outright, so the search found no
+        # build at all and every on-prem site came up with no basemap.
+        d=\$(date -u -d \"-\$i day\" +%Y%m%d 2>/dev/null) \
+          || d=\$(date -u -d @\$(( \$(date -u +%s) - i * 86400 )) +%Y%m%d 2>/dev/null) \
+          || d=''
+        [ -n \"\$d\" ] || continue
         if [ \"\$(curl -s -o /dev/null -w '%{http_code}' -r 0-100 https://build.protomaps.com/\$d.pmtiles)\" = '206' ]; then
           build=\$d; break
         fi
@@ -2577,18 +2590,10 @@ instance_provision() {
     # The frontend is recreated afterwards because the URL is written to the
     # env file here, after `up` already started it — the same reason
     # install-license recreates the backend.
-    if [[ "$(env_get "$env_file" PMTILES_AUTO_SYNC || true)" != "0" ]]; then
-      report_step "$env_file" "$id" "basemap" "putting the basemap in object storage"
-      if tiles_sync --set-env >/dev/null 2>&1; then
-        compose up -d --no-deps --force-recreate frontend >/dev/null 2>&1 || true
-        ok "basemap in place"
-      else
-        report_step "$env_file" "$id" "basemap" \
-          "no basemap: the map falls back to Esri, which is not licensed for commercial use" false
-        warn "basemap sync failed — run: caytu-client -t $TARGET tiles sync"
-      fi
-    fi
-
+    # Reported before the basemap, and this order is the whole point: the
+    # stack is up and the deployment is usable here. With the report after it,
+    # a site sat at "Stack running" for three hours while it served perfectly,
+    # because an optional quarter-gigabyte download had not finished.
     # Deliberately not claiming adminProvisioned here. A stack that starts is
     # not proof the named account exists: the client only bootstraps an initial
     # superAdmin when the deployment has no users at all, so re-provisioning a
@@ -2604,6 +2609,24 @@ instance_provision() {
          + (if $d == "" then {} else {directUrl:$d} end)
          + (if $s == "" then {lastError:"the secret store is not seeded, so this deployment cannot be licensed"} else {} end)')"
     ok "instance $id reported running"
+
+    # Its own process, and bounded. In-process, a `die` inside the sync took
+    # the agent down with it — after which the record sits above 0%, so no
+    # agent picks it up again — and nothing bounded a stalled download.
+    if [[ "$(env_get "$env_file" PMTILES_AUTO_SYNC || true)" != "0" ]]; then
+      report_step "$env_file" "$id" "basemap" "putting the basemap in object storage"
+      local -a sync_cmd=("$SCRIPT_PATH" -t "$TARGET" tiles sync --set-env)
+      command -v timeout >/dev/null 2>&1 \
+        && sync_cmd=(timeout "${PMTILES_SYNC_TIMEOUT:-1200}" "${sync_cmd[@]}")
+      if "${sync_cmd[@]}" >/dev/null 2>&1; then
+        compose up -d --no-deps --force-recreate frontend >/dev/null 2>&1 || true
+        ok "basemap in place"
+      else
+        report_step "$env_file" "$id" "basemap" \
+          "no basemap: the map falls back to Esri, which is not licensed for commercial use" false
+        warn "basemap sync failed or timed out — run: caytu-client -t $TARGET tiles sync"
+      fi
+    fi
   else
     local why; why="$(compose_failure_reason "$up_log")"
     rm -f "$up_log"

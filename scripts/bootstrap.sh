@@ -33,6 +33,29 @@ if [[ $EUID -ne 0 ]]; then
   log "must be run as root (or via sudo)"; exit 1
 fi
 
+# Put caytu-client on PATH, and clear anything that would shadow it.
+#
+# The link goes in /usr/local/bin, but a login shell searches ~/.local/bin
+# first (Debian's .profile puts it there), and `caytu-client install` leaves a
+# symlink in exactly that spot. Let an earlier run's link point at a deploy dir
+# that is gone and the shell reports the command as missing while
+# /usr/local/bin/caytu-client sits there working. The bootstrap never notices:
+# it calls the client through sudo, whose secure_path skips ~/.local/bin.
+link_client() {
+  local target="$DEPLOY_DIR/scripts/caytu-client"
+  ln -sf "$target" /usr/local/bin/caytu-client
+
+  local home shadow
+  for home in /root "$(getent passwd "$DEPLOY_USER" | cut -d: -f6)"; do
+    shadow="$home/.local/bin/caytu-client"
+    [[ -n "$home" && -L "$shadow" ]] || continue
+    if [[ "$(readlink -f "$shadow")" != "$(readlink -f "$target")" ]]; then
+      ln -sf "$target" "$shadow"
+      log "repointed $shadow at $target"
+    fi
+  done
+}
+
 log "updating apt cache"
 apt-get update -y
 
@@ -164,7 +187,7 @@ ENVEOF
     if echo "$(cat "$tmp/agent.sha256")  $tmp/agent.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
       tar -xzf "$tmp/agent.tar.gz" -C "$DEPLOY_DIR"
       chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
-      ln -sf "$DEPLOY_DIR/scripts/caytu-client" /usr/local/bin/caytu-client
+      link_client
       log "agent installed from $CAYTU_AGENT_VERSION"
     else
       log "ERROR: the agent download did not match its checksum, refusing to run it"
@@ -416,7 +439,7 @@ else
     }
 
     chown -R "$DEPLOY_USER:$DEPLOY_USER" "$DEPLOY_DIR"
-    ln -sf "$DEPLOY_DIR/scripts/caytu-client" /usr/local/bin/caytu-client
+    link_client
     log "installed caytu-client"
   }
 
